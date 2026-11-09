@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto';
 
 import { reportPartnerCall } from '@vindu/grid-core';
 
-import { BLINDPAY_PARTNER_ID, type BlindPayConfig, type ResolvedConfig, resolveConfig } from './config';
+import { type BlindPayConfig, type ResolvedConfig, resolveConfig } from './config';
 import { BlindPayHttpError } from './errors';
 import { describePath } from './ids';
 import type { ListParams, Page } from './types';
@@ -77,7 +77,7 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
       : undefined;
     if (idempotencyKey !== undefined && !IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
       throw new BlindPayHttpError({
-        partner: BLINDPAY_PARTNER_ID, method: options.method, path: template, status: null,
+        partner: resolved.partnerId, method: options.method, path: template, status: null,
         code: 'invalid_idempotency_key', retryable: false,
       });
     }
@@ -90,13 +90,13 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
 
     const fail = (init: Omit<ConstructorParameters<typeof BlindPayHttpError>[0], 'partner' | 'method' | 'path'>) =>
       new BlindPayHttpError({
-        partner: BLINDPAY_PARTNER_ID, method: options.method, path: template,
+        partner: resolved.partnerId, method: options.method, path: template,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         ...init,
       });
     const report = (status: number | null, error?: string) => {
       const call = {
-        partner: BLINDPAY_PARTNER_ID, method: options.method, path: template, status,
+        partner: resolved.partnerId, method: options.method, path: template, status,
         durationMs: Math.max(0, resolved.now() - started),
         ...(Object.keys(ids).length > 0 ? { ids } : {}),
         ...(error === undefined ? {} : { error }),

@@ -163,6 +163,41 @@ describe('adapter', () => {
   });
 });
 
+describe('adapter partner id', () => {
+  it('uses partnerId in quotes, refs, events, errors and onCall reports', async () => {
+    const dev = devInstance();
+    const reports: unknown[] = [];
+    const { fetch } = mockFetch(dev.handler);
+    const adapter = createBlindPayAdapter(config(fetch, { now: () => NOW, onCall: (c) => reports.push(c) }), {
+      network: 'stellar_testnet', webhookSecret: SECRET, partnerId: 'blindpay-br',
+    });
+    expect(adapter.id).toBe('blindpay-br');
+    const { fq, funding, pq, payout } = await fundAndPayOut(adapter, '500', '100');
+    expect([fq.partner, pq.partner, funding.leg.partner, payout.partner]).toEqual(Array(4).fill('blindpay-br'));
+    expect((await adapter.readLeg(payout)).ref.partner).toBe('blindpay-br');
+    await expect(adapter.readLeg({ ...payout, partner: 'blindpay' })).rejects.toThrow(InvalidInputError);
+    expect(reports.every((r) => (r as { partner: string }).partner === 'blindpay-br')).toBe(true);
+    await expect(adapter.readLeg({ partner: 'blindpay-br', kind: 'payout', id: 'po_missing' })).rejects.toMatchObject({ partner: 'blindpay-br' });
+
+    const body = '{"webhook_event":"payout.update","id":"po_000000000001","status":"failed"}';
+    const ts = String(NOW / 1000);
+    const headers = {
+      'svix-id': 'msg_1', 'svix-timestamp': ts,
+      'svix-signature': `v1,${createHmac('sha256', WEBHOOK_KEY).update(`msg_1.${ts}.${body}`).digest('base64')}`,
+    };
+    expect((await adapter.parseWebhook(body, headers))?.ref.partner).toBe('blindpay-br');
+  });
+
+  it('defaults to blindpay, and refuses a malformed id or a client built for another id', () => {
+    const { fetch } = mockFetch([]);
+    expect(createBlindPayAdapter(config(fetch), { network: 'stellar' }).id).toBe('blindpay');
+    expect(() => createBlindPayAdapter(config(fetch), { network: 'stellar', partnerId: '' })).toThrow(InvalidConfigError);
+    expect(() => createBlindPayAdapter(config(fetch), { network: 'stellar', partnerId: 'a b' })).toThrow(InvalidConfigError);
+    const client = createBlindPayAdapter(config(fetch), { network: 'stellar' }).client;
+    expect(() => createBlindPayAdapter(config(fetch), { network: 'stellar', partnerId: 'other', client })).toThrow(/partnerId/);
+  });
+});
+
 describe('adapter webhook', () => {
   const sign = (body: string, ts: string, id = 'msg_000000000001') => ({
     'svix-id': id, 'svix-timestamp': ts,

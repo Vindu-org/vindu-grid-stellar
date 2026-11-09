@@ -12,7 +12,6 @@
  */
 import { InvalidInputError, isStellarAccountId } from '@vindu/grid-core';
 
-import { BLINDPAY_PARTNER_ID } from './config';
 import { BlindPayHttpError } from './errors';
 import { type BlindPayHttp, type Created, type IdempotencyOptions, create, get } from './http';
 import { assertId } from './ids';
@@ -47,7 +46,7 @@ export function stellarPayoutsApi(http: BlindPayHttp): StellarPayoutsApi {
       const xdr = res.data?.transaction_hash;
       if (typeof xdr !== 'string' || xdr === '') {
         throw new BlindPayHttpError({
-          partner: BLINDPAY_PARTNER_ID,
+          partner: http.config.partnerId,
           method: 'POST',
           path: '/v1/instances/{in_id}/payouts/stellar/authorize',
           status: 200,

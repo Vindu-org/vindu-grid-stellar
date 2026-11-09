@@ -1,6 +1,8 @@
 /**
- * What BlindPay offers through this adapter, as core capability data. Pass it
- * into your `CapabilityRegistry` under the partner id you route with.
+ * What BlindPay offers through this adapter, as core capability data. It is
+ * not keyed by partner id: put it in your `CapabilityRegistry` under the same
+ * id you give the adapter (`partnerId`, default `'blindpay'`), e.g.
+ * `{ [adapter.id]: BLINDPAY_CAPABILITIES }`.
  *
  * Stellar only, with external accounts: BlindPay's managed wallets do not
  * support Stellar, so each client registers its own Stellar account and a key

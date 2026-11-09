@@ -26,12 +26,19 @@ import {
 import { fromBlindPayAmount, toBlindPayAmount } from './amounts';
 import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
-import { BLINDPAY_PARTNER_ID, type BlindPayConfig } from './config';
+import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
 import type { SignedTransactionField } from './stellar-payout-flow';
 import type { StellarNetwork, StellarToken, Tracking } from './types';
 import { assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
 export interface BlindPayAdapterOptions {
+  /**
+   * The id this adapter answers to: `adapter.id`, `LegQuote.partner`,
+   * `LegRef.partner` on refs and events, and the partner in errors and
+   * `onCall` reports. Use the same id as the key of `BLINDPAY_CAPABILITIES`
+   * in your capability registry. Default {@link BLINDPAY_PARTNER_ID}.
+   */
+  readonly partnerId?: string;
   /** `stellar` in production, `stellar_testnet` on a development instance. */
   readonly network: StellarNetwork;
   /** `whsec_...`. Required for `parseWebhook`. */
@@ -47,7 +54,7 @@ export interface BlindPayAdapterOptions {
   readonly partnerFeeIdFor?: (leg: LegKind, spreadBps: number | undefined) => string | undefined;
   /** What goes in `signed_transaction`; UNCONFIRMED which one BlindPay expects. Default `signed_xdr`. */
   readonly signedTransactionField?: SignedTransactionField;
-  /** Reuse an existing client instead of building one from the config. */
+  /** Reuse an existing client instead of building one from the config. Its `partnerId` must match. */
   readonly client?: BlindPayClient;
 }
 
@@ -62,11 +69,15 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
     throw new InvalidConfigError('network must be stellar or stellar_testnet');
   }
   if (options.webhookToleranceSec !== undefined) assertWebhookTolerance(options.webhookToleranceSec);
-  const client = options.client ?? createBlindPayClient(config);
+  const partnerId = assertPartnerId(options.partnerId ?? config.partnerId ?? BLINDPAY_PARTNER_ID);
+  const client = options.client ?? createBlindPayClient({ ...config, partnerId });
+  if (client.http.config.partnerId !== partnerId) {
+    throw new InvalidConfigError('options.client was built with another partnerId');
+  }
   const now = config.now ?? Date.now;
   const coverFees = options.coverFees ?? false;
   const field = options.signedTransactionField ?? 'signed_xdr';
-  const ref = (kind: LegKind, id: string): LegRef => ({ partner: BLINDPAY_PARTNER_ID, kind, id });
+  const ref = (kind: LegKind, id: string): LegRef => ({ partner: partnerId, kind, id });
 
   const feeId = (leg: LegKind, spreadBps: number | undefined) => {
     const id = options.partnerFeeIdFor?.(leg, spreadBps);
@@ -77,7 +88,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   };
 
   return {
-    id: BLINDPAY_PARTNER_ID,
+    id: partnerId,
     client,
 
     async quoteFunding(input) {
@@ -95,7 +106,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         ...(input.allowedPayerTaxIds === undefined ? {} : { payer_rules: { pix_allowed_tax_ids: input.allowedPayerTaxIds } }),
         ...feeId('funding', input.spreadBps),
       });
-      return legQuote('funding', res.data, input.source.asset, input.targetAsset);
+      return legQuote(partnerId, 'funding', res.data, input.source.asset, input.targetAsset);
     },
 
     async createFunding(input) {
@@ -128,7 +139,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         token: token(input.source.asset),
         ...feeId('payout', undefined),
       });
-      return legQuote('payout', res.data, input.source.asset, input.targetAsset);
+      return legQuote(partnerId, 'payout', res.data, input.source.asset, input.targetAsset);
     },
 
     async preparePayout(input) {
@@ -152,6 +163,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
     },
 
     async readLeg(leg) {
+      if (leg.partner !== partnerId) throw new InvalidInputError(`Leg ${leg.id} belongs to ${leg.partner}, not ${partnerId}`);
       const resource = leg.kind === 'funding' ? await client.payins.get(leg.id) : await client.stellarPayouts.getPayout(leg.id);
       const txHash = hashOf(resource.tracking_transaction);
       return { ref: ref(leg.kind, resource.id), status: toLegStatus(resource.status), ...(txHash === undefined ? {} : { txHash }) };
@@ -210,6 +222,7 @@ function hashOf(tracking: Tracking | undefined): string | undefined {
 }
 
 function legQuote(
+  partner: string,
   kind: LegKind,
   q: { id: string; expires_at: number; sender_amount: number; receiver_amount: number },
   sourceAsset: Asset,
@@ -218,7 +231,7 @@ function legQuote(
   if (!Number.isSafeInteger(q.expires_at)) throw new InvalidInputError('Quote has no valid expires_at');
   return {
     id: q.id,
-    partner: BLINDPAY_PARTNER_ID,
+    partner,
     kind,
     expiresAt: new Date(q.expires_at).toISOString(),
     source: fromBlindPayAmount(q.sender_amount, sourceAsset),

@@ -6,7 +6,7 @@
 import { InvalidConfigError, type Logger, type OnPartnerCall, noopLogger } from '@vindu/grid-core';
 
 
-/** Partner id used in leg refs, errors and `onCall` reports. */
+/** Default partner id in leg refs, quotes, errors and `onCall` reports. Override with `partnerId`. */
 export const BLINDPAY_PARTNER_ID = 'blindpay';
 export const DEFAULT_BASE_URL = 'https://api.blindpay.com';
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -18,6 +18,11 @@ export interface BlindPayConfig {
   readonly apiKey: string;
   /** Instance id, `in_...`. */
   readonly instanceId: string;
+  /**
+   * Partner id in errors and `onCall` reports. Default {@link BLINDPAY_PARTNER_ID}.
+   * The adapter sets it to its own `partnerId` when it builds the client.
+   */
+  readonly partnerId?: string;
   /** Defaults to {@link DEFAULT_BASE_URL}. */
   readonly baseUrl?: string;
   /** Defaults to the global `fetch`. Inject a mock in tests. */
@@ -41,6 +46,7 @@ export interface BlindPayConfig {
 
 /** Validated config with defaults applied. The API key stays out of it on purpose. */
 export interface ResolvedConfig {
+  readonly partnerId: string;
   readonly instanceId: string;
   readonly baseUrl: string;
   readonly fetch: FetchLike;
@@ -52,6 +58,15 @@ export interface ResolvedConfig {
 }
 
 const INSTANCE_ID_RE = /^in_[A-Za-z0-9]+$/;
+const PARTNER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/** Throws {@link InvalidConfigError} unless `partnerId` is 1 to 64 letters, digits, `_`, `.` or `-`. */
+export function assertPartnerId(partnerId: unknown): string {
+  if (typeof partnerId !== 'string' || !PARTNER_ID_RE.test(partnerId)) {
+    throw new InvalidConfigError('partnerId must be 1 to 64 letters, digits, _, . or -');
+  }
+  return partnerId;
+}
 // Header-safe token: rejects whitespace and control characters without echoing the value.
 const API_KEY_RE = /^[\x21-\x7e]+$/;
 
@@ -63,6 +78,7 @@ export function resolveConfig(config: BlindPayConfig): { resolved: ResolvedConfi
   if (typeof config.instanceId !== 'string' || !INSTANCE_ID_RE.test(config.instanceId)) {
     throw new InvalidConfigError('instanceId must look like in_...');
   }
+  const partnerId = assertPartnerId(config.partnerId ?? BLINDPAY_PARTNER_ID);
   const baseUrl = parseBaseUrl(config.baseUrl ?? DEFAULT_BASE_URL);
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
@@ -75,6 +91,7 @@ export function resolveConfig(config: BlindPayConfig): { resolved: ResolvedConfi
   return {
     apiKey: config.apiKey,
     resolved: {
+      partnerId,
       instanceId: config.instanceId,
       baseUrl,
       fetch: fetchImpl,
