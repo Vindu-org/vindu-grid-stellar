@@ -73,7 +73,14 @@ export function decodePayment(xdr: string, networkPassphrase: string): DecodedPa
     destination: op.destination,
     amount: money(op.amount, asset),
     maxTime: maxTime > 0 ? maxTime : undefined,
-    memo: tx.memo.type === 'text' ? String(tx.memo.value) : undefined,
+    memo: textMemo(tx.memo.type, tx.memo.value),
     signatureCount: tx.signatures.length,
   };
+}
+
+/** A text memo decodes as bytes; anything else has no text. */
+function textMemo(type: string, value: unknown): string | undefined {
+  if (type !== 'text') return undefined;
+  if (typeof value === 'string') return value;
+  return value instanceof Uint8Array ? Buffer.from(value).toString('utf8') : undefined;
 }
