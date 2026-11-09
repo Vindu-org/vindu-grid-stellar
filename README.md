@@ -78,11 +78,12 @@ These rules decide when money may move. The packages enforce them where they can
 
 | Package | Contents | Status |
 |---|---|---|
-| [`@vindu/grid-core`](packages/grid-core) | Types, transfer states, routing rules, partner adapter interface | 0.1.0, unreleased |
-| [`@vindu/grid-blindpay`](packages/grid-blindpay) | BlindPay client: accounts, pay-ins, payouts, Stellar payout flow | 0.1.0, unreleased |
-| [`@vindu/grid-stellar`](packages/grid-stellar) | Horizon read layer, reconciliation, transaction submit | 0.1.0, unreleased |
+| [`@vindu/grid-core`](packages/grid-core) | Types, transfer states, routing rules, partner adapter and submitter interfaces, signed payout flow | 0.1.0, git tag only |
+| [`@vindu/grid-blindpay`](packages/grid-blindpay) | BlindPay client and adapter: customers, wallets, pay-ins, payouts, webhooks | 0.1.0, git tag only |
+| [`@vindu/grid-stellar`](packages/grid-stellar) | Horizon read layer, payment matching, account checks, submit of signed transactions | 0.1.0, git tag only |
 | `contracts/registry` | Soroban contract for transfer and verification attestations | Planned (tranche 2) |
-| [`examples/testnet-demo`](examples/testnet-demo) | End-to-end two-leg transfer on Stellar with a mock partner, offline | 0.1.0, unreleased |
+| Integration kit | Shared test doubles (fake Horizon, mock partner) and the adapter conformance suite | Planned (tranche 3) |
+| [`examples/testnet-demo`](examples/testnet-demo) | End-to-end two-leg transfer on Stellar with a mock partner, offline | Example, not packaged |
 
 ## Getting started
 
