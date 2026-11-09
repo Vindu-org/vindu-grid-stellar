@@ -11,8 +11,9 @@
  *
  * Failure edges: a quote that lapses before signing goes back to `funded` for
  * a fresh quote. A payout quote that keeps failing, an authorization that
- * fails, or a submission that is rejected or has an unknown outcome goes to
- * `needs_attention`.
+ * fails, a payout create that fails when no signature was needed, a signer
+ * that refuses, a submission that is rejected or has an unknown outcome, or
+ * a signed XDR the partner did not confirm taking goes to `needs_attention`.
  *
  * `needs_attention` alerts the operators and stops the transfer. Nothing in this
  * table leaves it: the platform never refunds, reroutes or re-signs on its own.
@@ -64,10 +65,12 @@ export type TransitionReason =
   | 'signed_payout_flow'
   | 'quote_expired_before_authorization'
   | 'authorization_failed'
+  | 'payout_create_failed'
   | 'quote_expired_before_signing'
   | 'signed_and_on_chain'
   | 'submission_rejected_or_unknown'
   | 'signer_refused'
+  | 'partner_submission_unknown'
   | 'partner_accepted'
   | 'partner_refused_or_unknown'
   | 'fiat_landed'
@@ -103,6 +106,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   rule('payout_quoted', 'awaiting_signature', 'signed_payout_flow', 'signed payout flow'),
   rule('payout_quoted', 'funded', 'quote_expired_before_authorization', 'quote expired before authorization'),
   rule('payout_quoted', 'needs_attention', 'authorization_failed', 'authorization failed'),
+  rule('payout_quoted', 'needs_attention', 'payout_create_failed', 'payout create failed'),
   rule('awaiting_signature', 'funded', 'quote_expired_before_signing', 'quote expired before signing'),
   rule('awaiting_signature', 'payout_submitted', 'signed_and_on_chain', 'signed and on chain'),
   rule(
@@ -112,6 +116,12 @@ export const TRANSITIONS: readonly TransitionRule[] = [
     'submission rejected or outcome unknown',
   ),
   rule('awaiting_signature', 'needs_attention', 'signer_refused', 'signer refused the transaction'),
+  rule(
+    'awaiting_signature',
+    'needs_attention',
+    'partner_submission_unknown',
+    'signed XDR sent, partner did not confirm',
+  ),
   rule('payout_submitted', 'payout_processing', 'partner_accepted', 'partner accepted'),
   rule('payout_submitted', 'needs_attention', 'partner_refused_or_unknown', 'partner refused or unknown'),
   rule('payout_processing', 'completed', 'fiat_landed', 'fiat landed'),
