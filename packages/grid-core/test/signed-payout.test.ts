@@ -550,7 +550,7 @@ describe('signed payout', () => {
       onSubmitted.mockRejectedValueOnce(cause);
       const e = (await caught(runSignedPayout(input))) as PayoutIncompleteError<ExecutePayoutInput>;
       expect(e).toBeInstanceOf(PayoutIncompleteError);
-      expect(e).toMatchObject({ code: 'payout_not_recorded', stage: 'record', txHash: HASH, signedXdr: SIGNED });
+      expect(e).toMatchObject({ code: 'payout_incomplete', stage: 'record', txHash: HASH, signedXdr: SIGNED });
       expect(e.cause).toBe(cause);
       expect(e.message).toMatch(/money has moved/);
       expect(executePayout).not.toHaveBeenCalled();
@@ -578,7 +578,7 @@ describe('signed payout', () => {
       const { input, executePayout, signStellar } = setup({ outcome });
       const e = (await caught(runSignedPayout(input))) as PayoutIncompleteError;
       expect(e).toBeInstanceOf(PayoutIncompleteError);
-      expect(e).toMatchObject({ code: 'payout_not_recorded', stage: 'submit', outcome, txHash: HASH, signedXdr: SIGNED });
+      expect(e).toMatchObject({ code: 'payout_incomplete', stage: 'submit', outcome, txHash: HASH, signedXdr: SIGNED });
       expect(e.pending).toBeUndefined();
       expect(executePayout).not.toHaveBeenCalled();
       expect(signStellar).toHaveBeenCalledTimes(1);

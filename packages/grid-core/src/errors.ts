@@ -21,7 +21,7 @@ export type CoreErrorCode =
   | 'webhook_rejected'
   | 'quote_expired'
   | 'payout_authorization_failed'
-  | 'payout_not_recorded';
+  | 'payout_incomplete';
 
 /**
  * Every code a {@link GridError} may carry: core's own, plus any code an
@@ -403,7 +403,7 @@ export class PayoutIncompleteError<TBody = unknown> extends GridError {
 
   constructor(init: PayoutIncompleteInit<TBody>) {
     super(
-      'payout_not_recorded',
+      'payout_incomplete',
       init.stage === 'submit'
         ? `Stellar submit ended ${init.outcome?.status ?? 'without an outcome'}: check the transaction on Stellar before anything else; do not sign again`
         : init.stage === 'record'

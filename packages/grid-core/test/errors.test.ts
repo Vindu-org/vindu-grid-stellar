@@ -85,7 +85,7 @@ describe('shared errors', () => {
   it('an incomplete submit carries the outcome and says not to sign again', () => {
     const outcome = { status: 'unknown', hash: 'ab'.repeat(32) } as const;
     const e = new PayoutIncompleteError({ stage: 'submit', signedXdr: 'XDR', txHash: outcome.hash, outcome });
-    expect(e).toMatchObject({ code: 'payout_not_recorded', stage: 'submit', outcome, signedXdr: 'XDR', pending: undefined });
+    expect(e).toMatchObject({ code: 'payout_incomplete', stage: 'submit', outcome, signedXdr: 'XDR', pending: undefined });
     expect(e.message).toMatch(/ended unknown/);
     expect(e.message).toMatch(/do not sign again/);
   });
@@ -103,7 +103,7 @@ describe('shared errors', () => {
     const pending = { body: { quote: 'q_1' }, idempotencyKey: 'k1' };
     const hash = 'ab'.repeat(32);
     const e = new PayoutIncompleteError({ stage: 'record', signedXdr: 'XDR', txHash: hash, pending });
-    expect(e).toMatchObject({ code: 'payout_not_recorded', stage: 'record', txHash: hash, pending });
+    expect(e).toMatchObject({ code: 'payout_incomplete', stage: 'record', txHash: hash, pending });
     expect(e.message).toMatch(/money has moved/);
     expect(e.message).toMatch(/never re-quote/);
   });
