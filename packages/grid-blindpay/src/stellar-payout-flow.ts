@@ -1,14 +1,19 @@
 /**
- * The signed Stellar payout through BlindPay, end to end:
+ * The signed Stellar payout through BlindPay, end to end, from `payout_quoted`:
  *
- *   authorize -> check the quote and transfer state -> sign once
- *     -> [client_submits: submit, success only] -> create
+ *   authorize -> onAuthorized (store `awaiting_signature`) -> check the quote
+ *     and transfer state -> sign once -> [client_submits: submit, success only]
+ *     -> create
  *
  * A thin wrapper over core's `runSignedPayout` with the BlindPay adapter, so
- * the safety rules are core's:
- * - The signer is called at most once. A quote with no more than
- *   `expiryMarginMs` (default one minute) left throws `QuoteExpiredError`
- *   before signing, and again before the signed transaction leaves.
+ * the safety rules, and the error to transition table in its doc, are core's:
+ * - The signer is called at most once, after `onAuthorized` stored
+ *   `awaiting_signature`. A quote with no more than `expiryMarginMs`
+ *   (default one minute) left throws `QuoteExpiredError` before authorizing
+ *   (`stage: 'authorization'`), and before signing and before the signed
+ *   transaction leaves (`stage: 'signing'`).
+ * - A failed authorize call, or an answer without the XDR, throws
+ *   `PayoutAuthorizationError` while the transfer is still in `payout_quoted`.
  * - With `client_submits`, only a submitter outcome `{ status: 'success' }`
  *   with a valid hash creates the payout. `rejected`, `unknown`,
  *   `expired_not_landed`, `failed`, a malformed outcome or a throw stop with
@@ -34,6 +39,8 @@ import {
   type SignedPayoutResult,
   type Signer,
   type StellarSubmitter,
+  type StellarXdrAuthorization,
+  type TransferState,
   retryPayoutExecute,
   runSignedPayout,
 } from '@vindu/grid-core';
@@ -51,7 +58,7 @@ export interface RunStellarPayoutInput {
   /** Default `client_submits`. */
   readonly submission?: PayoutSubmission;
   /**
-   * The transfer, its stored state, the fresh payout quote from this adapter,
+   * The transfer (stored in `payout_quoted`), the fresh payout quote from this adapter,
    * the client's Stellar account (`partnerAccountId` = `bw_...`) and the
    * BlindPay account the transaction must pay. The signer receives the
    * expected source, destination and amount from it.
@@ -63,6 +70,12 @@ export interface RunStellarPayoutInput {
   readonly now?: () => number;
   /** Refuse to sign or submit with this little left on the quote. Default core's `DEFAULT_EXPIRY_MARGIN_MS`. */
   readonly expiryMarginMs?: number;
+  /**
+   * Store `payout_quoted -> awaiting_signature` here and return the stored
+   * state. Called once, after BlindPay authorized and before the signer; see
+   * core's `RunSignedPayoutInput.onAuthorized`.
+   */
+  readonly onAuthorized: (authorization: StellarXdrAuthorization) => TransferState | Promise<TransferState>;
   /** Store the signed XDR (and its hash) here before it is submitted or sent. */
   readonly onSigned?: (signedXdr: string) => void | Promise<void>;
   readonly logger?: Logger;
@@ -73,7 +86,8 @@ export interface RunStellarPayoutInput {
  *
  * @throws {InvalidInputError} before any call for `partner_submits` with a
  *   `tx_hash` adapter, a quote from another partner, or a non-Stellar account.
- * @throws core's `QuoteExpiredError`, `SigningNotAllowedError` and `PayoutIncompleteError`.
+ * @throws core's `QuoteExpiredError`, `PayoutAuthorizationError`, `SigningNotAllowedError`
+ *   and `PayoutIncompleteError`; see core's `runSignedPayout` for the edge each one takes.
  */
 export async function runStellarPayout(input: RunStellarPayoutInput): Promise<SignedPayoutResult> {
   const submission = input.submission ?? 'client_submits';
@@ -96,6 +110,7 @@ export async function runStellarPayout(input: RunStellarPayoutInput): Promise<Si
     now: input.now ?? Date.now,
     ...(input.expiryMarginMs === undefined ? {} : { expiryMarginMs: input.expiryMarginMs }),
     idempotencyKey: input.idempotencyKey,
+    onAuthorized: input.onAuthorized,
     ...(input.onSigned === undefined ? {} : { onSigned: input.onSigned }),
     ...(input.logger === undefined ? {} : { logger: input.logger }),
   });

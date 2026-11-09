@@ -2,6 +2,7 @@ import {
   type ExecutePayoutInput,
   InvalidInputError,
   type LegQuote,
+  PayoutAuthorizationError,
   PayoutIncompleteError,
   type PayoutSubmission,
   QuoteExpiredError,
@@ -39,7 +40,7 @@ const quote: LegQuote = {
   fees: [],
 };
 const account = { chain: 'stellar', address: STELLAR_ADDRESS, partnerAccountId: WALLET_ID } as const;
-const context: SignedPayoutContext = { transferId: 'tr_000000000000', state: 'awaiting_signature', quote, account, destination: TREASURY };
+const context: SignedPayoutContext = { transferId: 'tr_000000000000', state: 'payout_quoted', quote, account, destination: TREASURY };
 
 const AUTHORIZED: MockReply = { body: { transaction_hash: UNSIGNED } };
 const CREATED: MockReply = { body: { id: 'po_000000000000', status: 'processing' } };
@@ -55,11 +56,12 @@ function setup(replies: MockReply[], opts: { clock?: () => number; field?: Signe
   const signStellar = jest.fn(async () => SIGNED);
   const signer: Signer = { custody: 'test_key', signStellar };
   const submit = jest.fn<Promise<SubmitOutcome>, [string]>(async () => SUCCESS);
+  const onAuthorized = jest.fn(async () => 'awaiting_signature' as const);
   const base: RunStellarPayoutInput = {
-    adapter, signer, context, submitter: { submit }, idempotencyKey: KEY, now: opts.clock ?? (() => NOW),
+    adapter, signer, context, submitter: { submit }, idempotencyKey: KEY, now: opts.clock ?? (() => NOW), onAuthorized,
   };
   const paths = () => calls.map((c) => c.url.replace(/^.*\/in_000000000000/, ''));
-  return { calls, paths, adapter, signStellar, submit, base };
+  return { calls, paths, adapter, signStellar, submit, onAuthorized, base };
 }
 
 describe('stellar payout flow', () => {
@@ -68,9 +70,12 @@ describe('stellar payout flow', () => {
     ['client_submits', 'tx_hash', HASH, 1],
     ['partner_submits', 'signed_xdr', SIGNED, 0],
   ])('payout with %s and %s sends the right signed_transaction', async (submission, field, sent, submits) => {
-    const { calls, paths, signStellar, submit, base } = setup([AUTHORIZED, CREATED], { field });
+    const { calls, paths, signStellar, submit, onAuthorized, base } = setup([AUTHORIZED, CREATED], { field });
     const res = await runStellarPayout({ ...base, submission });
 
+    expect(onAuthorized).toHaveBeenCalledTimes(1);
+    expect(onAuthorized).toHaveBeenCalledWith({ kind: 'stellar_xdr', unsignedXdr: UNSIGNED });
+    expect(onAuthorized.mock.invocationCallOrder[0]).toBeLessThan(signStellar.mock.invocationCallOrder[0] ?? 0);
     expect(paths()).toEqual(['/payouts/stellar/authorize', '/payouts/stellar']);
     expect(calls[0]?.body).toEqual({ quote_id: QUOTE_ID, sender_wallet_address: STELLAR_ADDRESS });
     expect(calls[1]?.body).toEqual({ quote_id: QUOTE_ID, signed_transaction: sent, sender_wallet_address: STELLAR_ADDRESS });
@@ -111,10 +116,11 @@ describe('stellar payout flow', () => {
   });
 
   it('payout on an expired quote throws QuoteExpiredError and never authorizes or signs', async () => {
-    const { calls, signStellar, base } = setup([], { clock: () => Date.parse(quote.expiresAt) });
+    const { calls, signStellar, onAuthorized, base } = setup([], { clock: () => Date.parse(quote.expiresAt) });
     const e = await caught(runStellarPayout(base));
     expect(e).toBeInstanceOf(QuoteExpiredError);
-    expect(e).toMatchObject({ code: 'quote_expired', quoteId: QUOTE_ID });
+    expect(e).toMatchObject({ code: 'quote_expired', quoteId: QUOTE_ID, stage: 'authorization' });
+    expect(onAuthorized).not.toHaveBeenCalled();
     expect(calls).toHaveLength(0);
     expect(signStellar).not.toHaveBeenCalled();
   });
@@ -127,18 +133,20 @@ describe('stellar payout flow', () => {
     await expect(runStellarPayout(inTime.base)).resolves.toMatchObject({ txHash: HASH });
   });
 
-  it('payout honours a larger expiry margin before signing', async () => {
-    const { signStellar, base } = setup([AUTHORIZED]);
-    await expect(runStellarPayout({ ...base, expiryMarginMs: 5 * 60_000 })).rejects.toBeInstanceOf(QuoteExpiredError);
+  it('payout honours a larger expiry margin before authorizing', async () => {
+    const { calls, signStellar, base } = setup([AUTHORIZED]);
+    await expect(runStellarPayout({ ...base, expiryMarginMs: 5 * 60_000 })).rejects.toMatchObject({ stage: 'authorization' });
+    expect(calls).toHaveLength(0);
     expect(signStellar).not.toHaveBeenCalled();
   });
 
   it('payout whose quote expires during authorize is not signed', async () => {
     let reads = 0;
     const clock = () => (reads++ === 0 ? NOW : Date.parse(quote.expiresAt) + 1);
-    const { calls, signStellar, base } = setup([AUTHORIZED], { clock });
-    await expect(runStellarPayout(base)).rejects.toBeInstanceOf(QuoteExpiredError);
+    const { calls, signStellar, onAuthorized, base } = setup([AUTHORIZED], { clock });
+    await expect(runStellarPayout(base)).rejects.toMatchObject({ code: 'quote_expired', stage: 'authorization' });
     expect(calls).toHaveLength(1);
+    expect(onAuthorized).not.toHaveBeenCalled();
     expect(signStellar).not.toHaveBeenCalled();
   });
 
@@ -149,15 +157,24 @@ describe('stellar payout flow', () => {
       t = Date.parse(quote.expiresAt) + 1;
       return SIGNED;
     });
-    await expect(runStellarPayout(base)).rejects.toBeInstanceOf(QuoteExpiredError);
+    await expect(runStellarPayout(base)).rejects.toMatchObject({ code: 'quote_expired', stage: 'signing' });
     expect(signStellar).toHaveBeenCalledTimes(1);
     expect(submit).not.toHaveBeenCalled();
     expect(calls).toHaveLength(1);
   });
 
-  it('payout refuses to sign outside awaiting_signature', async () => {
-    const { signStellar, base } = setup([AUTHORIZED]);
-    await expect(runStellarPayout({ ...base, context: { ...context, state: 'funded' } })).rejects.toBeInstanceOf(SigningNotAllowedError);
+  it('payout refuses to start outside payout_quoted, before any call', async () => {
+    const { calls, signStellar, base } = setup([AUTHORIZED]);
+    const funded = { ...context, state: 'funded' as unknown as 'payout_quoted' };
+    await expect(runStellarPayout({ ...base, context: funded })).rejects.toThrow(InvalidInputError);
+    expect(calls).toHaveLength(0);
+    expect(signStellar).not.toHaveBeenCalled();
+  });
+
+  it('payout refuses to sign when onAuthorized did not store awaiting_signature', async () => {
+    const { signStellar, onAuthorized, base } = setup([AUTHORIZED]);
+    onAuthorized.mockResolvedValueOnce('payout_quoted' as unknown as 'awaiting_signature');
+    await expect(runStellarPayout(base)).rejects.toBeInstanceOf(SigningNotAllowedError);
     expect(signStellar).not.toHaveBeenCalled();
   });
 
@@ -247,9 +264,17 @@ describe('stellar payout flow', () => {
     expect(submit).toHaveBeenCalledTimes(1);
   });
 
-  it('payout with an authorize response lacking the XDR stops before signing', async () => {
-    const { signStellar, base } = setup([{ body: {} }]);
-    await expect(runStellarPayout(base)).rejects.toMatchObject({ partnerCode: 'unexpected_response' });
+  it.each<[string, MockReply]>([
+    ['lacking the XDR', { body: {} }],
+    ['an HTTP error', { status: 400, body: { message: 'wallet bw_secret of Jane Doe is not approved' } }],
+  ])('payout with an authorize response %s throws PayoutAuthorizationError before onAuthorized', async (_name, reply) => {
+    const { paths, signStellar, onAuthorized, base } = setup([reply]);
+    const e = (await caught(runStellarPayout(base))) as PayoutAuthorizationError;
+    expect(e).toBeInstanceOf(PayoutAuthorizationError);
+    expect(e).toMatchObject({ code: 'payout_authorization_failed', failure: 'threw', causeCode: 'partner_http' });
+    expect(e.message).not.toMatch(/Jane|bw_secret/);
+    expect(paths()).toEqual(['/payouts/stellar/authorize']);
+    expect(onAuthorized).not.toHaveBeenCalled();
     expect(signStellar).not.toHaveBeenCalled();
   });
 });
