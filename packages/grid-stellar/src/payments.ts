@@ -76,7 +76,7 @@ export function normalisePayment(record: HorizonPaymentRecord, account: string):
   } else {
     from = record.from;
     to = record.to;
-    asset = toAsset(record.asset_type, record.asset_code, record.asset_issuer);
+    asset = assetFromHorizon(record.asset_type, record.asset_code, record.asset_issuer);
     amount = record.amount;
   }
   if (from === undefined || to === undefined || asset === null || amount === undefined) return null;
@@ -98,7 +98,7 @@ export function normalisePayment(record: HorizonPaymentRecord, account: string):
   const extra: { -readonly [K in keyof ChainPayment]?: ChainPayment[K] } = {};
   if (record.to_muxed_id !== undefined) extra.toMuxedId = record.to_muxed_id;
   if (record.type === 'path_payment_strict_send' || record.type === 'path_payment_strict_receive') {
-    const sourceAsset = toAsset(record.source_asset_type, record.source_asset_code, record.source_asset_issuer);
+    const sourceAsset = assetFromHorizon(record.source_asset_type, record.source_asset_code, record.source_asset_issuer);
     if (sourceAsset !== null) extra.sourceAsset = sourceAsset;
     if (record.source_amount !== undefined) extra.sourceAmount = canonical(record.source_amount);
   }
@@ -112,7 +112,7 @@ function isChainPaymentType(type: string): type is ChainPaymentType {
 }
 
 /** Core asset from Horizon's asset fields; `null` for anything that is not native or an issued asset. */
-export function toAsset(type: string | undefined, code: string | undefined, issuer: string | undefined): Asset | null {
+export function assetFromHorizon(type: string | undefined, code: string | undefined, issuer: string | undefined): Asset | null {
   if (type === 'native') return { code: NATIVE_ASSET_CODE };
   if ((type === 'credit_alphanum4' || type === 'credit_alphanum12') && code !== undefined && issuer !== undefined) {
     return { code, issuer };

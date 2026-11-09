@@ -12,7 +12,7 @@
  */
 import { type Asset, type Money, formatAmount, fromUnits, parseAmount, sameAsset } from '@vindu/grid-core';
 import type { HorizonAccount, HorizonBalanceLine, HorizonGateway } from './horizon';
-import { NATIVE_ASSET_CODE, toAsset } from './payments';
+import { NATIVE_ASSET_CODE, assetFromHorizon } from './payments';
 
 /** Base reserve on the public networks, in XLM. */
 export const BASE_RESERVE_XLM = '0.5';
@@ -94,7 +94,7 @@ export function assessReceiveReadiness(
 
   const issues: ReadinessIssue[] = [];
   const line = account.balances.find((b) => {
-    const a = toAsset(b.asset_type, b.asset_code, b.asset_issuer);
+    const a = assetFromHorizon(b.asset_type, b.asset_code, b.asset_issuer);
     return a !== null && sameAsset(a, asset);
   });
 
