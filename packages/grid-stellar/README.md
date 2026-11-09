@@ -4,6 +4,8 @@ The Stellar layer for two-leg transfers: follow registered accounts on Horizon, 
 
 No environment reads, no keys, no signing. Your signer signs; the network passphrase and the Horizon URL are arguments. `TESTNET_*` and `MAINNET_*` constants hold the public values for convenience.
 
+> **Do not submit or look up payouts through the public Horizon URLs.** `TESTNET_HORIZON_URL`, `MAINNET_HORIZON_URL` and the URLs in `STELLAR_TESTNET` and `STELLAR_MAINNET` sit behind load balancers: two requests can reach instances that have ingested different ledgers, so a landed transaction can look missing. For the submit and lookup path, point the gateway at one Horizon instance you operate or trust to be consistent. The public URLs are fine for exploring and demos.
+
 ## Status
 
 | Aspect | Status |
