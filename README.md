@@ -26,32 +26,35 @@ Every Vindú transfer runs in two legs: fiat to USDC, then USDC to fiat. Stellar
 ```mermaid
 flowchart LR
     subgraph APP["Your application (private)"]
-        AUTH["Auth, roles, tenancy"]
-        CFG["Secrets and config"]
+        CODE["Your code: auth, roles,<br/>secrets, transfer logic"]
         SIGN["Signer (key holder)"]
         DB[("Your storage")]
     end
     subgraph LIB["vindu-grid-stellar (this repo)"]
-        CORE["core: types, states, routing, adapter interface"]
-        PART["partner clients: BlindPay first"]
-        STL["stellar: read layer, transactions"]
+        CORE["grid-core: states, routing,<br/>ports, signed payout flow"]
+        PART["grid-blindpay: partner adapter"]
+        STL["grid-stellar: read layer, submit"]
     end
     subgraph EXT["Outside"]
-        PAPI["Partner APIs"]
-        NET["Stellar network"]
+        PAPI["Partner API"]
+        NET["Stellar network (Horizon)"]
     end
-    AUTH --> CORE
-    CFG -. "keys passed as arguments" .-> PART
-    CORE --> PART
-    CORE --> STL
-    STL -. "unsigned tx" .-> SIGN
-    SIGN -. "signed tx" .-> STL
-    APP --> DB
+    CODE --> CORE
+    CODE -- "keys as arguments" --> PART
+    CODE --> STL
+    CODE --> DB
     PART --> PAPI
     STL --> NET
+    PAPI -. "1 unsigned tx" .-> PART
+    PART -. "2 unsigned tx (preparePayout)" .-> CORE
+    CORE -. "3 check and sign" .-> SIGN
+    SIGN -. "4 signed tx" .-> CORE
+    CORE -. "5 submit (StellarSubmitter)" .-> STL
 ```
 
-Your application authenticates the user, checks permissions, reads its own secrets and stores its own data. It then calls this library with plain, already authorized inputs. The library talks to partner APIs and to Stellar and returns typed results.
+Your application authenticates the user, checks permissions, reads its own secrets and stores its own data. It then calls the three packages with plain, already authorized inputs, and wires them together: the partner adapter and the Stellar submitter are passed to core's payout flow through core's interfaces, so core itself never imports a partner or the Stellar SDK.
+
+For a payout that needs a signature, the partner builds the unsigned transaction and the adapter returns it (1, 2). Core checks the quote and the transfer state and hands the transaction to your signer, which checks it again and signs (3, 4). The Stellar layer submits it and reports what happened (5). Only then is the partner told.
 
 ## Design rules
 
