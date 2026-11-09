@@ -327,7 +327,8 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
 
 /**
  * Sends `executePayout` again with exactly the pending input and key. Use it
- * after {@link PayoutIncompleteError} with `stage: 'create'`. Never signs or
+ * after {@link PayoutIncompleteError} with `stage: 'create'`, or with
+ * `stage: 'record'` once `payout_submitted` is stored. Never signs or
  * submits anything.
  */
 export async function retryPayoutExecute(
