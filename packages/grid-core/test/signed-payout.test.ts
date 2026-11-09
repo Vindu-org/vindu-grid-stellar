@@ -186,11 +186,14 @@ describe('signed payout', () => {
   });
 
   it('with partner_submits, hands the signed XDR to the partner and never submits', async () => {
-    const { input, order, executePayout } = setup();
+    const { input, order, executePayout, store } = setup();
     const res = await runSignedPayout(withSigning(input, { submission: 'partner_submits' }));
     expect(order).toEqual(['prepare', 'authorized', 'sign', 'execute']);
     expect(executePayout).toHaveBeenCalledWith({ quote, account, transferId: 'tr_1', idempotencyKey: KEY, signedXdr: SIGNED });
     expect(res.txHash).toBeUndefined();
+    // The caller's move on success: the partner holds the XDR, nobody saw it on chain.
+    expect(store.state).toBe('awaiting_signature');
+    expect(transition(store.state, 'payout_submitted', 'sent_to_partner').to).toBe('payout_submitted');
   });
 
   it('goes straight to execute when the partner needs no signature', async () => {
@@ -408,6 +411,30 @@ describe('signed payout', () => {
         ['awaiting_signature', 'needs_attention', 'signer_refused'],
       ],
       [
+        'an onSigned that throws',
+        (s) =>
+          withSigning(s.input, {
+            onSigned: () => {
+              throw new Error('db down');
+            },
+          }),
+        { type: PayoutInterruptedError, stage: 'on_signed' },
+        ['awaiting_signature', 'needs_attention', 'run_interrupted'],
+      ],
+      [
+        'a clock that breaks after onAuthorized',
+        (s) => {
+          s.onAuthorized.mockImplementationOnce(async () => {
+            s.store.state = transition(s.store.state, 'awaiting_signature', 'signed_payout_flow').to;
+            t = Number.NaN;
+            return s.store.state;
+          });
+          return s.input;
+        },
+        { type: PayoutInterruptedError, stage: 'clock' },
+        ['awaiting_signature', 'needs_attention', 'run_interrupted'],
+      ],
+      [
         'an onSubmitted that throws after a confirmed submit',
         (s) => {
           s.onSubmitted.mockRejectedValueOnce(new Error('db down'));
@@ -446,7 +473,14 @@ describe('signed payout', () => {
     const edges = documentedEdges(SOURCE_DOC);
 
     it('has a row for each error the run maps to an edge', () => {
-      expect(edges).toHaveLength(9);
+      expect(edges).toHaveLength(10);
+    });
+
+    it('names sent_to_partner, not signed_and_on_chain, for a partner_submits success', () => {
+      expect(SOURCE_DOC).toMatch(/`partner_submits`: `awaiting_signature ->\s+\*\s+payout_submitted` \(`sent_to_partner`\)/);
+      expect(transition('awaiting_signature', 'payout_submitted', 'sent_to_partner')).toMatchObject({
+        label: 'signed XDR handed to the partner',
+      });
     });
 
     it.each(edges)('$error: $from -> $to ($reason) is a transition', ({ from, to, reason, state }) => {

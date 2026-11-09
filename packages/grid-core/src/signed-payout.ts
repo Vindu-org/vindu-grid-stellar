@@ -169,10 +169,13 @@ export interface SignedPayoutSigning {
    * and the hash here: the money has moved, so the stored state must say so
    * before the partner is called.
    *
-   * If it throws, the run stops with {@link PayoutIncompleteError}
-   * (`stage: 'record'`) carrying `txHash` and `pending`. The money has
-   * moved: store `payout_submitted`, then call {@link retryPayoutExecute}
-   * with `pending`. Never re-quote and never sign again.
+   * Any throw here, sync or async, stops the run with
+   * {@link PayoutIncompleteError} (`stage: 'record'`) carrying `txHash` and
+   * `pending`. The money has moved: store `payout_submitted`, then call
+   * {@link retryPayoutExecute} with `pending`. If the transfer is already in
+   * `payout_submitted`, this hook stored the move before it threw: the store
+   * is done, so go straight to {@link retryPayoutExecute}. Never re-quote and
+   * never sign again.
    */
   readonly onSubmitted?: (outcome: ConfirmedSubmitOutcome) => void | Promise<void>;
 }
@@ -224,35 +227,47 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  * the safety rules.
  *
  * Where it stops, and the edge of the transition table the caller takes.
- * Every row names one rule of `TRANSITIONS`, with its reason:
+ * Each row's edge is a rule of `TRANSITIONS` with exactly that reason, and
+ * starts from the state in the row's "Transfer is in" column:
  *
  * | Error | Where it stopped | Transfer is in | Caller takes |
  * |---|---|---|---|
  * | {@link QuoteExpiredError} `authorization` | before the authorization was handed over, or, with no signature needed, before the create | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`): get a fresh quote |
  * | {@link PayoutAuthorizationError} | `preparePayout` threw, or returned an authorization the run cannot use (unknown, `stellar_xdr` without `signing`, or for an account on another chain) | `payout_quoted` | `payout_quoted -> needs_attention` (`authorization_failed`): nothing was signed |
- * | {@link PayoutIncompleteError} `create`, no `signedXdr` | the partner needed no signature and its create failed | `payout_quoted` | retry with {@link retryPayoutExecute}; if the partner never takes it, `payout_quoted -> needs_attention` (`payout_create_failed`) |
+ * | {@link PayoutIncompleteError} `create`, no `signedXdr` | the partner needed no signature and its create failed; nothing was signed | `payout_quoted` | retry with {@link retryPayoutExecute}; if the partner never takes it, `payout_quoted -> needs_attention` (`payout_create_failed`) |
  * | {@link QuoteExpiredError} `signing` | after `onAuthorized`, before the signed transaction left | `awaiting_signature` | `awaiting_signature -> funded` (`quote_expired_before_signing`): drop any signed XDR, it was never submitted |
  * | {@link SignerRefusedError} | the signer threw, rejected or returned no signed XDR | `awaiting_signature` | `awaiting_signature -> needs_attention` (`signer_refused`): nothing was submitted |
- * | {@link PayoutIncompleteError} `submit` | the submit was not a confirmed success | `awaiting_signature` | `awaiting_signature -> needs_attention` (`submission_rejected_or_unknown`): check the hash on Stellar, never sign again |
- * | {@link PayoutIncompleteError} `record` | the transaction is on the ledger, `onSubmitted` threw | `awaiting_signature` | `awaiting_signature -> payout_submitted` (`signed_and_on_chain`): the money moved; store it, then retry with {@link retryPayoutExecute}; never re-quote |
+ * | {@link PayoutInterruptedError} | after `onAuthorized`, with no edge of its own: `onSigned` threw, the clock broke, or something unexpected | `awaiting_signature` | `awaiting_signature -> needs_attention` (`run_interrupted`): nothing was submitted; never sign again for this quote |
+ * | {@link PayoutIncompleteError} `submit` | `client_submits`: the submit was not a confirmed success | `awaiting_signature` | `awaiting_signature -> needs_attention` (`submission_rejected_or_unknown`): check the hash on Stellar, never sign again |
+ * | {@link PayoutIncompleteError} `record` | `client_submits` only: the transaction is on the ledger, `onSubmitted` threw | `awaiting_signature` | `awaiting_signature -> payout_submitted` (`signed_and_on_chain`), then retry with {@link retryPayoutExecute}: the money moved, never re-quote. Found already in `payout_submitted`? The store is done: go straight to the retry |
  * | {@link PayoutIncompleteError} `create`, with `txHash` | `client_submits`: the create failed after `onSubmitted` stored the move | `payout_submitted` | retry with {@link retryPayoutExecute}; if the partner never takes it, `payout_submitted -> needs_attention` (`partner_refused_or_unknown`) |
  * | {@link PayoutIncompleteError} `create`, `signedXdr` but no `txHash` | `partner_submits`: the partner did not confirm taking the signed XDR | `awaiting_signature` | retry with {@link retryPayoutExecute}; if the partner never confirms, `awaiting_signature -> needs_attention` (`partner_submission_unknown`) |
  *
- * On success the caller takes `payout_quoted -> payout_processing`
- * (`partner_custodied_account`) for an `authorization` of `none`. For
- * `stellar_xdr` the transfer is in `payout_submitted` with `client_submits`
- * (stored by `onSubmitted`), and in `awaiting_signature` with
- * `partner_submits`, which then takes `awaiting_signature -> payout_submitted`;
- * both then take `payout_submitted -> payout_processing` once the partner
- * accepts.
+ * On success, the caller takes:
+ * - `authorization: 'none'`: `payout_quoted -> payout_processing`
+ *   (`partner_custodied_account`).
+ * - `stellar_xdr` with `client_submits`: nothing more here; `onSubmitted`
+ *   already stored `awaiting_signature -> payout_submitted`
+ *   (`signed_and_on_chain`).
+ * - `stellar_xdr` with `partner_submits`: `awaiting_signature ->
+ *   payout_submitted` (`sent_to_partner`). The partner holds the signed XDR;
+ *   nobody has seen it on chain yet.
  *
- * These have no edge: nothing was signed or submitted by this run, and the
- * transfer stays where it is for an operator.
- * - {@link InvalidInputError}: unusable input, before any call, with the
- *   transfer in `payout_quoted`; or a clock that breaks during the run.
+ * Both signed paths then take `payout_submitted -> payout_processing`
+ * (`partner_accepted`) once the partner accepts.
+ *
+ * These errors have no edge, because the run did not move the transfer:
+ * - {@link InvalidInputError}: unusable input, before any call; or a clock
+ *   that throws or breaks before `onAuthorized`. The transfer is in
+ *   `payout_quoted`. (After `onAuthorized`, a broken clock is
+ *   {@link PayoutInterruptedError}.)
  * - {@link SigningNotAllowedError}: `onAuthorized` returned a state other
  *   than `awaiting_signature`, e.g. a concurrent run already moved it.
- * - Whatever `onAuthorized` or `onSigned` throw, unchanged.
+ *   Nothing was signed; look at the stored state first.
+ * - Whatever `onAuthorized` throws, unchanged. Read the stored state: in
+ *   `payout_quoted` nothing moved. In `awaiting_signature` the hook
+ *   committed and then threw: take `awaiting_signature -> needs_attention`
+ *   (`run_interrupted`).
  */
 export async function runSignedPayout(callerInput: RunSignedPayoutInput): Promise<SignedPayoutResult> {
   // Read once and frozen: what the checks see is what the adapter and the
