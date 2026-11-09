@@ -19,5 +19,9 @@
     "typecheck": "yarn workspaces foreach -Apt run typecheck",
     "test": "yarn workspaces foreach -Apt run test",
     "lint": "eslint . --max-warnings 0"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.5"
   }
 }
