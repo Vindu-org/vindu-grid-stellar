@@ -30,6 +30,12 @@ export interface DemoOptions {
    * `needs_attention` and the partner payout is never created. Default false.
    */
   readonly simulateSubmitRejection?: boolean;
+  /**
+   * Make the partner refuse to authorize the payout. The transfer then stops
+   * in `needs_attention` straight from `payout_quoted`, and nothing is
+   * signed. Default false.
+   */
+  readonly simulateAuthorizationFailure?: boolean;
 }
 
 export interface DemoResult {
@@ -121,6 +127,7 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
       : await runPayoutLeg(ctx, funded, estimate, {
           simulateHorizonTimeout: options.simulateHorizonTimeout ?? true,
           simulateSubmitRejection: options.simulateSubmitRejection ?? false,
+          simulateAuthorizationFailure: options.simulateAuthorizationFailure ?? false,
         });
 
   log('');

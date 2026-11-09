@@ -7,8 +7,10 @@
  *   -> payout_processing -> completed
  *
  * The fresh payout quote must be within the price tolerance of the estimate
- * the client saw. The partner returns an unsigned transaction; the signer
- * checks it before signing, once; the signed transaction is submitted with
+ * the client saw. The flow runs from `payout_quoted`: the partner authorizes
+ * and returns an unsigned transaction, and only then does the transfer move
+ * to `awaiting_signature` (in `onAuthorized`). The signer checks the
+ * transaction before signing, once; the signed transaction is submitted with
  * the hash checked before any retry; only a confirmed success lets the
  * partner payout be created.
  *
@@ -16,8 +18,13 @@
  * table, and nothing is re-signed, refunded or rerouted automatically:
  * - the payout quote fails: `funded -> needs_attention` (payout_quote_failed);
  * - the quote is outside tolerance: `funded -> needs_attention` (quote_outside_tolerance);
- * - the quote gets too close to expiry before the transaction leaves:
- *   `awaiting_signature -> funded`, nothing was submitted;
+ * - the quote gets too close to expiry before the partner authorizes:
+ *   `payout_quoted -> funded` (quote_expired_before_authorization);
+ * - the partner's authorization fails: `payout_quoted -> needs_attention`
+ *   (authorization_failed), nothing was signed;
+ * - the quote gets too close to expiry after that, before the transaction
+ *   leaves: `awaiting_signature -> funded` (quote_expired_before_signing),
+ *   nothing was submitted;
  * - the submit outcome is anything but `success`: `awaiting_signature -> needs_attention`;
  * - the partner does not take the payout: `payout_submitted -> needs_attention`;
  * - the payout is not on chain as signed, or does not land:
@@ -28,13 +35,13 @@ import {
   type LogFields,
   type Logger,
   type Money,
+  PayoutAuthorizationError,
   PayoutIncompleteError,
   QuoteExpiredError,
   type SignedPayoutContext,
   type SignedPayoutResult,
   SigningNotAllowedError,
   type StellarSubmitter,
-  type TransferState,
   checkPayoutTolerance,
   runSignedPayout,
   signingContextFor,
@@ -57,6 +64,8 @@ export interface PayoutOptions {
   readonly simulateHorizonTimeout: boolean;
   /** Make Horizon refuse the payout submission, to show the failure edge. */
   readonly simulateSubmitRejection?: boolean;
+  /** Make the partner refuse to authorize the payout, to show that failure edge. */
+  readonly simulateAuthorizationFailure?: boolean;
 }
 
 /** Returns the payout transaction hash, or `undefined` when the transfer stopped short of `completed`. */
@@ -93,14 +102,15 @@ export async function runPayoutLeg(
   }
   transfer.move('payout_quoted', `${fmt(quote.target)} is ${gap}`);
 
-  // What runSignedPayout and the signer compare the transaction with.
-  const payoutContext = (state: TransferState): SignedPayoutContext => ({
+  // What runSignedPayout and the signer compare the transaction with. The
+  // run starts here, in payout_quoted.
+  const payoutContext: SignedPayoutContext = {
     transferId: transfer.id,
-    state,
+    state: 'payout_quoted',
     quote,
     account: ctx.account,
     destination: partner.treasuryAddress,
-  });
+  };
   const submitterOptions = {
     gateway: ledger,
     networkPassphrase,
@@ -109,32 +119,18 @@ export async function runPayoutLeg(
     logger: printingLogger(log),
   };
 
-  // 2. The signer checks what it signs. Two refusals first; nothing is signed.
+  // 2. The signer checks what it signs. Asked too early, it refuses; nothing is signed.
   const stranger = await xdrPayingAnotherAccount(ctx, quote);
   await expectRefusal(log, 'asked to sign before awaiting_signature', () =>
-    signer.signStellar(ctx.account, stranger, signingContextFor(payoutContext(transfer.state))),
-  );
-  transfer.move('awaiting_signature', `${partner.id} pays out from the client's own account, so the client's key holder signs`);
-
-  // A partner whose unsigned transaction pays someone else, through the same flow.
-  await expectRefusal(log, 'XDR that pays another account', () =>
-    runSignedPayout({
-      adapter: {
-        preparePayout: async () => ({ kind: 'stellar_xdr', unsignedXdr: stranger }),
-        executePayout: async () => {
-          throw new Error('Never reached: the signer refuses first');
-        },
-      },
-      signer,
-      submitter: createStellarSubmitter(submitterOptions),
-      submission: 'client_submits',
-      context: payoutContext(transfer.state),
-      now: ctx.now,
-      idempotencyKey: `${transfer.id}:payout-refused`,
-    }),
+    signer.signStellar(ctx.account, stranger, signingContextFor(payoutContext, transfer.state)),
   );
 
-  // 3. The real run: prepare, sign once, submit, then the partner payout.
+  // 3. The real run: authorize, move to awaiting_signature, sign once,
+  // submit, then the partner payout.
+  if (options.simulateAuthorizationFailure === true) {
+    partner.refuseNextAuthorization();
+    log('    (the partner is set to refuse the payout authorization)');
+  }
   if (options.simulateHorizonTimeout) {
     ledger.timeOutNextSubmission();
     log('    (Horizon is set to time out on this submission, after the transaction lands)');
@@ -169,9 +165,18 @@ export async function runPayoutLeg(
       signer,
       submitter,
       submission: 'client_submits',
-      context: payoutContext(transfer.state),
+      context: payoutContext,
       now: ctx.now,
       idempotencyKey: `${transfer.id}:payout`,
+      // The partner authorized: store awaiting_signature before anything is signed.
+      onAuthorized: async () => {
+        transfer.move('awaiting_signature', `${partner.id} pays out from the client's own account, so the client's key holder signs`);
+        // A transaction that pays someone other than the partner is refused.
+        await expectRefusal(log, 'XDR that pays another account', () =>
+          signer.signStellar(ctx.account, stranger, signingContextFor(payoutContext, transfer.state)),
+        );
+        return transfer.state;
+      },
       onSigned: () =>
         log(
           `    signer (${signer.custody}) checked state, expiry, source and operation source, destination, ` +
@@ -230,20 +235,34 @@ export async function runPayoutLeg(
  * `runSignedPayout`, or rethrows an error the demo does not expect.
  */
 function stopPayout(transfer: Transfer, e: unknown): void {
-  if (e instanceof QuoteExpiredError && transfer.state === 'awaiting_signature') {
-    transfer.move('funded', `${e.message}; nothing was submitted, get a fresh quote`);
+  const from = transfer.state;
+  if (e instanceof QuoteExpiredError && e.stage === 'authorization' && from === 'payout_quoted') {
+    transfer.move('funded', `${e.message}; nothing was authorized, get a fresh quote`, 'quote_expired_before_authorization');
     return;
   }
-  if (e instanceof PayoutIncompleteError && e.stage === 'submit' && transfer.state === 'awaiting_signature') {
+  if (e instanceof PayoutAuthorizationError && from === 'payout_quoted') {
+    transfer.move('needs_attention', `${e.message}; the USDC stays in the account`, 'authorization_failed');
+    return;
+  }
+  if (e instanceof QuoteExpiredError && e.stage === 'signing' && from === 'awaiting_signature') {
+    transfer.move('funded', `${e.message}; nothing was submitted, get a fresh quote`, 'quote_expired_before_signing');
+    return;
+  }
+  if (e instanceof PayoutIncompleteError && e.stage === 'submit' && from === 'awaiting_signature') {
     const tx = e.txHash === undefined ? '' : ` tx ${short(e.txHash)}`;
     transfer.move(
       'needs_attention',
       `submit ended ${e.outcome?.status ?? 'without an outcome'}; check${tx} on Stellar, do not sign again`,
+      'submission_rejected_or_unknown',
     );
     return;
   }
-  if (e instanceof PayoutIncompleteError && e.stage === 'create' && transfer.state === 'payout_submitted') {
-    transfer.move('needs_attention', 'the partner did not take the payout; retry with the stored body and key');
+  if (e instanceof PayoutIncompleteError && e.stage === 'create' && from === 'payout_submitted') {
+    transfer.move(
+      'needs_attention',
+      'the partner did not take the payout; retry with the stored body and key',
+      'partner_refused_or_unknown',
+    );
     return;
   }
   throw e;
