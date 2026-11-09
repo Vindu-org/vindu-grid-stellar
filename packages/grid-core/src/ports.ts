@@ -139,7 +139,11 @@ export interface ExecutePayoutInput {
   readonly idempotencyKey: string;
   /** Signed XDR, for the signed payout flow. */
   readonly signedXdr?: string;
-  /** Hash of the submitted Stellar transaction, when the caller submitted it. */
+  /**
+   * Hash of the submitted Stellar transaction, when the caller submitted it.
+   * Set only after the submitter reported `success`: a payout is never
+   * created for a transaction that is not confirmed on the ledger.
+   */
   readonly txHash?: string;
 }
 
