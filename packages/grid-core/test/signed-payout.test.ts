@@ -467,6 +467,23 @@ describe('signed payout', () => {
       expect(signStellar).not.toHaveBeenCalled();
     });
 
+    // Review probe: an onAuthorized that stored unconditionally let two concurrent
+    // runs for one transfer both reach the signer.
+    it('as a compare-and-set, lets only one of two concurrent runs sign', async () => {
+      const s = setup();
+      const casOnAuthorized = async () => {
+        await Promise.resolve();
+        if (s.store.state !== 'payout_quoted') throw new Error('transfer already moved');
+        s.store.state = transition(s.store.state, 'awaiting_signature', 'signed_payout_flow').to;
+        return s.store.state;
+      };
+      const run = () => runSignedPayout(withSigning(s.input, { onAuthorized: casOnAuthorized }));
+      const results = await Promise.allSettled([run(), run()]);
+      expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+      expect(s.signStellar).toHaveBeenCalledTimes(1);
+      expect(s.submit).toHaveBeenCalledTimes(1);
+    });
+
     it('stops before signing when it throws, with its own error', async () => {
       const { input, onAuthorized, signStellar } = setup();
       onAuthorized.mockRejectedValueOnce(new Error('db down'));
