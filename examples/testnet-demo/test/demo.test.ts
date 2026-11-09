@@ -43,6 +43,26 @@ describe('testnet demo', () => {
     expect(lines.join('\n')).toContain('1 submission(s), 0 hash lookup(s)');
   });
 
+  it('stores payout_submitted and retries the create when storing it fails after the transaction landed', async () => {
+    const lines: string[] = [];
+    const result = await runDemo({
+      log: (line) => lines.push(line),
+      simulateHorizonTimeout: false,
+      simulateRecordFailure: true,
+    });
+
+    expect(result.finalState).toBe('completed');
+    expect(result.history).toEqual(FULL_PATH);
+    expect(result.payoutTxHash).toMatch(/^[0-9a-f]{64}$/);
+    const output = lines.join('\n');
+    expect(output).toContain('(the transfer store fails while storing payout_submitted)');
+    expect(output).toContain('stored on the second try, nothing is signed again');
+    expect(output).toContain('retryPayoutExecute: the same body and idempotency key, never a new quote');
+    expect(output.match(/then signed once/g)).toHaveLength(1);
+    expect(output.match(/submit: success/g)).toHaveLength(1);
+    expect(output).toMatch(/matched demo-transfer-1\/payout on .*tx_hash, reference/);
+  });
+
   it('stops in needs_attention, without creating the payout, when Horizon refuses the submission', async () => {
     const lines: string[] = [];
     const result = await runDemo({

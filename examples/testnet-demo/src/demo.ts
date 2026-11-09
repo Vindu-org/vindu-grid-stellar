@@ -36,6 +36,12 @@ export interface DemoOptions {
    * signed. Default false.
    */
   readonly simulateAuthorizationFailure?: boolean;
+  /**
+   * Make storing `payout_submitted` fail once, after the transaction landed.
+   * The demo then stores it and creates the payout with
+   * `retryPayoutExecute`, and still reaches `completed`. Default false.
+   */
+  readonly simulateRecordFailure?: boolean;
 }
 
 export interface DemoResult {
@@ -128,6 +134,7 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
           simulateHorizonTimeout: options.simulateHorizonTimeout ?? true,
           simulateSubmitRejection: options.simulateSubmitRejection ?? false,
           simulateAuthorizationFailure: options.simulateAuthorizationFailure ?? false,
+          simulateRecordFailure: options.simulateRecordFailure ?? false,
         });
 
   log('');

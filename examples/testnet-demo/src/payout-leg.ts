@@ -28,17 +28,22 @@
  *   nothing was submitted;
  * - the signer refuses or fails: `awaiting_signature -> needs_attention` (signer_refused);
  * - the submit outcome is anything but `success`: `awaiting_signature -> needs_attention`;
+ * - the transaction landed but storing `payout_submitted` failed: store it
+ *   (`awaiting_signature -> payout_submitted`), then `retryPayoutExecute`
+ *   with the pending body and key; never re-quote, never sign again;
  * - the partner does not take the payout: `payout_submitted -> needs_attention`;
  * - the payout is not on chain as signed, or does not land:
  *   `payout_processing -> needs_attention`.
  */
 import {
+  type ExecutePayoutInput,
   type LegQuote,
   type LogFields,
   type Logger,
   type Money,
   PayoutAuthorizationError,
   PayoutIncompleteError,
+  type PendingPayout,
   QuoteExpiredError,
   type SignedPayoutContext,
   type SignedPayoutResult,
@@ -46,6 +51,7 @@ import {
   SigningNotAllowedError,
   type StellarSubmitter,
   checkPayoutTolerance,
+  retryPayoutExecute,
   runSignedPayout,
   signingContextFor,
 } from '@vindu/grid-core';
@@ -69,6 +75,8 @@ export interface PayoutOptions {
   readonly simulateSubmitRejection?: boolean;
   /** Make the partner refuse to authorize the payout, to show that failure edge. */
   readonly simulateAuthorizationFailure?: boolean;
+  /** Make storing `payout_submitted` fail once, to show the recovery with `retryPayoutExecute`. */
+  readonly simulateRecordFailure?: boolean;
 }
 
 /** Returns the payout transaction hash, or `undefined` when the transfer stopped short of `completed`. */
@@ -194,6 +202,10 @@ export async function runPayoutLeg(
           ),
         // The money moved: the transfer is payout_submitted before the partner hears about it.
         onSubmitted: (outcome) => {
+          if (options.simulateRecordFailure === true) {
+            log('    (the transfer store fails while storing payout_submitted)');
+            throw new Error('the transfer store did not answer');
+          }
           transfer.compareAndMove(
             'awaiting_signature',
             'payout_submitted',
@@ -204,8 +216,9 @@ export async function runPayoutLeg(
       },
     });
   } catch (e) {
-    stopPayout(transfer, e);
-    return undefined;
+    const recovered = await recoverPayout(ctx, e);
+    if (recovered === undefined) return undefined;
+    result = recovered;
   }
 
   // 4. The partner took the signed transaction and its hash.
@@ -251,6 +264,35 @@ export async function runPayoutLeg(
 }
 
 /**
+ * After `runSignedPayout` threw. When the transaction is on the ledger but
+ * `onSubmitted` failed (`stage: 'record'`), the money has moved: store
+ * `payout_submitted` now, then create the payout with `retryPayoutExecute`
+ * and the pending body and key. Never re-quote, never sign again. Anything
+ * else stops on its failure edge, and this returns `undefined`.
+ */
+async function recoverPayout(ctx: LegContext, e: unknown): Promise<SignedPayoutResult | undefined> {
+  const { transfer, log } = ctx;
+  const { partner } = ctx.world;
+  if (!(e instanceof PayoutIncompleteError && e.stage === 'record' && e.pending !== undefined)) {
+    stopPayout(transfer, e);
+    return undefined;
+  }
+  transfer.compareAndMove(
+    'awaiting_signature',
+    'payout_submitted',
+    `tx ${short(e.txHash ?? '')} is on the ledger; stored on the second try, nothing is signed again`,
+    'signed_and_on_chain',
+  );
+  log('    retryPayoutExecute: the same body and idempotency key, never a new quote');
+  try {
+    return await retryPayoutExecute(partner, e.pending as PendingPayout<ExecutePayoutInput>);
+  } catch (retryError) {
+    stopPayout(transfer, retryError);
+    return undefined;
+  }
+}
+
+/**
  * Moves the transfer along the failure edge for an error from
  * `runSignedPayout`, or rethrows an error the demo does not expect.
  */
@@ -270,11 +312,6 @@ function stopPayout(transfer: Transfer, e: unknown): void {
   }
   if (e instanceof SignerRefusedError && from === 'awaiting_signature') {
     transfer.move('needs_attention', `${e.message}; the USDC stays in the account`, 'signer_refused');
-    return;
-  }
-  if (e instanceof PayoutIncompleteError && e.stage === 'record' && from === 'awaiting_signature') {
-    // The money moved but was not recorded: record it now, then the create is retried, never re-quoted.
-    transfer.move('payout_submitted', `tx ${short(e.txHash ?? '')} is on the ledger; retry the create with the stored body and key`, 'signed_and_on_chain');
     return;
   }
   if (e instanceof PayoutIncompleteError && e.stage === 'submit' && from === 'awaiting_signature') {
