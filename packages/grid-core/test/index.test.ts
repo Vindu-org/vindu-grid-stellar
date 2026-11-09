@@ -33,4 +33,8 @@ describe('index exports', () => {
   ])('exports %s', (name) => {
     expect(core).toHaveProperty(name);
   });
+
+  it.each(['PARTNER_ERROR_SNIPPET_MAX', 'STELLAR'])('keeps %s internal', (name) => {
+    expect(core).not.toHaveProperty(name);
+  });
 });
