@@ -2,11 +2,18 @@
  * The Horizon gateway.
  *
  * Everything in this package reads from and writes to Stellar through the
- * small {@link HorizonGateway} interface below. The default implementation
- * wraps `Horizon.Server` from `@stellar/stellar-sdk`; tests and other runtimes
- * pass their own. The gateway returns plain data and never logs.
+ * small {@link HorizonGateway} interface below. The default implementation,
+ * {@link createHorizonGateway}, reads with `fetch` (the SDK hides response
+ * headers, and the lookups need Horizon's `Latest-Ledger` header) and submits
+ * through `Horizon.Server` from `@stellar/stellar-sdk`. Tests and other
+ * runtimes pass their own gateway. The gateway returns plain data and never
+ * logs.
+ *
+ * Point the gateway at one Horizon instance you operate or trust to be
+ * consistent, not at a public load-balanced URL: see `TESTNET_HORIZON_URL`.
  */
-import { Horizon, NotFoundError, TransactionBuilder } from './sdk';
+import { InvalidConfigError, InvalidInputError } from '@vindu/grid-core';
+import { Horizon, TransactionBuilder, stellarSdk } from './sdk';
 
 /** One operation from Horizon's payments endpoint, in Horizon's own field names. */
 export interface HorizonPaymentRecord {
@@ -45,17 +52,46 @@ export interface PaymentsQuery {
   readonly order: 'asc' | 'desc';
 }
 
+/** Lets the caller abandon a request. A gateway should stop the request and reject when `signal` aborts. */
+export interface HorizonRequestOptions {
+  readonly signal?: AbortSignal;
+}
+
+/** A transaction's result codes as Horizon names them, e.g. `tx_failed` and `['op_underfunded']`. */
+export interface HorizonResultCodes {
+  readonly transaction?: string;
+  readonly operations: readonly string[];
+}
+
 /** A transaction as found on Horizon. Failed transactions are found too. */
 export interface HorizonTransactionFound {
   readonly found: true;
+  /** Hash of the record Horizon returned. For a fee bump looked up by its inner hash this may be either hash. */
   readonly hash: string;
+  /** Hash of the inner transaction, when the record is a fee bump (Horizon's `inner_transaction.hash`). */
+  readonly innerHash?: string;
   /** False when the transaction is in a ledger but failed: its fee and sequence are spent, nothing moved. */
   readonly successful: boolean;
   readonly ledger?: number;
   readonly createdAt?: string;
+  /** The transaction's own result codes, read from its result on the ledger, when available. */
+  readonly resultCodes?: HorizonResultCodes;
+  /** Latest ledger the answering Horizon instance had ingested (its `Latest-Ledger` header). */
+  readonly latestLedger?: number;
 }
 
-export type HorizonTransactionLookup = HorizonTransactionFound | { readonly found: false };
+/** Not on the ledger, as far as the answering instance knows. */
+export interface HorizonTransactionNotFound {
+  readonly found: false;
+  /**
+   * Latest ledger the answering Horizon instance had ingested (its
+   * `Latest-Ledger` header). Without it a "not found" proves nothing about
+   * any ledger, so it never counts towards `expired_not_landed`.
+   */
+  readonly latestLedger?: number;
+}
+
+export type HorizonTransactionLookup = HorizonTransactionFound | HorizonTransactionNotFound;
 
 /** Horizon's answer to a transaction submission, reduced to what callers act on. */
 export type HorizonSubmitResponse =
@@ -100,6 +136,13 @@ export interface HorizonLedger {
   readonly sequence: number;
   /** Close time of the ledger, as the network recorded it (whole seconds). */
   readonly closedAt: Date;
+  /**
+   * Oldest ledger the instance keeps history for (`history_elder_ledger`).
+   * A transaction in an older ledger is not found there. Without it the
+   * instance's history cannot be shown to cover a submission, so it never
+   * counts towards `expired_not_landed`.
+   */
+  readonly elderLedger?: number;
 }
 
 export interface HorizonGateway {
@@ -109,23 +152,54 @@ export interface HorizonGateway {
    */
   readonly networkPassphrase: string;
   /**
-   * The latest ledger Horizon has ingested. Horizon ingests ledgers in order,
-   * so every transaction in this ledger or an earlier one can be looked up.
-   * Network errors throw.
+   * The latest ledger Horizon has ingested, and the oldest it keeps. Horizon
+   * ingests ledgers in order, so every transaction from the elder ledger up
+   * to this one can be looked up on the same instance. Network errors throw.
    */
-  latestLedger(): Promise<HorizonLedger>;
+  latestLedger(options?: HorizonRequestOptions): Promise<HorizonLedger>;
   /** Payments (payment, path payment, create account, merge) that touch `account`. Successful transactions only. */
-  paymentsForAccount(account: string, query: PaymentsQuery): Promise<readonly HorizonPaymentRecord[]>;
-  /** Looks a transaction up by hash. Not found is a result; network errors throw. */
-  transaction(hash: string): Promise<HorizonTransactionLookup>;
+  paymentsForAccount(
+    account: string,
+    query: PaymentsQuery,
+    options?: HorizonRequestOptions,
+  ): Promise<readonly HorizonPaymentRecord[]>;
+  /**
+   * Looks a transaction up by hash. Not found is a result; network errors and
+   * timeouts throw. Found or not, the answer carries the answering
+   * instance's latest ingested ledger when Horizon reports it.
+   */
+  transaction(hash: string, options?: HorizonRequestOptions): Promise<HorizonTransactionLookup>;
   /** Submits a signed transaction envelope (base64 XDR) and waits for Horizon's answer. Never throws for HTTP errors. */
   submitTransaction(signedXdr: string): Promise<HorizonSubmitResponse>;
   /** The account, or `null` when it does not exist on the network. */
-  account(address: string): Promise<HorizonAccount | null>;
+  account(address: string, options?: HorizonRequestOptions): Promise<HorizonAccount | null>;
 }
 
+/** What {@link createHorizonGateway} passes to `fetch`. A subset of the standard `RequestInit`. */
+export interface HorizonFetchInit {
+  readonly method: 'GET';
+  readonly headers: Readonly<Record<string, string>>;
+  readonly signal: AbortSignal;
+  readonly redirect: 'error';
+}
+
+/** What {@link createHorizonGateway} reads from a `fetch` response. The standard `Response` has this shape. */
+export interface HorizonFetchResponse {
+  readonly status: number;
+  readonly headers: { get(name: string): string | null };
+  json(): Promise<unknown>;
+}
+
+/** A `fetch` for Horizon GETs. The global `fetch` fits. */
+export type HorizonFetch = (url: string, init: HorizonFetchInit) => Promise<HorizonFetchResponse>;
+
 export interface HorizonGatewayOptions {
-  /** Horizon base URL, e.g. `TESTNET_HORIZON_URL`. */
+  /**
+   * Horizon base URL. Use one instance you operate or trust to be
+   * consistent, not a public load-balanced URL such as `TESTNET_HORIZON_URL`:
+   * reads served by instances at different ledgers can make a landed
+   * transaction look missing.
+   */
   readonly horizonUrl: string;
   /**
    * Passphrase of the network behind `horizonUrl`. Needed to decode the
@@ -136,98 +210,131 @@ export interface HorizonGatewayOptions {
   /** Allow `http://` URLs, for a local Horizon. Default false. */
   readonly allowHttp?: boolean;
   /**
-   * Use this server instead of creating one, e.g. a `Horizon.Server` from
-   * `@stellar/stellar-sdk` with custom headers. Any object with the calls in
-   * {@link HorizonServer} works.
+   * Longest wait for one Horizon GET (ledger, lookup, payments, account),
+   * in ms. A GET that takes longer is aborted and throws. Default 10 s.
+   */
+  readonly requestTimeoutMs?: number;
+  /** `fetch` for the GETs. Default the global `fetch`. */
+  readonly fetch?: HorizonFetch;
+  /**
+   * Submit through this server instead of creating one, e.g. a
+   * `Horizon.Server` from `@stellar/stellar-sdk` with custom headers. Only
+   * its `submitTransaction` is used; reads always go through `fetch`.
    */
   readonly server?: HorizonServer;
 }
 
-/** A Horizon request that resolves to one resource or one page. */
-export interface HorizonCall<T> {
-  call(): Promise<T>;
-}
-
-/** One page of a Horizon collection. Records are checked field by field before use. */
-export interface HorizonPage {
-  readonly records: readonly unknown[];
-}
-
-/** A Horizon collection request, e.g. `server.payments()`. */
-export interface HorizonCollectionCall extends HorizonCall<HorizonPage> {
-  order(direction: 'asc' | 'desc'): HorizonCollectionCall;
-  limit(records: number): HorizonCollectionCall;
-  cursor(cursor: string): HorizonCollectionCall;
-}
-
-export interface HorizonPaymentsCall extends HorizonCollectionCall {
-  forAccount(account: string): HorizonPaymentsCall;
-  join(include: 'transactions'): HorizonPaymentsCall;
-  order(direction: 'asc' | 'desc'): HorizonPaymentsCall;
-  limit(records: number): HorizonPaymentsCall;
-  cursor(cursor: string): HorizonPaymentsCall;
-}
-
 /**
- * The calls {@link createHorizonGateway} makes on a Horizon server. A
- * `Horizon.Server` from `@stellar/stellar-sdk` has this shape; the type is
+ * The call {@link createHorizonGateway} makes on a Horizon server to submit.
+ * A `Horizon.Server` from `@stellar/stellar-sdk` has this shape; the type is
  * structural so this package's public types do not depend on the SDK's.
  * Answers are typed `unknown` and checked before use.
  */
 export interface HorizonServer {
-  payments(): HorizonPaymentsCall;
-  ledgers(): HorizonCollectionCall;
-  transactions(): { transaction(hash: string): HorizonCall<unknown> };
-  accounts(): { accountId(accountId: string): HorizonCall<unknown> };
   /** Receives the decoded envelope (an SDK `Transaction` or `FeeBumpTransaction`). */
   submitTransaction(transaction: { toXDR(): string }, options: { skipMemoRequiredCheck: boolean }): Promise<unknown>;
 }
 
-/** {@link HorizonGateway} over `@stellar/stellar-sdk`'s `Horizon.Server`, or any {@link HorizonServer}. */
+/** Default longest wait for one Horizon GET. */
+export const DEFAULT_HORIZON_REQUEST_TIMEOUT_MS = 10_000;
+
+/** Longest delay `setTimeout` honours; anything longer fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+const HASH = /^[0-9a-f]{64}$/i;
+const LEDGER_HEADER = /^[1-9][0-9]{0,9}$/;
+
+/**
+ * {@link HorizonGateway} over Horizon's REST API: GETs with `fetch`, each
+ * with a timeout, and submission through `Horizon.Server` (or `server`).
+ *
+ * @throws {InvalidConfigError} when the URL is not https (unless `allowHttp`
+ * and http), `requestTimeoutMs` is out of range, or no `fetch` is available.
+ */
 export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGateway {
-  const server: HorizonServer =
-    options.server ?? new Horizon.Server(options.horizonUrl, { allowHttp: options.allowHttp ?? false });
+  const base = baseUrl(options.horizonUrl, options.allowHttp ?? false);
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_HORIZON_REQUEST_TIMEOUT_MS;
+  if (
+    typeof requestTimeoutMs !== 'number' ||
+    !Number.isFinite(requestTimeoutMs) ||
+    requestTimeoutMs < 1 ||
+    requestTimeoutMs > MAX_TIMER_MS
+  ) {
+    throw new InvalidConfigError(`requestTimeoutMs must be a finite number of milliseconds from 1 to ${MAX_TIMER_MS}`);
+  }
+  const fetchFn: HorizonFetch | undefined = options.fetch ?? (globalThis.fetch as HorizonFetch | undefined);
+  if (typeof fetchFn !== 'function') throw new InvalidConfigError('No fetch available: pass the fetch option');
+  let server = options.server;
+  const submitServer = (): HorizonServer =>
+    (server ??= new Horizon.Server(options.horizonUrl, { allowHttp: options.allowHttp ?? false }));
+
+  /** GETs `path`. 404 gives `null` body; any other non-2xx, a network error or a timeout throws. */
+  async function get(path: string, signal: AbortSignal | undefined): Promise<{ body: unknown; latestLedger?: number }> {
+    const timeout = AbortSignal.timeout(requestTimeoutMs);
+    const res = await (fetchFn as HorizonFetch)(`${base}${path}`, {
+      method: 'GET',
+      headers: { Accept: 'application/hal+json, application/json' },
+      signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      redirect: 'error',
+    });
+    const header = res.headers.get('latest-ledger')?.trim();
+    const latestLedger = header !== undefined && LEDGER_HEADER.test(header) ? Number(header) : undefined;
+    const withLedger = latestLedger === undefined ? {} : { latestLedger };
+    if (res.status === 404) return { body: null, ...withLedger };
+    if (res.status < 200 || res.status > 299) throw new HorizonRequestError(res.status);
+    return { body: await res.json(), ...withLedger };
+  }
 
   return {
     networkPassphrase: options.networkPassphrase,
 
-    async latestLedger() {
-      const page = await server.ledgers().order('desc').limit(1).call();
-      const ledger = asObject(page.records[0]);
-      const sequence = ledger['sequence'];
-      const closedAt = typeof ledger['closed_at'] === 'string' ? new Date(ledger['closed_at']) : null;
-      if (typeof sequence !== 'number' || !Number.isInteger(sequence) || closedAt === null || Number.isNaN(closedAt.getTime())) {
+    async latestLedger(request) {
+      // The root resource describes one instance: what it has ingested and
+      // the oldest ledger it keeps, in one answer.
+      const { body } = await get('/', request?.signal);
+      const root = asObject(body);
+      const sequence = root['history_latest_ledger'];
+      const closedRaw = root['history_latest_ledger_closed_at'];
+      const closedAt = typeof closedRaw === 'string' ? new Date(closedRaw) : null;
+      if (!isLedgerNumber(sequence) || closedAt === null || Number.isNaN(closedAt.getTime())) {
         throw new Error('Horizon returned no usable latest ledger');
       }
-      return { sequence, closedAt };
+      const elder = root['history_elder_ledger'];
+      return { sequence, closedAt, ...(isLedgerNumber(elder) ? { elderLedger: elder } : {}) };
     },
 
-    async paymentsForAccount(account, query) {
-      let builder = server.payments().forAccount(account).order(query.order).limit(query.limit).join('transactions');
-      if (query.cursor !== undefined) builder = builder.cursor(query.cursor);
-      const page = await builder.call();
-      return page.records.map((r) => toPaymentRecord(asObject(r)));
+    async paymentsForAccount(account, query, request) {
+      const params = new URLSearchParams({ order: query.order, limit: String(query.limit), join: 'transactions' });
+      if (query.cursor !== undefined) params.set('cursor', query.cursor);
+      const { body } = await get(`/accounts/${encodeURIComponent(account)}/payments?${params.toString()}`, request?.signal);
+      if (body === null) throw new HorizonRequestError(404);
+      const records = asObject(asObject(body)['_embedded'])['records'];
+      if (!Array.isArray(records)) throw new Error('Horizon returned a payments page without records');
+      return records.map((r) => toPaymentRecord(asObject(r)));
     },
 
-    async transaction(hash) {
-      let tx: Record<string, unknown>;
-      try {
-        tx = asObject(await server.transactions().transaction(hash).call());
-      } catch (e) {
-        if (e instanceof NotFoundError || httpStatus(e) === 404) return { found: false };
-        throw e;
-      }
+    async transaction(hash, request) {
+      if (typeof hash !== 'string' || !HASH.test(hash)) throw new InvalidInputError('A transaction hash is 64 hex characters');
+      const { body, latestLedger } = await get(`/transactions/${hash.toLowerCase()}`, request?.signal);
+      const ingested = latestLedger === undefined ? {} : { latestLedger };
+      if (body === null) return { found: false, ...ingested };
+      const tx = asObject(body);
       // An answer without these fields is not an answer: fail the lookup
       // rather than report something about the transaction.
       if (typeof tx['hash'] !== 'string' || typeof tx['successful'] !== 'boolean') {
         throw new Error('Horizon returned a transaction without a hash or a result');
       }
+      const innerHash = asObject(tx['inner_transaction'])['hash'];
+      const resultCodes = typeof tx['result_xdr'] === 'string' ? resultCodesFromXdr(tx['result_xdr']) : undefined;
       return {
         found: true,
         hash: tx['hash'],
         successful: tx['successful'],
-        ...(typeof tx['ledger_attr'] === 'number' ? { ledger: tx['ledger_attr'] } : {}),
+        ...(typeof innerHash === 'string' ? { innerHash } : {}),
+        ...(typeof tx['ledger'] === 'number' ? { ledger: tx['ledger'] } : {}),
         ...(typeof tx['created_at'] === 'string' ? { createdAt: tx['created_at'] } : {}),
+        ...(resultCodes === undefined ? {} : { resultCodes }),
+        ...ingested,
       };
     },
 
@@ -237,7 +344,7 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       try {
         // The envelope is already signed: submit it exactly as is, without the
         // extra account lookups of the memo-required check.
-        res = asObject(await server.submitTransaction(tx, { skipMemoRequiredCheck: true }));
+        res = asObject(await submitServer().submitTransaction(tx, { skipMemoRequiredCheck: true }));
       } catch (e) {
         return toSubmitFailure(e);
       }
@@ -254,14 +361,10 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       };
     },
 
-    async account(address) {
-      let acc: Record<string, unknown>;
-      try {
-        acc = asObject(await server.accounts().accountId(address).call());
-      } catch (e) {
-        if (e instanceof NotFoundError || httpStatus(e) === 404) return null;
-        throw e;
-      }
+    async account(address, request) {
+      const { body } = await get(`/accounts/${encodeURIComponent(address)}`, request?.signal);
+      if (body === null) return null;
+      const acc = asObject(body);
       return {
         id: acc['id'],
         sequence: acc['sequence'],
@@ -272,6 +375,34 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       } as HorizonAccount;
     },
   };
+}
+
+/** A Horizon GET answered with a status other than 2xx or 404. Carries the status only, never the body. */
+class HorizonRequestError extends Error {
+  constructor(readonly status: number) {
+    super(`Horizon answered HTTP ${status}`);
+    this.name = 'HorizonRequestError';
+  }
+}
+
+function baseUrl(raw: string, allowHttp: boolean): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new InvalidConfigError('horizonUrl is not a URL');
+  }
+  if (url.protocol !== 'https:' && !(allowHttp && url.protocol === 'http:')) {
+    throw new InvalidConfigError('horizonUrl must use https (set allowHttp for a local http Horizon)');
+  }
+  if (url.search !== '' || url.hash !== '' || url.username !== '' || url.password !== '') {
+    throw new InvalidConfigError('horizonUrl must have no query, fragment or credentials');
+  }
+  return url.toString().replace(/\/+$/, '');
+}
+
+function isLedgerNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -289,13 +420,67 @@ function toPaymentRecord(r: Record<string, unknown>): HorizonPaymentRecord {
   const out: Record<string, unknown> = {};
   for (const k of PAYMENT_FIELDS) if (typeof r[k] === 'string') out[k] = r[k];
   if (typeof r['transaction_successful'] === 'boolean') out['transaction_successful'] = r['transaction_successful'];
-  // With join=transactions the SDK keeps the embedded transaction under `transaction_attr`.
-  const tx = r['transaction_attr'] as Record<string, unknown> | undefined;
-  if (tx !== undefined && tx !== null) {
-    if (typeof tx['memo'] === 'string') out['memo'] = tx['memo'];
-    if (typeof tx['memo_type'] === 'string') out['memo_type'] = tx['memo_type'];
-  }
+  // With join=transactions Horizon embeds the transaction under `transaction`.
+  const tx = asObject(r['transaction']);
+  if (typeof tx['memo'] === 'string') out['memo'] = tx['memo'];
+  if (typeof tx['memo_type'] === 'string') out['memo_type'] = tx['memo_type'];
   return out as unknown as HorizonPaymentRecord;
+}
+
+/** Codes Horizon spells differently from the XDR names. */
+const CODE_ALIASES: Readonly<Record<string, string>> = { tx_no_account: 'tx_no_source_account' };
+
+/**
+ * Result codes of a transaction from its `result_xdr`, named as Horizon
+ * names them (`txFailed` becomes `tx_failed`, `paymentUnderfunded` becomes
+ * `op_underfunded`). For a fee bump the inner transaction's operations
+ * decide. `undefined` when the XDR cannot be read.
+ */
+function resultCodesFromXdr(resultXdr: string): HorizonResultCodes | undefined {
+  try {
+    const decoded = asObject(stellarSdk.xdr.TransactionResult.fromXDR(resultXdr, 'base64'));
+    let result = asObject(decoded['result']);
+    const transaction = xdrCode('tx', result['type']);
+    if (transaction === undefined) return undefined;
+    const pair = asObject(result['innerResultPair']);
+    if (pair['result'] !== undefined) result = asObject(asObject(pair['result'])['result']);
+    const ops = Array.isArray(result['results']) ? (result['results'] as unknown[]) : [];
+    const operations: string[] = [];
+    for (const op of ops) {
+      const code = operationCode(asObject(op));
+      if (code !== undefined) operations.push(code);
+    }
+    return { transaction, operations };
+  } catch {
+    return undefined;
+  }
+}
+
+function operationCode(op: Record<string, unknown>): string | undefined {
+  if (op['type'] !== 'opInner') return xdrCode('op', op['type']);
+  const tr = asObject(op['tr']);
+  const opType = tr['type'];
+  if (typeof opType !== 'string') return undefined;
+  for (const [key, value] of Object.entries(tr)) {
+    if (key === 'type') continue;
+    const name = asObject(value)['type'];
+    if (typeof name === 'string' && name.startsWith(opType)) return `op_${snake(name.slice(opType.length))}`;
+  }
+  return undefined;
+}
+
+/** `txFailed` -> `tx_failed`; `opBadAuth` -> `op_bad_auth`. */
+function xdrCode(prefix: 'tx' | 'op', name: unknown): string | undefined {
+  if (typeof name !== 'string' || !name.startsWith(prefix)) return undefined;
+  const code = `${prefix}_${snake(name.slice(prefix.length))}`;
+  return CODE_ALIASES[code] ?? code;
+}
+
+function snake(camel: string): string {
+  return camel
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/^_/, '')
+    .toLowerCase();
 }
 
 function httpStatus(e: unknown): number | null {

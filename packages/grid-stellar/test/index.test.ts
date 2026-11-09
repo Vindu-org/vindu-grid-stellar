@@ -11,6 +11,7 @@ describe('index exports', () => {
     'submitSignedTransaction',
     'inspectSignedTransaction',
     'createStellarSubmitter',
+    'DEFAULT_HORIZON_REQUEST_TIMEOUT_MS',
     'toSubmitOutcome',
     'assessReceiveReadiness',
     'checkReceiveReadiness',
@@ -23,7 +24,7 @@ describe('index exports', () => {
     expect(stellar).toHaveProperty(name);
   });
 
-  it.each(['stellarSdk', 'normalisePayment', 'assetFromHorizon', 'mapResultCodes'])('keeps %s internal', (name) => {
+  it.each(['stellarSdk', 'normalisePayment', 'assetFromHorizon', 'mapResultCodes', 'resultCodesFromXdr'])('keeps %s internal', (name) => {
     expect(stellar).not.toHaveProperty(name);
   });
 

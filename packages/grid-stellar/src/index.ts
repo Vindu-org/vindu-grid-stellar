@@ -26,20 +26,23 @@ export {
 } from './accounts';
 export {
   createHorizonGateway,
+  DEFAULT_HORIZON_REQUEST_TIMEOUT_MS,
   type HorizonAccount,
   type HorizonBalanceLine,
-  type HorizonCall,
-  type HorizonCollectionCall,
+  type HorizonFetch,
+  type HorizonFetchInit,
+  type HorizonFetchResponse,
   type HorizonGateway,
   type HorizonGatewayOptions,
   type HorizonLedger,
-  type HorizonPage,
   type HorizonPaymentRecord,
-  type HorizonPaymentsCall,
+  type HorizonRequestOptions,
+  type HorizonResultCodes,
   type HorizonServer,
   type HorizonSubmitResponse,
   type HorizonTransactionFound,
   type HorizonTransactionLookup,
+  type HorizonTransactionNotFound,
   type PaymentsQuery,
 } from './horizon';
 export {
