@@ -10,6 +10,11 @@
  *    alternative by more than `stellarPriceLimitBps`.
  * 4. Without a Stellar route (or with Stellar routing disabled), pick the best price.
  *
+ * Prices are compared as cost: source paid per unit of target received. The
+ * gap is `(stellarCost - bestCost) / bestCost`, so "1% worse" means the
+ * Stellar route needs 1% more source for the same target. The measure is the
+ * same whether the partners quoted a fixed source or a fixed target.
+ *
  * The chosen route is stored on the transfer and never changes after the
  * funding leg is created: the client's money is already committed to that
  * partner, so there is no silent failover. See {@link assertRouteImmutable}.
@@ -45,9 +50,10 @@ export interface RouteOptions {
   /** When false, Stellar candidates compete on price like any other. */
   readonly stellarRoutingEnabled: boolean;
   /**
-   * Safeguard against an abnormal Stellar quote, in integer basis points. When
-   * set, the Stellar route loses only if its price is worse than the best
-   * alternative by more than this. When undefined, the Stellar route always wins.
+   * Safeguard against an abnormal Stellar quote, in integer basis points of
+   * cost (source per unit of target). When set, the Stellar route loses only
+   * if it costs more than the best alternative by more than this. When
+   * undefined, the Stellar route always wins.
    */
   readonly stellarPriceLimitBps?: number;
 }
@@ -85,8 +91,9 @@ export interface RouteDecision {
   readonly price: RoutePrice;
   readonly reason: RouteReason;
   /**
-   * How much worse the best Stellar price is than the best other price, in
-   * basis points rounded up; 0 when it is not worse. Present when both exist.
+   * How much more the best Stellar route costs than the best other route
+   * (source per unit of target), in basis points rounded up to 0.01; 0 when
+   * it costs no more. Present when both exist.
    */
   readonly stellarPriceGapBps?: number;
   readonly excluded: readonly CandidateExclusion[];
@@ -186,14 +193,18 @@ function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** Numerator and denominator of (altRate - rate) / altRate, all exact. */
+/**
+ * Numerator and denominator of (cost - altCost) / altCost, exact, where
+ * cost = source / target. Cross-multiplied:
+ * (source * altTarget - altSource * target) / (altSource * target).
+ */
 function gapFraction(price: RoutePrice, alternative: RoutePrice): [bigint, bigint] {
-  const den = toUnits(alternative.target) * toUnits(price.source);
-  const num = den - toUnits(price.target) * toUnits(alternative.source);
+  const den = toUnits(alternative.source) * toUnits(price.target);
+  const num = toUnits(price.source) * toUnits(alternative.target) - den;
   return [num, den];
 }
 
-/** Exact: is `price` worse than `alternative` by more than `limitBps`? */
+/** Exact: does `price` cost more than `alternative` by more than `limitBps`? */
 function worseByMoreThan(price: RoutePrice, alternative: RoutePrice, limitBps: number): boolean {
   const [num, den] = gapFraction(price, alternative);
   return num * 10_000n > BigInt(limitBps) * den;

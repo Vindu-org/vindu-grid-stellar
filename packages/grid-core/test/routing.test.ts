@@ -83,14 +83,14 @@ describe('routing', () => {
   });
 
   it('Stellar beats a cheaper non-Stellar route within the limit', () => {
-    // Stellar is (9550 - 9500) / 9550 = 52.36 bps worse.
+    // Stellar costs (50000/9500) / (50000/9550) - 1 = 9550/9500 - 1 = 52.64 bps more (rounded up).
     const d = selectRoute(
       [candidate('other-a', 'otherchain', '9550'), candidate('stellar-a', 'stellar', '9500')],
       opts({ stellarPriceLimitBps: 100 }),
     );
     expect(d.route.partner).toBe('stellar-a');
     expect(d.reason).toBe('stellar_priority');
-    expect(d.stellarPriceGapBps).toBe(52.36);
+    expect(d.stellarPriceGapBps).toBe(52.64);
   });
 
   it('Stellar loses only when its price is beyond the limit', () => {
@@ -100,14 +100,27 @@ describe('routing', () => {
     );
     expect(d.route).toEqual({ partner: 'other-a', chain: 'otherchain' });
     expect(d.reason).toBe('stellar_price_limit_exceeded');
-    expect(d.stellarPriceGapBps).toBe(52.36);
+    expect(d.stellarPriceGapBps).toBe(52.64);
   });
 
   it('Stellar exactly at the limit still wins', () => {
-    // (10000 - 9970) / 10000 = 30 bps exactly.
-    const cands = [candidate('other-a', 'otherchain', '10000'), candidate('stellar-a', 'stellar', '9970')];
-    expect(selectRoute(cands, opts({ stellarPriceLimitBps: 30 })).route.partner).toBe('stellar-a');
+    // Same target, Stellar needs 50150 instead of 50000: 30 bps more, exactly.
+    const stellar = candidate('stellar-a', 'stellar', '10000', {
+      price: { source: money('50150', BRL), target: money('10000', USD) },
+    });
+    const cands = [candidate('other-a', 'otherchain', '10000'), stellar];
+    const at = selectRoute(cands, opts({ stellarPriceLimitBps: 30 }));
+    expect(at.route.partner).toBe('stellar-a');
+    expect(at.stellarPriceGapBps).toBe(30);
     expect(selectRoute(cands, opts({ stellarPriceLimitBps: 29 })).route.partner).toBe('other-a');
+
+    // One unit of 10^-7 more source is beyond the limit.
+    const justOver = candidate('stellar-a', 'stellar', '10000', {
+      price: { source: money('50150.0000001', BRL), target: money('10000', USD) },
+    });
+    const over = selectRoute([candidate('other-a', 'otherchain', '10000'), justOver], opts({ stellarPriceLimitBps: 30 }));
+    expect(over.reason).toBe('stellar_price_limit_exceeded');
+    expect(over.stellarPriceGapBps).toBe(30.01);
   });
 
   it('without a limit the Stellar route always wins', () => {
@@ -119,17 +132,55 @@ describe('routing', () => {
     expect(d.reason).toBe('stellar_priority');
   });
 
-  it('compares by effective rate when source amounts differ', () => {
+  it('measures the gap as cost when source amounts differ', () => {
     // Fixed-target quotes: the Stellar route needs more BRL for the same USD.
     const stellar = candidate('stellar-a', 'stellar', '10000', {
       price: { source: money('50300', BRL), target: money('10000', USD) },
     });
     const other = candidate('other-a', 'otherchain', '10000');
-    // Gap = 1 - 50000/50300 = 59.65 bps (rounded up).
+    // Gap = 50300/50000 - 1 = 60 bps exactly.
     const within = selectRoute([stellar, other], opts({ stellarPriceLimitBps: 60 }));
     expect(within.route.partner).toBe('stellar-a');
-    expect(within.stellarPriceGapBps).toBe(59.65);
+    expect(within.stellarPriceGapBps).toBe(60);
     expect(selectRoute([stellar, other], opts({ stellarPriceLimitBps: 59 })).route.partner).toBe('other-a');
+  });
+
+  it('gives the same gap for a fixed-source and a fixed-target quote of the same cost', () => {
+    // Both Stellar quotes cost 1.25 BRL per USD; the alternative costs 1.
+    const price = (source: string, target: string) => ({ source: money(source, BRL), target: money(target, USD) });
+    const other = candidate('other-a', 'otherchain', '1', { price: price('10000', '10000') });
+    const fixedSource = candidate('stellar-a', 'stellar', '1', { price: price('10000', '8000') });
+    const fixedTarget = candidate('stellar-a', 'stellar', '1', { price: price('12500', '10000') });
+    for (const stellar of [fixedSource, fixedTarget]) {
+      const at = selectRoute([stellar, other], opts({ stellarPriceLimitBps: 2500 }));
+      expect(at).toMatchObject({ reason: 'stellar_priority', stellarPriceGapBps: 2500 });
+      const over = selectRoute([stellar, other], opts({ stellarPriceLimitBps: 2499 }));
+      expect(over).toMatchObject({ reason: 'stellar_price_limit_exceeded', stellarPriceGapBps: 2500 });
+    }
+  });
+
+  it('a fixed-source quote 10 USD short of 2000 is 50.26 bps more expensive, beyond a 50 bps limit', () => {
+    const price = (target: string) => ({ source: money('10000', BRL), target: money(target, USD) });
+    const cands = [
+      candidate('stellar-a', 'stellar', '1', { price: price('1990') }),
+      candidate('other-a', 'otherchain', '1', { price: price('2000') }),
+    ];
+    expect(selectRoute(cands, opts({ stellarPriceLimitBps: 50 }))).toMatchObject({
+      route: { partner: 'other-a' },
+      reason: 'stellar_price_limit_exceeded',
+      stellarPriceGapBps: 50.26,
+    });
+    expect(selectRoute(cands, opts({ stellarPriceLimitBps: 51 })).reason).toBe('stellar_priority');
+  });
+
+  it('a zero limit lets Stellar win only at an equal or better price', () => {
+    const equal = [candidate('stellar-a', 'stellar', '9550'), candidate('other-a', 'otherchain', '9550')];
+    expect(selectRoute(equal, opts({ stellarPriceLimitBps: 0 }))).toMatchObject({
+      reason: 'stellar_priority',
+      stellarPriceGapBps: 0,
+    });
+    const worse = [candidate('stellar-a', 'stellar', '9549.9999999'), candidate('other-a', 'otherchain', '9550')];
+    expect(selectRoute(worse, opts({ stellarPriceLimitBps: 0 })).reason).toBe('stellar_price_limit_exceeded');
   });
 
   it('with Stellar routing disabled, picks the best price', () => {
