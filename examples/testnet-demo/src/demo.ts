@@ -42,6 +42,19 @@ export interface DemoOptions {
    * `retryPayoutExecute`, and still reaches `completed`. Default false.
    */
   readonly simulateRecordFailure?: boolean;
+  /**
+   * Make storing `payout_submitted` commit, then lose the store's answer, so
+   * `onSubmitted` throws after the move was stored. The demo finds the
+   * transfer already in `payout_submitted` and goes straight to
+   * `retryPayoutExecute`, and still reaches `completed`. Default false.
+   */
+  readonly simulateRecordAckLost?: boolean;
+  /**
+   * Make storing the signed XDR fail (`onSigned` throws). The run stops with
+   * `PayoutInterruptedError`, nothing is submitted, and the transfer takes
+   * `awaiting_signature -> needs_attention` (`run_interrupted`). Default false.
+   */
+  readonly simulateSignedStoreFailure?: boolean;
 }
 
 export interface DemoResult {
@@ -135,6 +148,8 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
           simulateSubmitRejection: options.simulateSubmitRejection ?? false,
           simulateAuthorizationFailure: options.simulateAuthorizationFailure ?? false,
           simulateRecordFailure: options.simulateRecordFailure ?? false,
+          simulateRecordAckLost: options.simulateRecordAckLost ?? false,
+          simulateSignedStoreFailure: options.simulateSignedStoreFailure ?? false,
         });
 
   log('');

@@ -27,10 +27,14 @@
  *   leaves: `awaiting_signature -> funded` (quote_expired_before_signing),
  *   nothing was submitted;
  * - the signer refuses or fails: `awaiting_signature -> needs_attention` (signer_refused);
+ * - the run is interrupted after `awaiting_signature` was stored (storing the
+ *   signed XDR fails, the clock breaks): `awaiting_signature -> needs_attention`
+ *   (run_interrupted), nothing was submitted;
  * - the submit outcome is anything but `success`: `awaiting_signature -> needs_attention`;
  * - the transaction landed but storing `payout_submitted` failed: store it
- *   (`awaiting_signature -> payout_submitted`), then `retryPayoutExecute`
- *   with the pending body and key; never re-quote, never sign again;
+ *   (`awaiting_signature -> payout_submitted`), or find it already stored,
+ *   then `retryPayoutExecute` with the pending body and key; never
+ *   re-quote, never sign again;
  * - the partner does not take the payout: `payout_submitted -> needs_attention`;
  * - the payout is not on chain as signed, or does not land:
  *   `payout_processing -> needs_attention`.
@@ -43,6 +47,7 @@ import {
   type Money,
   PayoutAuthorizationError,
   PayoutIncompleteError,
+  PayoutInterruptedError,
   type PendingPayout,
   QuoteExpiredError,
   type SignedPayoutContext,
@@ -77,6 +82,10 @@ export interface PayoutOptions {
   readonly simulateAuthorizationFailure?: boolean;
   /** Make storing `payout_submitted` fail once, to show the recovery with `retryPayoutExecute`. */
   readonly simulateRecordFailure?: boolean;
+  /** Make storing `payout_submitted` commit and then throw, to show the recovery finding it stored. */
+  readonly simulateRecordAckLost?: boolean;
+  /** Make storing the signed XDR fail, to show the `run_interrupted` edge. */
+  readonly simulateSignedStoreFailure?: boolean;
 }
 
 /** Returns the payout transaction hash, or `undefined` when the transfer stopped short of `completed`. */
@@ -196,12 +205,17 @@ export async function runPayoutLeg(
           );
           return transfer.state;
         },
-        onSigned: () =>
+        onSigned: () => {
           log(
             `    signer (${signer.custody}) checked state and expiry, then the XDR with assertPayoutXdrMatches ` +
-              '(network, one payment, source, destination, asset, amount, fee, maxTime, no extra preconditions), ' +
-              'then signed once; the signed XDR is stored before it leaves',
-          ),
+              '(one payment, source, destination, asset, amount, fee, time bounds, no extra preconditions), ' +
+              'then signed once for its own network; the signed XDR is stored before it leaves',
+          );
+          if (options.simulateSignedStoreFailure === true) {
+            log('    (the transfer store fails while storing the signed XDR)');
+            throw new Error('the transfer store did not answer');
+          }
+        },
         // The money moved: the transfer is payout_submitted before the partner hears about it.
         onSubmitted: (outcome) => {
           if (options.simulateRecordFailure === true) {
@@ -214,6 +228,10 @@ export async function runPayoutLeg(
             `tx ${short(outcome.hash)} confirmed on the ledger, stored before ${partner.id} is told`,
             'signed_and_on_chain',
           );
+          if (options.simulateRecordAckLost === true) {
+            log("    (the transfer store committed payout_submitted, but its answer was lost)");
+            throw new Error('the transfer store answer was lost');
+          }
         },
       },
     });
@@ -269,8 +287,10 @@ export async function runPayoutLeg(
  * After `runSignedPayout` threw. When the transaction is on the ledger but
  * `onSubmitted` failed (`stage: 'record'`), the money has moved: store
  * `payout_submitted` now, then create the payout with `retryPayoutExecute`
- * and the pending body and key. Never re-quote, never sign again. Anything
- * else stops on its failure edge, and this returns `undefined`.
+ * and the pending body and key. If the transfer is already in
+ * `payout_submitted`, `onSubmitted` stored it before it threw: the store is
+ * done, so go straight to the retry. Never re-quote, never sign again.
+ * Anything else stops on its failure edge, and this returns `undefined`.
  */
 async function recoverPayout(ctx: LegContext, e: unknown): Promise<SignedPayoutResult | undefined> {
   const { transfer, log } = ctx;
@@ -279,12 +299,16 @@ async function recoverPayout(ctx: LegContext, e: unknown): Promise<SignedPayoutR
     stopPayout(transfer, e);
     return undefined;
   }
-  transfer.compareAndMove(
-    'awaiting_signature',
-    'payout_submitted',
-    `tx ${short(e.txHash ?? '')} is on the ledger; stored on the second try, nothing is signed again`,
-    'signed_and_on_chain',
-  );
+  if (transfer.state === 'payout_submitted') {
+    log(`    tx ${short(e.txHash ?? '')} is on the ledger and payout_submitted is already stored: nothing to store again`);
+  } else {
+    transfer.compareAndMove(
+      'awaiting_signature',
+      'payout_submitted',
+      `tx ${short(e.txHash ?? '')} is on the ledger; stored on the second try, nothing is signed again`,
+      'signed_and_on_chain',
+    );
+  }
   log('    retryPayoutExecute: the same body and idempotency key, never a new quote');
   try {
     return await retryPayoutExecute(partner, e.pending as PendingPayout<ExecutePayoutInput>);
@@ -314,6 +338,10 @@ function stopPayout(transfer: Transfer, e: unknown): void {
   }
   if (e instanceof SignerRefusedError && from === 'awaiting_signature') {
     transfer.move('needs_attention', `${e.message}; the USDC stays in the account`, 'signer_refused');
+    return;
+  }
+  if (e instanceof PayoutInterruptedError && from === 'awaiting_signature') {
+    transfer.move('needs_attention', `${e.message}; the USDC stays in the account`, 'run_interrupted');
     return;
   }
   if (e instanceof PayoutIncompleteError && e.stage === 'submit' && from === 'awaiting_signature') {

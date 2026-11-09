@@ -63,6 +63,43 @@ describe('testnet demo', () => {
     expect(output).toMatch(/matched demo-transfer-1\/payout on .*tx_hash, reference/);
   });
 
+  it('goes straight to the retry when payout_submitted was stored before onSubmitted threw', async () => {
+    const lines: string[] = [];
+    const result = await runDemo({
+      log: (line) => lines.push(line),
+      simulateHorizonTimeout: false,
+      simulateRecordAckLost: true,
+    });
+
+    expect(result.finalState).toBe('completed');
+    expect(result.history).toEqual(FULL_PATH);
+    const output = lines.join('\n');
+    expect(output).toContain('(the transfer store committed payout_submitted, but its answer was lost)');
+    expect(output).toContain('payout_submitted is already stored: nothing to store again');
+    expect(output).not.toContain('another run moved it first');
+    expect(output.match(/awaiting_signature -> payout_submitted \(/g)).toHaveLength(1);
+    expect(output.match(/then signed once/g)).toHaveLength(1);
+    expect(output.match(/submit: success/g)).toHaveLength(1);
+  });
+
+  it('stops in needs_attention, with nothing submitted, when storing the signed XDR fails', async () => {
+    const lines: string[] = [];
+    const result = await runDemo({
+      log: (line) => lines.push(line),
+      simulateHorizonTimeout: false,
+      simulateSignedStoreFailure: true,
+    });
+
+    expect(result.finalState).toBe('needs_attention');
+    expect(result.history).toEqual([...FULL_PATH.slice(0, FULL_PATH.indexOf('awaiting_signature') + 1), 'needs_attention']);
+    expect(result.payoutTxHash).toBeUndefined();
+    const output = lines.join('\n');
+    expect(output).toContain('awaiting_signature -> needs_attention (payout run interrupted after authorization)');
+    expect(output).toContain('(on_signed, no code)');
+    expect(output).not.toContain('submit:');
+    expect(output).not.toContain('accepted payout');
+  });
+
   it('stops in needs_attention, without creating the payout, when Horizon refuses the submission', async () => {
     const lines: string[] = [];
     const result = await runDemo({
