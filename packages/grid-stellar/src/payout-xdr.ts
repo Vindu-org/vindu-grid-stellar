@@ -7,6 +7,12 @@
  * field that decides where money goes, against the `SigningContext` the
  * payout flow gives the signer. It needs no key: call it in the signer
  * (or before handing the XDR to a custodian) and sign only if it returns.
+ *
+ * The network is the one thing it cannot check: an unsigned envelope does
+ * not name its network, and the same bytes decode under any passphrase. The
+ * signature binds the passphrase: the signer signs the hash computed for
+ * it, so the signed transaction is valid on that network only. Sign under
+ * the passphrase given here.
  */
 import {
   type Asset,
@@ -25,7 +31,6 @@ import { FeeBumpTransaction, Transaction, TransactionBuilder, stellarSdk } from 
 
 /** Which check refused the transaction. */
 export type PayoutXdrCheck =
-  | 'network'
   | 'decode'
   | 'fee_bump'
   | 'operations'
@@ -56,8 +61,10 @@ export class PayoutXdrMismatchError extends GridError {
 
 export interface PayoutXdrOptions {
   /**
-   * Passphrase of the network the signer signs for. The XDR is decoded and
-   * hashed for it, so a signature made under it is only valid there.
+   * Passphrase of the network the signer signs for. The XDR is decoded for
+   * it; the envelope itself cannot show which network it was built for, so
+   * this is not checked against the XDR. A signature made under it is only
+   * valid on that network.
    */
   readonly networkPassphrase: string;
   /** Highest total fee, in stroops. Default {@link DEFAULT_MAX_FEE_STROOPS}. A positive safe integer. */
@@ -72,9 +79,9 @@ export const DEFAULT_MAX_FEE_STROOPS = 1_000_000;
  * payment `context.expected` describes:
  *
  * - `networkPassphrase` is set, and the XDR decodes for it as a plain
- *   transaction (no fee bump). An envelope does not name its network: the
- *   signer must sign under this same passphrase, which binds the signature
- *   to that network;
+ *   transaction (no fee bump). The network itself cannot be checked: an
+ *   unsigned envelope does not name it. Sign under this same passphrase,
+ *   which binds the signature to that network;
  * - it has exactly one operation, and that is a `payment`;
  * - the transaction source is `expected.source`;
  * - the operation has no source of its own, or one that is (or is a muxed

@@ -203,11 +203,11 @@ describe('assertPayoutXdrMatches', () => {
     expect(refusal(build(), ctx)).toBe(expected);
   });
 
-  it('checks the network through the passphrase it is given, which must be set', () => {
+  it('cannot check the network from the unsigned envelope, and needs the passphrase set', () => {
     // An envelope does not name its network: the same bytes decode under any
-    // passphrase. What binds it to one network is the hash the signer signs,
-    // which is computed for this passphrase, so a signature made after this
-    // check is only valid there. An empty passphrase is a configuration error.
+    // passphrase, so one built for another network passes. What binds it to
+    // one network is the hash the signer signs, computed for the passphrase
+    // it signs under. An empty passphrase is a configuration error.
     expect(refusal(payout({ passphrase: Networks.PUBLIC }))).toBeNull();
     expect(() => assertPayoutXdrMatches(payout(), context, { networkPassphrase: '' })).toThrow(InvalidConfigError);
   });
