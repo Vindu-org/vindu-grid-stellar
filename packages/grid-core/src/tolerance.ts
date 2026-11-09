@@ -21,6 +21,8 @@ export type ToleranceResult =
       readonly ok: false;
       readonly deviationBps: number;
       readonly nextState: 'needs_attention';
+      /** The transition reason to record with `nextState`. */
+      readonly reason: 'quote_outside_tolerance';
     };
 
 /**
@@ -43,7 +45,7 @@ export function checkPayoutTolerance(
   }
   const deviationBps = relativeDifferenceBps(quotedTarget, estimatedTarget);
   if (exceedsBps(quotedTarget, estimatedTarget, toleranceBps)) {
-    return { ok: false, deviationBps, nextState: 'needs_attention' };
+    return { ok: false, deviationBps, nextState: 'needs_attention', reason: 'quote_outside_tolerance' };
   }
   return { ok: true, deviationBps };
 }

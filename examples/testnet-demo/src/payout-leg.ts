@@ -59,7 +59,7 @@ export async function runPayoutLeg(
   const tolerance = checkPayoutTolerance(estimate, quote.target, PAYOUT_TOLERANCE_BPS);
   const gap = `${tolerance.deviationBps} bps from the estimate ${fmt(estimate)}, tolerance ${PAYOUT_TOLERANCE_BPS} bps`;
   if (!tolerance.ok) {
-    transfer.move(tolerance.nextState, `${fmt(quote.target)} is ${gap}; the USDC stays in the account`);
+    transfer.move(tolerance.nextState, `${fmt(quote.target)} is ${gap}; the USDC stays in the account`, tolerance.reason);
     return undefined;
   }
   transfer.move('payout_quoted', `${fmt(quote.target)} is ${gap}`);

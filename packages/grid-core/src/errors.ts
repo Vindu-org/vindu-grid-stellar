@@ -55,13 +55,32 @@ export class AssetMismatchError extends GridError {
   }
 }
 
-/** A transfer was asked to move between two states the transition table does not link. */
+/**
+ * A transfer was asked to move between two states the transition table does
+ * not link, for a reason the table does not list, or without the reason a
+ * pair with several rules needs.
+ */
 export class InvalidTransitionError extends GridError {
+  /** The reason that was asked for, when one was. */
+  readonly reason: string | undefined;
+  /** The reasons the table allows for this pair, when one must be chosen. */
+  readonly choices: readonly string[] | undefined;
+
   constructor(
     readonly from: string,
     readonly to: string,
+    detail: { readonly reason?: string; readonly choices?: readonly string[] } = {},
   ) {
-    super('invalid_transition', `Transition not allowed: ${from} -> ${to}`);
+    super(
+      'invalid_transition',
+      detail.choices !== undefined
+        ? `Transition ${from} -> ${to} needs a reason: one of ${detail.choices.join(', ')}`
+        : detail.reason !== undefined
+          ? `Transition not allowed: ${from} -> ${to} (${detail.reason})`
+          : `Transition not allowed: ${from} -> ${to}`,
+    );
+    this.reason = detail.reason;
+    this.choices = detail.choices;
   }
 }
 

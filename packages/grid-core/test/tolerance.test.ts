@@ -2,6 +2,7 @@ import { fiat, stellarAsset } from '../src/assets';
 import { AssetMismatchError, InvalidMoneyError } from '../src/errors';
 import { add, money } from '../src/money';
 import { checkPayoutTolerance } from '../src/tolerance';
+import { transition } from '../src/transfer-states';
 
 const USD = fiat('USD');
 const usd = (a: string) => money(a, USD);
@@ -19,7 +20,7 @@ describe('tolerance', () => {
 
   it('sends a quote just outside the boundary to needs_attention', () => {
     const r = checkPayoutTolerance(usd('10000'), usd('9969.9999999'), 30);
-    expect(r).toEqual({ ok: false, deviationBps: 30.01, nextState: 'needs_attention' });
+    expect(r).toEqual({ ok: false, deviationBps: 30.01, nextState: 'needs_attention', reason: 'quote_outside_tolerance' });
   });
 
   it('sends a quote far outside to needs_attention, above or below', () => {
@@ -52,5 +53,13 @@ describe('tolerance', () => {
     expect(() => checkPayoutTolerance(usd('0'), usd('1'), 30)).toThrow(InvalidMoneyError);
     expect(() => checkPayoutTolerance(usd('1'), usd('1'), -1)).toThrow(RangeError);
     expect(() => checkPayoutTolerance(usd('1'), usd('1'), 0.3)).toThrow(RangeError);
+  });
+});
+
+describe('tolerance and the transition table', () => {
+  it('names a reason the table accepts for its next state', () => {
+    const r = checkPayoutTolerance(usd('10000'), usd('9000'), 30);
+    if (r.ok) throw new Error('expected a miss');
+    expect(transition('funded', r.nextState, r.reason)).toMatchObject({ label: 'quote outside tolerance' });
   });
 });
