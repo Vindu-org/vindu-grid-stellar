@@ -53,7 +53,7 @@ yarn workspace testnet-demo start --blindpay-dry-run
 This example stays offline on purpose. To run the same flow against real testnet, your application swaps the simulated pieces for real ones and passes every key and URL as an argument:
 
 - **Partner:** `createBlindPayAdapter` with the API key and instance id of a BlindPay development instance, and `{ network: 'stellar_testnet' }`. Development instances settle `USDB` instead of `USDC`; see the `@vindu/grid-blindpay` README.
-- **Horizon:** `createHorizonGateway(STELLAR_TESTNET)` in place of `FakeHorizon`.
+- **Horizon:** `createHorizonGateway({ horizonUrl, networkPassphrase: TESTNET_NETWORK_PASSPHRASE })` in place of `FakeHorizon`, where `horizonUrl` is one Horizon instance you run or trust, for example a testnet node of your own. Do not use the `STELLAR_TESTNET` preset for real submissions: its URL is the public testnet Horizon, which sits behind a load balancer. The ledger read and the hash lookups can then reach instances at different ledgers, so a landed payout can look missing. The submitter does not call such a payout expired without proof from the instance itself, so it answers `unknown`, and the transfer stops for a person instead of completing. The preset is fine for reading and exploring, not for the submit and lookup path.
 - **Accounts:** a funded testnet account with a trustline for the instance's token, registered with BlindPay as the client's wallet.
 - **Signer:** a `Signer` your application provides, holding the account's key. The test-key signer here is for demos only.
 
