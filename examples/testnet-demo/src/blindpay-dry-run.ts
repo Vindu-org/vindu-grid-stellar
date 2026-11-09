@@ -80,8 +80,14 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
   log('BlindPay dry run: @vindu/grid-blindpay against a mocked fetch (no network, placeholder credentials)');
   const adapter = createBlindPayAdapter(
     { apiKey: 'dry-run-placeholder', instanceId: 'in_demo', baseUrl: 'https://blindpay.invalid', fetch, now },
-    // The USDC issuer this demo accepts: the throwaway issuer of the run.
-    { network: 'stellar_testnet', assetIssuers: { USDC: usdcIssuer } },
+    {
+      network: 'stellar_testnet',
+      // The USDC issuer this demo accepts: the throwaway issuer of the run.
+      assetIssuers: { USDC: usdcIssuer },
+      // BlindPay's payout account. In production it comes from BlindPay in
+      // writing, never from the transaction BlindPay returns.
+      payoutDestination: world.partner.treasuryAddress,
+    },
   );
 
   const fundingQuote = await adapter.quoteFunding({
@@ -134,7 +140,7 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
     signing: {
       signer: world.signer,
       submitter: createStellarSubmitter({ gateway: world.ledger, networkPassphrase: world.networkPassphrase, now }),
-      destination: world.partner.treasuryAddress,
+      // No destination: the adapter's payoutDestination is the account to pay.
       onAuthorized: () =>
         store('payout_quoted', 'awaiting_signature', 'signed_payout_flow', 'BlindPay authorized, stored before signing'),
       onSubmitted: () => {
