@@ -29,6 +29,14 @@ export interface BlindPayConfig {
   readonly timeoutMs?: number;
   /** Clock in epoch milliseconds. Defaults to `Date.now`. */
   readonly now?: () => number;
+  /**
+   * Debug only. When true, a failed call keeps a capped excerpt of BlindPay's
+   * error response in `bodySnippet`. BlindPay may echo request data there, so
+   * the excerpt can hold client data (names, tax ids, bank details): never
+   * turn this on where errors reach logs or error trackers. Default false:
+   * errors carry the status, BlindPay's error code and the idempotency key only.
+   */
+  readonly includeErrorBodies?: boolean;
 }
 
 /** Validated config with defaults applied. The API key stays out of it on purpose. */
@@ -40,6 +48,7 @@ export interface ResolvedConfig {
   readonly onCall: OnPartnerCall | undefined;
   readonly timeoutMs: number;
   readonly now: () => number;
+  readonly includeErrorBodies: boolean;
 }
 
 const INSTANCE_ID_RE = /^in_[A-Za-z0-9]+$/;
@@ -73,6 +82,7 @@ export function resolveConfig(config: BlindPayConfig): { resolved: ResolvedConfi
       onCall: config.onCall,
       timeoutMs,
       now: config.now ?? Date.now,
+      includeErrorBodies: config.includeErrorBodies === true,
     },
   };
 }

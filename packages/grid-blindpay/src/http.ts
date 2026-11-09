@@ -123,14 +123,17 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
       const kind = controller.signal.aborted ? 'timeout' : 'network';
       report(null, kind);
       resolved.logger.warn('blindpay call failed without response', { method: options.method, path: template, error: kind });
-      throw fail({ status: null, code: kind, cause });
+      // The raw cause is dropped: a fetch error message can quote headers or the body.
+      const causeCode = systemCodeOf(cause);
+      throw fail({ status: null, code: kind, ...(causeCode === undefined ? {} : { causeCode }) });
     } finally {
       clearTimeout(timer);
     }
 
     report(response.status);
     if (!response.ok) {
-      const { code, snippet } = readErrorBody(text);
+      const { code, message } = readErrorBody(text);
+      const snippet = resolved.includeErrorBodies ? (message ?? (text === '' ? undefined : text)) : undefined;
       const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'), resolved.now());
       resolved.logger.warn('blindpay call failed', {
         method: options.method, path: template, status: response.status, ...(code === undefined ? {} : { partnerCode: code }),
@@ -147,9 +150,9 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
     let data: T;
     try {
       data = (text === '' ? undefined : JSON.parse(text)) as T;
-    } catch (cause) {
-      // The call may have taken effect: not retryable without checking first.
-      throw fail({ status: response.status, code: 'invalid_json', retryable: false, cause });
+    } catch {
+      // No cause: JSON.parse quotes the start of the body in its message.
+      throw fail({ status: response.status, code: 'invalid_json', retryable: false });
     }
     return {
       data,
@@ -194,29 +197,39 @@ function queryString(query: RequestOptions['query']): string {
 const CODE_LIKE_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,80}$/;
 
 /**
- * The error body format is UNCONFIRMED. Best effort: a string `code`, then
- * `error` (string or `{ code }`), then a code-shaped `message`. The snippet is
- * the `message` when there is one, else the raw text (core caps its length).
+ * The error body format is UNCONFIRMED. Best effort: a code-shaped `code`,
+ * then `error` (string or `{ code }`), then a code-shaped `message`. Only a
+ * code-shaped string ever becomes `code`, so free text (which may echo client
+ * data) never does. `message` is the free text, used only with `includeErrorBodies`.
  */
-export function readErrorBody(text: string): { code?: string; snippet?: string } {
+export function readErrorBody(text: string): { code?: string; message?: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return text === '' ? {} : { snippet: text };
+    return {};
   }
-  if (typeof parsed !== 'object' || parsed === null) return { snippet: text };
+  if (typeof parsed !== 'object' || parsed === null) return {};
   const o = parsed as Record<string, unknown>;
   const err = o['error'];
   const nested = typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : undefined;
-  const message = str(o['message']) ?? str(nested?.['message']);
-  const code =
-    str(o['code']) ??
-    (typeof err === 'string' && CODE_LIKE_RE.test(err) ? err : undefined) ??
-    str(nested?.['code']) ??
-    (message !== undefined && CODE_LIKE_RE.test(message) ? message : undefined);
-  const snippet = message ?? (typeof err === 'string' ? err : text);
-  return { ...(code === undefined ? {} : { code }), snippet };
+  const message = str(o['message']) ?? str(nested?.['message']) ?? str(err);
+  const code = [o['code'], err, nested?.['code'], o['message']].find(
+    (v): v is string => typeof v === 'string' && CODE_LIKE_RE.test(v),
+  );
+  return { ...(code === undefined ? {} : { code }), ...(message === undefined ? {} : { message }) };
+}
+
+const SYSTEM_CODE_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+/** `ECONNREFUSED`-style code from an error or its cause, never a message. */
+function systemCodeOf(error: unknown): string | undefined {
+  for (let cur = error, depth = 0; typeof cur === 'object' && cur !== null && depth < 3; depth++) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === 'string' && SYSTEM_CODE_RE.test(code)) return code;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 function str(v: unknown): string | undefined {

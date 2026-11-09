@@ -52,7 +52,6 @@ export function stellarPayoutsApi(http: BlindPayHttp): StellarPayoutsApi {
           path: '/v1/instances/{in_id}/payouts/stellar/authorize',
           status: 200,
           code: 'unexpected_response',
-          bodySnippet: 'authorize response has no transaction_hash',
           retryable: false,
           idempotencyKey: res.idempotencyKey,
         });

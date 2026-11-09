@@ -1,10 +1,11 @@
-import { type AddressInfo } from 'node:net';
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { inspect } from 'node:util';
 
 import { InvalidConfigError, PartnerHttpError } from '@vindu/grid-core';
 
-import { resolveConfig } from '../src/config';
-import type { BlindPayHttpError } from '../src/errors';
+import { type FetchLike, resolveConfig } from '../src/config';
+import { BlindPayHttpError } from '../src/errors';
 import { createBlindPayHttp, parseRetryAfter, readErrorBody } from '../src/http';
 import { API_KEY, INSTANCE_ID, captureOutput, caught, config, dumpError, mockFetch } from './helpers';
 
@@ -78,11 +79,20 @@ describe('client http', () => {
     expect(e.path).toBe('/v1/instances/{in_id}/payouts/stellar');
   });
 
-  it('keeps a non-JSON error body as a capped snippet', async () => {
-    const { fetch } = mockFetch([{ status: 502, text: 'x'.repeat(1000) }]);
+  it('keeps no error body text by default', async () => {
+    const { fetch } = mockFetch([{ status: 400, body: { code: 'validation', message: 'tax_id 000.000.000-00 is invalid' } }]);
     const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e).toMatchObject({ status: 400, partnerCode: 'validation', bodySnippet: undefined });
+  });
+
+  it('keeps a capped error body excerpt only with includeErrorBodies', async () => {
+    const { fetch } = mockFetch([{ status: 502, text: 'x'.repeat(1000) }, { status: 400, body: { message: 'Bad thing happened' } }]);
+    const http = createBlindPayHttp(config(fetch, { includeErrorBodies: true }));
+    const e = (await caught(http.request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
     expect(e.bodySnippet?.length).toBeLessThanOrEqual(259);
     expect(e.partnerCode).toBeUndefined();
+    const e2 = (await caught(http.request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e2.bodySnippet).toBe('Bad thing happened');
   });
 
   it('times out with a retryable error and no status', async () => {
@@ -98,12 +108,13 @@ describe('client http', () => {
     expect(out.calls[0]).toMatchObject({ status: null, error: 'timeout' });
   });
 
-  it('maps a network failure to a retryable error', async () => {
+  it('maps a network failure to a retryable error and keeps only the system error code', async () => {
     const fetch = async () => {
-      throw new TypeError('fetch failed');
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' }) });
     };
     const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
-    expect(e).toMatchObject({ status: null, partnerCode: 'network', retryable: true });
+    expect(e).toMatchObject({ status: null, partnerCode: 'network', retryable: true, causeCode: 'ECONNREFUSED' });
+    expect(e.cause).toBeUndefined();
   });
 
   it('refuses a 2xx body that is not JSON, without marking it retryable', async () => {
@@ -136,6 +147,34 @@ describe('client http', () => {
     expect(configErrors.every((e) => e instanceof InvalidConfigError)).toBe(true);
     expect(everything).not.toContain(API_KEY);
     expect(everything).not.toContain('SECRET_KEY');
+  });
+});
+
+describe('client error redaction', () => {
+  // Fake client data a partner might echo back.
+  const PII = ['000.111.222-33', 'Maria Teste', '0001-9'];
+  const leaks = (e: unknown): string[] => {
+    const views = [JSON.stringify(e), inspect(e, { depth: 10 }), String(e), dumpError(e)];
+    return [API_KEY, 'SECRET_KEY', ...PII].filter((needle) => views.some((v) => v.includes(needle)));
+  };
+  const bodyEcho = '{"id":"re_1","tax_id":"000.111.222-33","first_name":"Maria Teste","bank":{"acct":"0001-9"';
+
+  it.each<[string, FetchLike]>([
+    ['a 2xx body that is not JSON', async () => new Response(bodyEcho, { status: 200 })],
+    ['a 2xx body in another format', async () => new Response('tax_id=000.111.222-33&name=Maria Teste&acct=0001-9', { status: 200 })],
+    ['a 4xx echoing the request', async () =>
+      new Response('{"code":"validation","message":"tax_id 000.111.222-33 for Maria Teste is invalid; account 0001-9"}', { status: 400 })],
+    ['a 5xx with a text body', async () => new Response('Maria Teste 000.111.222-33 0001-9', { status: 500 })],
+    ['a fetch error quoting the request headers and body', async (_url, init) => {
+      throw new Error(`proxy refused ${JSON.stringify(init.headers)} ${String(init.body)}`);
+    }],
+  ])('keeps the API key and body text out of JSON.stringify, inspect and String for %s', async (_name, fetch) => {
+    const http = createBlindPayHttp(config(fetch));
+    const e = (await caught(http.request({ method: 'POST', path: '/customers', body: { tax_id: PII[0], name: PII[1] }, idempotencyKey: 'idem-1' }))) as BlindPayHttpError;
+    expect(e).toBeInstanceOf(BlindPayHttpError);
+    expect(leaks(e)).toEqual([]);
+    expect(e.idempotencyKey).toBe('idem-1');
+    expect(JSON.stringify(e)).toContain('idem-1');
   });
 });
 
@@ -222,9 +261,11 @@ describe('client config', () => {
 
 describe('client error body parsing', () => {
   it('reads code, error and message fields best-effort', () => {
-    expect(readErrorBody('{"code":"a_b","message":"Nice text"}')).toEqual({ code: 'a_b', snippet: 'Nice text' });
-    expect(readErrorBody('{"message":"Not a code: spaces"}')).toEqual({ snippet: 'Not a code: spaces' });
-    expect(readErrorBody('[1]')).toEqual({ snippet: '[1]' });
+    expect(readErrorBody('{"code":"a_b","message":"Nice text"}')).toEqual({ code: 'a_b', message: 'Nice text' });
+    expect(readErrorBody('{"message":"Not a code: spaces"}')).toEqual({ message: 'Not a code: spaces' });
+    expect(readErrorBody('{"code":"free text with 000.000.000-00"}')).toEqual({});
+    expect(readErrorBody('[1]')).toEqual({});
+    expect(readErrorBody('not json')).toEqual({});
     expect(readErrorBody('')).toEqual({});
   });
 
