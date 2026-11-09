@@ -9,8 +9,11 @@ const { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } = ste
 
 const T0 = Date.UTC(2026, 10, 9, 12, 0, 0);
 
+type Tx = ReturnType<InstanceType<typeof TransactionBuilder>['build']>;
+const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
+
 /** A real payment envelope signed with a throwaway key on the testnet passphrase. No network. */
-function signedPayment(maxTimeSeconds: number): { xdr: string; hash: string } {
+function signedPayment(maxTimeSeconds: number): { xdr: string; hash: string; tx: Tx } {
   const source = Keypair.random();
   const issuer = Keypair.random().publicKey();
   const tx = new TransactionBuilder(new Account(source.publicKey(), '100'), {
@@ -23,7 +26,15 @@ function signedPayment(maxTimeSeconds: number): { xdr: string; hash: string } {
     )
     .build();
   tx.sign(source);
-  return { xdr: tx.toXDR(), hash: Buffer.from(tx.hash()).toString('hex') };
+  return { xdr: tx.toXDR(), hash: hex(tx.hash()), tx };
+}
+
+/** `inner` wrapped in a fee bump paid and signed by a throwaway key. */
+function feeBumped(inner: Tx, fee = '200'): { xdr: string; hash: string } {
+  const feeSource = Keypair.random();
+  const fb = TransactionBuilder.buildFeeBumpTransaction(feeSource, fee, inner, Networks.TESTNET);
+  fb.sign(feeSource);
+  return { xdr: fb.toXDR(), hash: hex(fb.hash()) };
 }
 
 /** Fake clock: `sleep` advances it. */
@@ -90,7 +101,7 @@ describe('submit', () => {
     gateway.submitResponses = [{ kind: 'timeout', status: 504 }];
     gateway.transactions.set(hash, { found: true, hash, successful: true, ledger: 9 });
     const result = await run(gateway, xdr);
-    expect(result).toEqual({ status: 'success', hash, ledger: 9 });
+    expect(result).toEqual({ status: 'success', hash, ledger: 9, foundBy: 'hash' });
     expect(gateway.submitted).toEqual([xdr]);
     expect(gateway.transactionLookups).toEqual([hash]);
   });
@@ -101,7 +112,7 @@ describe('submit', () => {
     gateway.submitResponses = ['hang'];
     gateway.transactions.set(hash, { found: true, hash, successful: true });
     const result = await run(gateway, xdr, clock(), { timeoutMs: 5 });
-    expect(result).toEqual({ status: 'success', hash });
+    expect(result).toEqual({ status: 'success', hash, foundBy: 'hash' });
   });
 
   it('a network error then a later landing: only the same signed envelope is ever resubmitted', async () => {
@@ -165,7 +176,7 @@ describe('submit', () => {
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.transactions.set(hash, { found: true, hash, successful: false, ledger: 3 });
-    expect(await run(gateway, xdr)).toEqual({ status: 'failed', hash, ledger: 3 });
+    expect(await run(gateway, xdr)).toEqual({ status: 'failed', hash, ledger: 3, foundBy: 'hash' });
   });
 
   it('maps tx_bad_seq to a typed rejection after checking the hash', async () => {
@@ -263,6 +274,115 @@ describe('submit', () => {
     let calls = 0;
     const result = await run(gateway, xdr, clock(), { now: () => (++calls > 2 ? Number.NaN : T0) });
     expect(result).toMatchObject({ status: 'unknown', hash });
+  });
+});
+
+describe('submit: fee bumps', () => {
+  it('computes both the outer and the inner hash', () => {
+    const inner = signedPayment(IN_ONE_HOUR);
+    const ours = feeBumped(inner.tx);
+    expect(inspectSignedTransaction(ours.xdr, TESTNET_NETWORK_PASSPHRASE)).toEqual({
+      hash: ours.hash,
+      innerHash: inner.hash,
+      maxTime: IN_ONE_HOUR,
+    });
+  });
+
+  it('looks up the outer hash, then the inner hash', async () => {
+    const inner = signedPayment(IN_ONE_HOUR);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    const result = await run(gateway, ours.xdr, clock(), { maxWaitMs: 0 });
+    expect(result).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
+    expect(gateway.transactionLookups).toEqual([ours.hash, inner.hash]);
+  });
+
+  it('our own fee bump found by its outer hash: success', async () => {
+    const inner = signedPayment(IN_ONE_HOUR);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(ours.hash, { found: true, hash: ours.hash, successful: true, ledger: 7 });
+    expect(await run(gateway, ours.xdr)).toEqual({
+      status: 'success',
+      hash: ours.hash,
+      innerHash: inner.hash,
+      ledger: 7,
+      foundBy: 'hash',
+    });
+  });
+
+  it('accepted fee bump reports both hashes', async () => {
+    const inner = signedPayment(IN_ONE_HOUR);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'accepted', hash: ours.hash, successful: true, ledger: 4 }];
+    expect(await run(gateway, ours.xdr)).toEqual({ status: 'success', hash: ours.hash, innerHash: inner.hash, ledger: 4 });
+  });
+
+  it('the same inner transaction landed inside someone else\'s fee bump: success under the hash that landed', async () => {
+    // Review probe: our envelope is refused, a third party re-wraps the same
+    // signed inner transaction in its own fee bump and that lands. Horizon
+    // finds it by the inner hash and reports the other envelope's hash.
+    const inner = signedPayment(T0 / 1000 + 60);
+    const ours = feeBumped(inner.tx);
+    const theirs = feeBumped(inner.tx, '500');
+    const record = { found: true as const, hash: theirs.hash, successful: true, ledger: 7 };
+    const gateway = new FakeGateway();
+    gateway.transactions.set(theirs.hash, record);
+    gateway.transactions.set(inner.hash, record);
+    gateway.submitResponses = [{ kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] }];
+    const result = await run(gateway, ours.xdr, clock(T0 + 120_000));
+    expect(result).toEqual({
+      status: 'success',
+      hash: theirs.hash,
+      innerHash: inner.hash,
+      ledger: 7,
+      foundBy: 'inner_hash',
+      submittedHash: ours.hash,
+    });
+    expect(gateway.transactionLookups).toEqual([ours.hash, inner.hash]);
+  });
+
+  it('inner hash found after a timeout, never expired_not_landed', async () => {
+    const inner = signedPayment(T0 / 1000 + 60);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.onLookup = (h) => {
+      if (h === inner.hash) gateway.transactions.set(inner.hash, { found: true, hash: inner.hash, successful: false });
+    };
+    const result = await run(gateway, ours.xdr, clock(), { maxWaitMs: 600_000 });
+    expect(result).toMatchObject({ status: 'failed', hash: inner.hash, foundBy: 'inner_hash', submittedHash: ours.hash });
+  });
+
+  it('a plain transaction wrapped by someone else\'s fee bump is found by its own hash', async () => {
+    const plain = signedPayment(IN_ONE_HOUR);
+    const theirs = feeBumped(plain.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(plain.hash, { found: true, hash: theirs.hash, successful: true, ledger: 2 });
+    expect(await run(gateway, plain.xdr)).toEqual({
+      status: 'success',
+      hash: theirs.hash,
+      ledger: 2,
+      foundBy: 'hash',
+      submittedHash: plain.hash,
+    });
+  });
+
+  it('a failing inner lookup never counts as not found', async () => {
+    const inner = signedPayment(T0 / 1000 - 3600);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    const lookup = gateway.transaction.bind(gateway);
+    gateway.transaction = async (h) => {
+      if (h === inner.hash) throw new Error('horizon down');
+      return lookup(h);
+    };
+    expect((await run(gateway, ours.xdr)).status).toBe('unknown');
   });
 });
 

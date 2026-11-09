@@ -2,9 +2,12 @@
  * Submitting a signed transaction without ever paying twice.
  *
  * The hash is computed locally from the signed envelope before anything is
- * sent, so the transaction can always be looked up. When the submission
- * times out or the network fails, the hash is checked on Horizon before
- * anything else. Resubmitting the same signed envelope is safe (Stellar
+ * sent, so the transaction can always be looked up. For a fee bump both the
+ * outer hash and the inner transaction's hash are computed: anyone can wrap
+ * a signed transaction in a fee bump of their own, and the payment it
+ * carries lands under that envelope's hash. Lookups use every hash; any one
+ * found means the transaction landed. When the submission times out or the
+ * network fails, the hashes are checked on Horizon before anything else. Resubmitting the same signed envelope is safe (Stellar
  * applies a transaction once); asking for a new signature is never done here.
  *
  * **Do not sign a replacement unless the status is `expired_not_landed`**
@@ -14,21 +17,41 @@
  * transaction could still land.
  */
 import { InvalidConfigError, InvalidInputError, type Logger, noopLogger } from '@vindu/grid-core';
-import type { HorizonGateway, HorizonSubmitResponse, HorizonTransactionLookup } from './horizon';
+import type { HorizonGateway, HorizonSubmitResponse, HorizonTransactionFound } from './horizon';
 import { type SubmitError, mapResultCodes } from './result-codes';
 import { FeeBumpTransaction, TransactionBuilder } from './sdk';
 
+/** Which locally computed hash found the transaction on Horizon. */
+export type FoundBy = 'hash' | 'inner_hash';
+
+/** Facts about a transaction found on the ledger. */
+interface Landed {
+  /**
+   * Hex hash of the transaction as it is on the ledger. Usually the
+   * submitted envelope's hash; it differs when the transaction landed
+   * inside another envelope (someone else's fee bump).
+   */
+  readonly hash: string;
+  /** Hex hash of the inner transaction, for a fee bump. */
+  readonly innerHash?: string;
+  readonly ledger?: number;
+  /** Present when the result came from a lookup: which local hash found it. */
+  readonly foundBy?: FoundBy;
+  /** Hex hash of the submitted envelope, present only when it differs from `hash`. */
+  readonly submittedHash?: string;
+}
+
 export type SubmitResult =
   /** In a ledger and successful. */
-  | { readonly status: 'success'; readonly hash: string; readonly ledger?: number }
+  | ({ readonly status: 'success' } & Landed)
   /** In a ledger but failed: the fee and sequence number are spent and nothing moved. */
-  | { readonly status: 'failed'; readonly hash: string; readonly ledger?: number; readonly error?: SubmitError }
+  | ({ readonly status: 'failed'; readonly error?: SubmitError } & Landed)
   /** Horizon refused it and it is not on the ledger yet. It may still land until its maxTime: do not re-sign. */
-  | { readonly status: 'rejected'; readonly hash: string; readonly error: SubmitError }
+  | { readonly status: 'rejected'; readonly hash: string; readonly innerHash?: string; readonly error: SubmitError }
   /** Not found, and it could still land (maxTime not passed, or no maxTime). Check again later; do not re-sign. */
-  | { readonly status: 'unknown'; readonly hash: string; readonly lastError?: SubmitError }
+  | { readonly status: 'unknown'; readonly hash: string; readonly innerHash?: string; readonly lastError?: SubmitError }
   /** maxTime has passed and it is not on the ledger. It can never land: a replacement may be signed. */
-  | { readonly status: 'expired_not_landed'; readonly hash: string; readonly maxTime: number };
+  | { readonly status: 'expired_not_landed'; readonly hash: string; readonly innerHash?: string; readonly maxTime: number };
 
 export type SubmitStatus = SubmitResult['status'];
 
@@ -63,12 +86,15 @@ export interface SubmitOptions {
 export interface SignedTransactionInfo {
   /** Hex hash of the envelope (of the outer transaction for a fee bump). */
   readonly hash: string;
+  /** Hex hash of the inner transaction, present only for a fee bump. */
+  readonly innerHash?: string;
   /** maxTime in unix seconds, or `undefined` when the transaction has no upper time bound. */
   readonly maxTime: number | undefined;
 }
 
 /**
- * Hash and maxTime of a signed envelope, computed locally.
+ * Hashes and maxTime of a signed envelope, computed locally. For a fee bump,
+ * maxTime is the inner transaction's.
  *
  * @throws {InvalidInputError} when the envelope cannot be decoded.
  */
@@ -82,7 +108,15 @@ export function inspectSignedTransaction(signedXdr: string, networkPassphrase: s
   const inner = tx instanceof FeeBumpTransaction ? tx.innerTransaction : tx;
   const raw = inner.timeBounds?.maxTime;
   const maxTime = raw === undefined ? 0 : Number(raw);
-  return { hash: Buffer.from(tx.hash()).toString('hex'), maxTime: maxTime > 0 ? maxTime : undefined };
+  return {
+    hash: hex(tx.hash()),
+    ...(inner === tx ? {} : { innerHash: hex(inner.hash()) }),
+    maxTime: maxTime > 0 ? maxTime : undefined,
+  };
+}
+
+function hex(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString('hex');
 }
 
 const TIMED_OUT = Symbol('timed out');
@@ -112,7 +146,11 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
 
   if (!Number.isFinite(now())) throw new InvalidInputError('now() must return a finite number of milliseconds');
 
-  const { hash, maxTime } = inspectSignedTransaction(signedXdr, options.networkPassphrase);
+  const { hash, innerHash, maxTime } = inspectSignedTransaction(signedXdr, options.networkPassphrase);
+  const inner = innerHash === undefined ? {} : { innerHash };
+  // Every hash the transaction can be found by, the envelope's first.
+  const lookups: ReadonlyArray<readonly [string, FoundBy]> =
+    innerHash === undefined ? [[hash, 'hash']] : [[hash, 'hash'], [innerHash, 'inner_hash']];
   const expired = (): boolean => maxTime !== undefined && now() > maxTime * 1000 + expiryGraceMs;
   const done = (result: SubmitResult): SubmitResult => {
     logger.info('stellar submission settled', { hash, status: result.status });
@@ -121,7 +159,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
 
   async function attempt(): Promise<HorizonSubmitResponse> {
     let timer: NodeJS.Timeout | undefined;
-    const pending = gateway.submitTransaction(signedXdr);
+    const pending = Promise.resolve().then(() => gateway.submitTransaction(signedXdr));
     pending.catch(() => undefined); // a late rejection after the timeout is not an error here
     try {
       const raced = await Promise.race([
@@ -139,65 +177,87 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     }
   }
 
-  async function lookup(): Promise<HorizonTransactionLookup | null> {
-    try {
-      return await gateway.transaction(hash);
-    } catch (e) {
-      logger.warn('transaction lookup failed', { hash, error: e instanceof Error ? e.name : typeof e });
-      return null;
+  /**
+   * Looks the transaction up by every local hash. `null` when a lookup failed
+   * and none found it: a failed lookup never counts as not found.
+   */
+  async function lookup(): Promise<{ found: HorizonTransactionFound; by: FoundBy } | { found: false } | null> {
+    let failed = false;
+    for (const [h, by] of lookups) {
+      try {
+        const result = await gateway.transaction(h);
+        if (!result.found) continue;
+        if (!HASH.test(result.hash)) throw new Error('Horizon returned a transaction with an invalid hash');
+        return { found: result, by };
+      } catch (e) {
+        failed = true;
+        logger.warn('transaction lookup failed', { hash: h, error: e instanceof Error ? e.name : typeof e });
+      }
     }
+    return failed ? null : { found: false };
   }
 
-  const fromLookup = (found: Extract<HorizonTransactionLookup, { found: true }>, error?: SubmitError): SubmitResult => {
-    const ledger = found.ledger === undefined ? {} : { ledger: found.ledger };
-    if (found.successful) return { status: 'success', hash, ...ledger };
-    return { status: 'failed', hash, ...ledger, ...(error === undefined ? {} : { error }) };
+  const fromLookup = (found: HorizonTransactionFound, by: FoundBy, error?: SubmitError): SubmitResult => {
+    const landedHash = found.hash.toLowerCase();
+    const landed = {
+      hash: landedHash,
+      ...inner,
+      ...(found.ledger === undefined ? {} : { ledger: found.ledger }),
+      foundBy: by,
+      ...(landedHash === hash ? {} : { submittedHash: hash }),
+    };
+    if (found.successful) return { status: 'success', ...landed };
+    return { status: 'failed', ...landed, ...(error === undefined ? {} : { error }) };
+  };
+
+  const fromAccepted = (accepted: Extract<HorizonSubmitResponse, { kind: 'accepted' }>): SubmitResult => {
+    if (accepted.hash !== hash) logger.warn('Horizon returned a different hash', { hash, returned: accepted.hash });
+    const ledger = accepted.ledger === undefined ? {} : { ledger: accepted.ledger };
+    return { status: accepted.successful ? 'success' : 'failed', hash, ...inner, ...ledger };
   };
 
   const first = await attempt();
-  if (first.kind === 'accepted') {
-    if (first.hash !== hash) logger.warn('Horizon returned a different hash', { hash, returned: first.hash });
-    const ledger = first.ledger === undefined ? {} : { ledger: first.ledger };
-    return done(first.successful ? { status: 'success', hash, ...ledger } : { status: 'failed', hash, ...ledger });
-  }
+  if (first.kind === 'accepted') return done(fromAccepted(first));
   if (first.kind === 'rejected') {
     const error = mapResultCodes(first.transactionCode, first.operationCodes);
     // A rejection of an envelope that already landed (e.g. tx_bad_seq on a
-    // retry) must not hide the landing: check the hash first.
-    const found = await lookup();
-    if (found?.found === true) return done(fromLookup(found, error));
-    if (found !== null && maxTime !== undefined && expired()) return done({ status: 'expired_not_landed', hash, maxTime });
+    // retry, or another fee bump around the same transaction) must not hide
+    // the landing: check the hashes first.
+    const look = await lookup();
+    if (look?.found) return done(fromLookup(look.found, look.by, error));
+    if (look !== null && maxTime !== undefined && expired()) {
+      return done({ status: 'expired_not_landed', hash, ...inner, maxTime });
+    }
     logger.warn('stellar submission rejected', { hash, code: error.code });
-    return done({ status: 'rejected', hash, error });
+    return done({ status: 'rejected', hash, ...inner, error });
   }
 
-  // Timed out or no answer: the transaction may be on its way. Check the hash
-  // before anything else, and keep checking.
+  // Timed out or no answer: the transaction may be on its way. Check the
+  // hashes before anything else, and keep checking.
   logger.warn('stellar submission without answer; checking the hash', { hash, kind: first.kind });
   const deadline = now() + maxWaitMs;
   let lastError: SubmitError | undefined;
   for (;;) {
-    const found = await lookup();
-    if (found?.found === true) return done(fromLookup(found, lastError));
-    if (found !== null && maxTime !== undefined && expired()) {
-      return done({ status: 'expired_not_landed', hash, maxTime });
+    const look = await lookup();
+    if (look?.found) return done(fromLookup(look.found, look.by, lastError));
+    if (look !== null && maxTime !== undefined && expired()) {
+      return done({ status: 'expired_not_landed', hash, ...inner, maxTime });
     }
     const t = now();
     // A clock that stops returning numbers ends the wait instead of looping forever.
     if (!Number.isFinite(t) || t >= deadline) {
-      return done({ status: 'unknown', hash, ...(lastError === undefined ? {} : { lastError }) });
+      return done({ status: 'unknown', hash, ...inner, ...(lastError === undefined ? {} : { lastError }) });
     }
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - t)));
     if (resubmit && !expired()) {
       const again = await attempt();
-      if (again.kind === 'accepted') {
-        const ledger = again.ledger === undefined ? {} : { ledger: again.ledger };
-        return done(again.successful ? { status: 'success', hash, ...ledger } : { status: 'failed', hash, ...ledger });
-      }
+      if (again.kind === 'accepted') return done(fromAccepted(again));
       if (again.kind === 'rejected') lastError = mapResultCodes(again.transactionCode, again.operationCodes);
     }
   }
 }
+
+const HASH = /^[0-9a-f]{64}$/i;
 
 /**
  * Throws unless the gateway talks to the network the envelope is signed for.
