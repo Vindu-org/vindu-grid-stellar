@@ -18,7 +18,7 @@ import {
   runSignedPayout,
 } from '../src/signed-payout';
 import type { Signer } from '../src/signer';
-import type { SubmitOutcome } from '../src/submission';
+import type { StellarSubmitter, SubmitOutcome } from '../src/submission';
 import { type TransferState, type TransitionReason, transition } from '../src/transfer-states';
 
 const NOW = Date.parse('2030-01-01T00:00:00Z');
@@ -516,6 +516,61 @@ describe('signed payout', () => {
       await expect(runSignedPayout(bad)).rejects.toMatchObject({ code: 'quote_expired', stage: 'authorization' });
       expect(preparePayout).not.toHaveBeenCalled();
     });
+  });
+
+  describe('the submit budget', () => {
+    const BUDGET = 150_000;
+    const expiry = Date.parse(EXPIRES_AT);
+    const needed = DEFAULT_EXPIRY_MARGIN_MS + BUDGET;
+    const budgeted = (i: RunSignedPayoutInput, submit: StellarSubmitter['submit'], maxDurationMs: number) =>
+      withSigning(i, { submitter: { submit, maxDurationMs } });
+
+    // Review probe: a one-minute margin with a submitter that may take 150 s let a
+    // transaction be signed whose submit could run past the quote.
+    it('drops a quote that cannot outlive the margin plus the submit, before onAuthorized', async () => {
+      const { input, submit, preparePayout, onAuthorized, signStellar } = setup({ clock: () => expiry - needed });
+      const e = await caught(runSignedPayout(budgeted(input, submit, BUDGET)));
+      expect(e).toBeInstanceOf(QuoteExpiredError);
+      expect(e).toMatchObject({ stage: 'authorization' });
+      expect(preparePayout).toHaveBeenCalledTimes(1);
+      expect(onAuthorized).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    it('refuses to sign when the margin plus the submit no longer fits after onAuthorized', async () => {
+      let t = expiry - needed - 1;
+      const { input, submit, onAuthorized, signStellar, store } = setup({ clock: () => t });
+      onAuthorized.mockImplementationOnce(async () => {
+        store.state = transition(store.state, 'awaiting_signature', 'signed_payout_flow').to;
+        t += 1;
+        return store.state;
+      });
+      const e = await caught(runSignedPayout(budgeted(input, submit, BUDGET)));
+      expect(e).toBeInstanceOf(QuoteExpiredError);
+      expect(e).toMatchObject({ stage: 'signing' });
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    it('signs with one millisecond more than the margin plus the submit', async () => {
+      const { input, submit, signStellar } = setup({ clock: () => expiry - needed - 1 });
+      await expect(runSignedPayout(budgeted(input, submit, BUDGET))).resolves.toMatchObject({ txHash: HASH });
+      expect(signStellar).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not apply to partner_submits, where nothing is submitted here', async () => {
+      const { input, submit } = setup({ clock: () => expiry - DEFAULT_EXPIRY_MARGIN_MS - 1 });
+      const run = withSigning(budgeted(input, submit, BUDGET), { submission: 'partner_submits' });
+      await expect(runSignedPayout(run)).resolves.toMatchObject({ authorization: 'stellar_xdr' });
+    });
+
+    it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, '1000' as unknown as number])(
+      'refuses a maxDurationMs of %p before any call',
+      async (maxDurationMs) => {
+        const { input, submit, preparePayout } = setup();
+        await expect(runSignedPayout(budgeted(input, submit, maxDurationMs))).rejects.toThrow(/maxDurationMs/);
+        expect(preparePayout).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('fails closed', () => {

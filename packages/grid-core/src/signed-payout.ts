@@ -202,11 +202,13 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  */
 export async function runSignedPayout(input: RunSignedPayoutInput): Promise<SignedPayoutResult> {
   const margin = input.expiryMarginMs ?? DEFAULT_EXPIRY_MARGIN_MS;
-  checkInput(input, margin);
+  // Read once: what submitting may take. The quote must outlive it, not just the margin.
+  const submitBudget = checkInput(input, margin);
   const { adapter, context, signing } = input;
   const { quote, account, transferId } = context;
   const logger = input.logger ?? noopLogger;
-  const assertFresh = (stage: QuoteExpiredStage): number => assertQuoteFresh(quote, input.now(), margin, stage);
+  const assertFresh = (stage: QuoteExpiredStage, extraMs = 0): number =>
+    assertQuoteFresh(quote, input.now(), margin + extraMs, stage);
 
   assertFresh('authorization');
   const auth = await authorize(adapter, context, logger);
@@ -228,10 +230,11 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   const { signer } = signing;
 
   // Authorized but not yet handed over: the transfer is still in payout_quoted.
-  assertFresh('authorization');
+  // A quote that cannot outlive the submit is dropped here, before anything moves.
+  assertFresh('authorization', submitBudget);
   const state = await signing.onAuthorized(auth);
   const signingContext = signingContextFor({ ...context, destination: signing.destination }, state);
-  const at = assertFresh('signing');
+  const at = assertFresh('signing', submitBudget);
   assertSigningAllowed(signingContext, new Date(at));
   const signedXdr = await signer.signStellar(account, auth.unsignedXdr, signingContext);
   if (typeof signedXdr !== 'string' || signedXdr === '') {
@@ -241,7 +244,7 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   await signing.onSigned?.(signedXdr);
 
   // Still unsubmitted: an expired quote here is safe to abandon, and the signed XDR is dropped.
-  assertFresh('signing');
+  assertFresh('signing', submitBudget);
 
   if (signing.submission === 'client_submits') {
     const submitter = signing.submitter as StellarSubmitter;
@@ -405,7 +408,8 @@ function statusOf(outcome: unknown): string {
   return isOutcome(outcome) ? outcome.status : 'malformed';
 }
 
-function checkInput(input: RunSignedPayoutInput, margin: number): void {
+/** Checks everything that can be checked before any call. Returns the submit budget in ms. */
+function checkInput(input: RunSignedPayoutInput, margin: number): number {
   if (typeof input.idempotencyKey !== 'string' || input.idempotencyKey === '') {
     throw new InvalidInputError('idempotencyKey is required and must be reused on every retry');
   }
@@ -428,7 +432,7 @@ function checkInput(input: RunSignedPayoutInput, margin: number): void {
     throw new InvalidInputError(`Quote ${context.quote.id} is from ${String(context.quote.partner)}, not ${String(adapter.id)}`);
   }
   checkFunded(context.quote, input.funded);
-  if (input.signing !== undefined) checkSigning(input.signing);
+  return input.signing === undefined ? 0 : checkSigning(input.signing);
 }
 
 /** The quote's source must be a positive amount of the funded asset, no more than the funds. */
@@ -458,7 +462,8 @@ function isMoney(value: unknown): value is Money {
   );
 }
 
-function checkSigning(signing: SignedPayoutSigning): void {
+/** Checks the signing inputs. Returns the submitter's `maxDurationMs` for `client_submits`, else 0. */
+function checkSigning(signing: SignedPayoutSigning): number {
   if (signing.submission !== 'client_submits' && signing.submission !== 'partner_submits') {
     throw new InvalidInputError(`Unknown submission mode: ${String(signing.submission)}`);
   }
@@ -477,7 +482,12 @@ function checkSigning(signing: SignedPayoutSigning): void {
   if (signing.submission === 'client_submits' && typeof signing.submitter?.submit !== 'function') {
     throw new InvalidInputError('client_submits needs a submitter');
   }
+  const budget = signing.submission === 'client_submits' ? signing.submitter?.maxDurationMs : undefined;
+  if (budget !== undefined && (typeof budget !== 'number' || !Number.isFinite(budget) || budget < 0)) {
+    throw new InvalidInputError(`submitter.maxDurationMs must be a finite number of ms >= 0: ${String(budget)}`);
+  }
   if (signing.submission === 'client_submits' && typeof signing.onSubmitted !== 'function') {
     throw new InvalidInputError('client_submits needs onSubmitted: store payout_submitted there before the payout is created');
   }
+  return budget ?? 0;
 }
