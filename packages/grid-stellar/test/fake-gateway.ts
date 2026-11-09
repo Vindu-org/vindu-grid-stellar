@@ -4,11 +4,15 @@
 import type {
   HorizonAccount,
   HorizonGateway,
+  HorizonLedger,
   HorizonPaymentRecord,
   HorizonSubmitResponse,
   HorizonTransactionLookup,
   PaymentsQuery,
 } from '../src/horizon';
+import { stellarSdk } from '../src/sdk';
+
+const { Networks } = stellarSdk;
 
 export const ACCOUNT = `G${'A'.repeat(55)}`;
 export const OTHER = `G${'B'.repeat(55)}`;
@@ -16,6 +20,10 @@ export const THIRD = `G${'C'.repeat(55)}`;
 export const USDC_ISSUER = `G${'D'.repeat(55)}`;
 
 export class FakeGateway implements HorizonGateway {
+  networkPassphrase: string = Networks.TESTNET;
+  /** The latest ingested ledger; set it to move Horizon's view of time. An `Error` makes the call fail. */
+  ledger: HorizonLedger | Error = { sequence: 1, closedAt: new Date(Date.UTC(2026, 10, 9, 12, 0, 0)) };
+  readonly ledgerReads: number[] = [];
   /** Payment history per account, oldest first. */
   readonly payments = new Map<string, HorizonPaymentRecord[]>();
   readonly paymentQueries: Array<{ account: string; query: PaymentsQuery }> = [];
@@ -27,6 +35,12 @@ export class FakeGateway implements HorizonGateway {
   submitResponses: Array<HorizonSubmitResponse | Error | 'hang'> = [];
   /** Runs after each lookup, e.g. to make a transaction appear later. */
   onLookup: ((hash: string, count: number) => void) | undefined;
+
+  async latestLedger(): Promise<HorizonLedger> {
+    this.ledgerReads.push(this.transactionLookups.length);
+    if (this.ledger instanceof Error) throw this.ledger;
+    return this.ledger;
+  }
 
   async paymentsForAccount(account: string, query: PaymentsQuery): Promise<readonly HorizonPaymentRecord[]> {
     this.paymentQueries.push({ account, query });

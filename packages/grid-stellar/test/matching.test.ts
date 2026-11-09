@@ -41,6 +41,23 @@ describe('matching payments to legs', () => {
     expect(bad).toEqual({ status: 'unmatched', mismatches: [{ legId: 'L', failed: ['source', 'tx_hash', 'reference'] }] });
   });
 
+  it('a leg without source accepts a payment from any sender', () => {
+    // Review probe: a third party paying the right amount matches a funding leg with no source.
+    expect(matchPaymentToLeg(payment({ from: THIRD }), [leg()]).status).toBe('matched');
+  });
+
+  it('requireSource refuses legs without a source', () => {
+    const result = matchPaymentToLeg(payment({ from: THIRD }), [leg()], { requireSource: true });
+    expect(result).toEqual({ status: 'unmatched', mismatches: [{ legId: 'leg-1', failed: ['source'] }] });
+    expect(matchPaymentToLeg(payment(), [leg({ source: OTHER })], { requireSource: true })).toMatchObject({
+      status: 'matched',
+      matchedOn: ['destination', 'source', 'asset', 'amount'],
+    });
+    expect(matchPaymentToLeg(payment({ from: THIRD }), [leg({ source: OTHER })], { requireSource: true }).status).toBe(
+      'unmatched',
+    );
+  });
+
   it('accepts the muxed destination id as the reference', () => {
     expect(matchPaymentToLeg(payment({ toMuxedId: '42' }), [leg({ reference: '42' })]).status).toBe('matched');
   });

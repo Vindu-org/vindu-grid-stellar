@@ -10,12 +10,12 @@ No environment reads, no keys, no signing. Your signer signs; the network passph
 
 | Module | Contents |
 |---|---|
-| Horizon gateway | `HorizonGateway`: payments for an account, transaction by hash, submit, account. `createHorizonGateway({ horizonUrl, networkPassphrase })` wraps `@stellar/stellar-sdk`; tests pass a fake. |
-| Read layer | `createReadLayer({ gateway, cursorStore, onEvent })`: `pollAccount` resumes from the stored cursor; `reconcile` re-reads a window without moving it. |
+| Horizon gateway | `HorizonGateway`: its network passphrase, the latest ingested ledger, payments for an account, transaction by hash, submit, account. `createHorizonGateway({ horizonUrl, networkPassphrase })` wraps `@stellar/stellar-sdk`; pass `server` for any object with the `HorizonServer` calls (the SDK's `Horizon.Server` fits). Tests pass a fake. |
+| Read layer | `createReadLayer({ gateway, cursorStore, onEvent, onMalformed? })`: `pollAccount` resumes from the stored cursor; `reconcile` re-reads a window without moving it. |
 | Payments | `ChainPayment`: payments, path payments and account creation, with core assets and canonical 7-decimal amounts. |
-| Matching | `matchPaymentToLeg` by destination, asset and issuer, exact amount, and hash or reference when known. `partnerAndChainAgree` for the funded check. |
+| Matching | `matchPaymentToLeg` by destination, asset and issuer, exact amount, and source, hash or reference when known. `{ requireSource: true }` refuses legs without a source. `partnerAndChainAgree` for the funded check. |
 | Accounts | `assessReceiveReadiness`: account exists, trustline for the asset and issuer, optional XLM reserve (1 XLM plus 0.5 per trustline). |
-| Submit | `submitSignedTransaction`: hash computed locally first, hash checked before any retry, typed result codes. |
+| Submit | `submitSignedTransaction`: hashes computed locally first (outer and inner for a fee bump), hashes checked before any retry, expiry decided by Horizon's ingested ledger, typed result codes. `createStellarSubmitter` adapts it to core's `StellarSubmitter`. |
 
 ## Read layer: at least once
 
@@ -35,7 +35,13 @@ const layer = createReadLayer({
 await layer.pollAccount(registeredAccount);
 ```
 
+A record the layer cannot read (for example an amount that is not a valid decimal) never blocks the cursor. It goes to `onMalformed(record, error)` and the poll moves on; by default that logs a warning with the operation id and transaction hash only. Throw from `onMalformed` to stop instead, with the cursor left before that record. Positions past skipped records are stored once per page, not once per record.
+
 Follow the accounts you registered for your clients, not a partner's shared treasury address. Transactions a partner builds for you may not carry a memo, so the registered account is what ties a payment to a client.
+
+## Matching: say who may pay
+
+`matchPaymentToLeg(payment, legs)` compares destination, asset with issuer and the exact amount, plus `source`, `txHash` and `reference` when the leg has them. **A leg without `source` accepts a payment from any sender**: anyone who sends the right amount to the destination matches it. Set `source` when you know the payer, and pass `{ requireSource: true }` to make legs without one fail on `source`.
 
 ## Submit: never sign a replacement while the first could land
 
@@ -43,15 +49,33 @@ Follow the accounts you registered for your clients, not a partner's shared trea
 const result = await submitSignedTransaction({ gateway, signedXdr, networkPassphrase });
 ```
 
+`networkPassphrase` must equal `gateway.networkPassphrase`; otherwise `InvalidConfigError` is thrown before anything is sent, because the local hash would never be found. Durations that are not finite (`NaN`, `Infinity`) or out of range throw `InvalidInputError`, also before anything is sent.
+
 | Status | Meaning | May you sign a replacement? |
 |---|---|---|
-| `success` | In a ledger, successful | No need |
+| `success` | In a ledger, successful. `hash` is the hash that landed. | No: the payment moved |
 | `failed` | In a ledger, failed: fee and sequence spent, nothing moved | Yes, after fixing the cause |
-| `rejected` | Refused by Horizon, not on the ledger; may still land until maxTime | No |
+| `rejected`, reason `refused` | Refused by Horizon, not found on the ledger; may still land until maxTime | No |
+| `rejected`, reason `hash_mismatch` | Horizon accepted it but answered with another hash. Never a success: the payment may have moved | No: settle it by hand |
 | `unknown` | Not found yet and could still land | No: check again later |
-| `expired_not_landed` | maxTime (plus a grace period) has passed and it is not on the ledger | Yes |
+| `expired_not_landed` | Horizon's ingested ledger closed after maxTime and a later lookup found nothing | Yes |
+
+Only `failed` and `expired_not_landed` allow a replacement (core's `canSignReplacement`).
+
+**Expiry is decided by the ingested ledger, not the local clock.** `expired_not_landed` needs all three: the transaction has a maxTime; Horizon's latest ingested ledger (`gateway.latestLedger()`) closed after that maxTime; and a successful lookup made after reading that ledger finds nothing by any hash. Horizon ingests ledgers in order, so every ledger that could hold the transaction is already searchable. A failed ledger read or lookup never counts as expired. Point the gateway at a single Horizon instance: behind a load balancer the ledger read and the lookup may reach instances at different ledgers. The local clock only bounds how long to wait (`maxWaitMs`).
+
+**Fee bumps.** Anyone can wrap a signed transaction in a fee bump of their own. For a fee bump both the outer hash and the inner transaction hash are looked up; either found means landed. The result says which (`foundBy`), carries `innerHash`, and `submittedHash` when what landed is another envelope.
 
 Resubmitting the same signed envelope is always safe. Build transactions with a maxTime: without one a lost transaction stays `unknown` forever.
+
+### With the core payout flow
+
+```ts
+const submitter = createStellarSubmitter({ gateway, networkPassphrase });
+// runSignedPayout({ ..., submitter }): only { status: 'success' } creates the payout.
+```
+
+Each outcome keeps the status and hash; every other field of the result is in `detail` (for a mismatch, `detail.reason` is `'hash_mismatch'`).
 
 ## Testing
 

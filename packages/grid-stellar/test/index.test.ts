@@ -11,6 +11,8 @@ describe('index exports', () => {
     'partnerAndChainAgree',
     'submitSignedTransaction',
     'inspectSignedTransaction',
+    'createStellarSubmitter',
+    'toSubmitOutcome',
     'mapResultCodes',
     'assessReceiveReadiness',
     'checkReceiveReadiness',

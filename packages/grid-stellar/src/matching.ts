@@ -8,6 +8,11 @@
  * registered destination account is what ties a payment to a client, so
  * follow those accounts rather than a shared treasury address.
  *
+ * A leg without `source` accepts a payment from any sender: anyone who
+ * pays the right amount of the right asset to the destination matches it.
+ * When the sender is known, set `source`; pass `{ requireSource: true }` to
+ * make a leg without one never match.
+ *
  * Funding counts only when the partner's figure and the chain agree:
  * {@link partnerAndChainAgree}.
  */
@@ -32,7 +37,10 @@ export interface ExpectedLeg {
   readonly destination: string;
   /** Exact amount and asset (with issuer) expected on chain. */
   readonly amount: Money;
-  /** Account the payment must come from, when known. */
+  /**
+   * Account the payment must come from, when known. Without it, a payment
+   * from any sender can match (see {@link MatchOptions.requireSource}).
+   */
   readonly source?: string;
   /** Transaction hash, when the leg already knows it (e.g. after submission). */
   readonly txHash?: string;
@@ -70,16 +78,29 @@ export type MatchResult =
       readonly mismatches: readonly LegMismatch[];
     };
 
+export interface MatchOptions {
+  /**
+   * Refuse legs that carry no `source`: they fail on `source` instead of
+   * accepting any sender. Default false.
+   */
+  readonly requireSource?: boolean;
+}
+
 /**
  * Matches one payment against the open legs. A single fitting leg is a
  * match. When several fit, a leg that also agreed on a hash or reference
  * wins if it is the only such leg; otherwise the result is `ambiguous`.
  */
-export function matchPaymentToLeg(payment: ChainPayment, expectedLegs: readonly ExpectedLeg[]): MatchResult {
+export function matchPaymentToLeg(
+  payment: ChainPayment,
+  expectedLegs: readonly ExpectedLeg[],
+  options: MatchOptions = {},
+): MatchResult {
+  const requireSource = options.requireSource ?? false;
   const fits: Array<{ leg: ExpectedLeg; matchedOn: MatchField[] }> = [];
   const mismatches: LegMismatch[] = [];
   for (const leg of expectedLegs) {
-    const { failed, matchedOn } = compareLeg(payment, leg);
+    const { failed, matchedOn } = compareLeg(payment, leg, requireSource);
     if (failed.length === 0) fits.push({ leg, matchedOn });
     else mismatches.push({ legId: leg.legId, failed });
   }
@@ -92,7 +113,11 @@ export function matchPaymentToLeg(payment: ChainPayment, expectedLegs: readonly 
   return { status: 'ambiguous', candidates: fits.map((f) => f.leg), reason: 'several_legs_fit' };
 }
 
-function compareLeg(payment: ChainPayment, leg: ExpectedLeg): { failed: MatchField[]; matchedOn: MatchField[] } {
+function compareLeg(
+  payment: ChainPayment,
+  leg: ExpectedLeg,
+  requireSource: boolean,
+): { failed: MatchField[]; matchedOn: MatchField[] } {
   const failed: MatchField[] = [];
   const matchedOn: MatchField[] = [];
   const check = (field: MatchField, ok: boolean): void => {
@@ -101,6 +126,7 @@ function compareLeg(payment: ChainPayment, leg: ExpectedLeg): { failed: MatchFie
 
   check('destination', payment.to === leg.destination);
   if (leg.source !== undefined) check('source', payment.from === leg.source);
+  else if (requireSource) check('source', false);
   const assetOk = sameAsset(payment.asset, leg.amount.asset);
   check('asset', assetOk);
   // Amounts only compare within one asset; a different asset already failed.
