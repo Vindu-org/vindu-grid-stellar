@@ -80,7 +80,11 @@ interface Landed {
 export type SubmitResult =
   /** In a ledger and successful. */
   | ({ readonly status: 'success' } & Landed)
-  /** In a ledger but failed: the fee and sequence number are spent and nothing moved. */
+  /**
+   * In a ledger but failed: the fee and sequence number are spent and
+   * nothing moved. `error` holds the landed transaction's own result codes,
+   * when Horizon gave them; never a later resubmission's refusal.
+   */
   | ({ readonly status: 'failed'; readonly error?: SubmitError } & Landed)
   /** Horizon refused it and it is not on the ledger yet. It may still land until its maxTime: do not re-sign. */
   | {
@@ -354,7 +358,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     return failed ? { kind: 'error' } : { kind: 'not_found', latestLedgers };
   }
 
-  const fromLookup = (found: HorizonTransactionFound, by: FoundBy, error?: SubmitError): SubmitResult => {
+  const fromLookup = (found: HorizonTransactionFound, by: FoundBy): SubmitResult => {
     const landedHash = found.hash.toLowerCase();
     const landed = {
       hash: landedHash,
@@ -364,6 +368,9 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
       ...(landedHash === hash ? {} : { submittedHash: hash }),
     };
     if (found.successful) return { status: 'success', ...landed };
+    // The landed transaction's own codes, never a resubmission's refusal.
+    const codes = found.resultCodes;
+    const error = codes === undefined ? undefined : mapResultCodes(codes.transaction, codes.operations);
     return { status: 'failed', ...landed, ...(error === undefined ? {} : { error }) };
   };
 
@@ -434,10 +441,10 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
    * Settles on a landing, on a record that is not ours, or on proven expiry.
    * `null`: not settled.
    */
-  async function probe(before: HorizonLedger | null, error?: SubmitError): Promise<SubmitResult | null> {
+  async function probe(before: HorizonLedger | null): Promise<SubmitResult | null> {
     const checked = maxTime === undefined ? null : await latestLedger(requestTimeoutMs);
     const look = await lookup();
-    if (look.kind === 'found') return fromLookup(look.record, look.by, error);
+    if (look.kind === 'found') return fromLookup(look.record, look.by);
     if (look.kind === 'foreign') return fromForeign(look.record);
     if (look.kind === 'error' || checked === null || maxTime === undefined) return null;
     const doubt = expiryDoubt(before, checked, look.latestLedgers);
@@ -472,7 +479,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     // A rejection of an envelope that already landed (e.g. tx_bad_seq on a
     // retry, or another fee bump around the same transaction) must not hide
     // the landing: check the hashes first.
-    const settled = await probe(before, error);
+    const settled = await probe(before);
     if (settled !== null) return done(settled);
     logger.warn('stellar submission rejected', { hash, code: error.code });
     return done({ status: 'rejected', reason: 'refused', hash, ...inner, error });
@@ -485,7 +492,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   const rounds = Math.floor(maxWaitMs / pollIntervalMs) + 1;
   let lastError: SubmitError | undefined;
   for (let round = 1; ; round += 1) {
-    const settled = await probe(before, lastError);
+    const settled = await probe(before);
     if (settled !== null) return done(settled);
     const t = readClock();
     if (!Number.isFinite(t) || round >= rounds || t + pollIntervalMs >= deadline) return unknown(lastError);

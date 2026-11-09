@@ -911,3 +911,43 @@ describe('submit: a lookup must return our transaction', () => {
     expect(await run(gateway, ours.xdr)).toMatchObject({ status: 'success', hash: inner.hash, foundBy: 'inner_hash' });
   });
 });
+
+describe('submit: a landed failure keeps its own result codes', () => {
+  it("a resubmission's tx_bad_seq never replaces the landed transaction's codes", async () => {
+    // Review probe: the first submission timed out, the transaction landed
+    // as failed, the resubmission got tx_bad_seq, and the result said bad_seq.
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [
+      { kind: 'timeout' },
+      { kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] },
+    ];
+    gateway.onLookup = (_h, count) => {
+      if (count === 2) {
+        gateway.transactions.set(hash, {
+          found: true,
+          hash,
+          successful: false,
+          ledger: 8,
+          resultCodes: { transaction: 'tx_failed', operations: ['op_underfunded'] },
+        });
+      }
+    };
+    expect(await run(gateway, xdr)).toEqual({
+      status: 'failed',
+      hash,
+      ledger: 8,
+      foundBy: 'hash',
+      error: { code: 'underfunded', transactionCode: 'tx_failed', operationCodes: ['op_underfunded'] },
+    });
+    expect(gateway.submitted.length).toBe(2);
+  });
+
+  it('a first-submission tx_bad_seq on a transaction that landed failed: failed, without the refusal', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] }];
+    gateway.transactions.set(hash, { found: true, hash, successful: false, ledger: 3 });
+    expect(await run(gateway, xdr)).toEqual({ status: 'failed', hash, ledger: 3, foundBy: 'hash' });
+  });
+});
