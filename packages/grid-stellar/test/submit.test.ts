@@ -489,7 +489,7 @@ describe('submit: fee bumps', () => {
     const inner = signedPayment(T0 / 1000 + 60);
     const ours = feeBumped(inner.tx);
     const theirs = feeBumped(inner.tx, '500');
-    const record = { found: true as const, hash: theirs.hash, successful: true, ledger: 7 };
+    const record = { found: true as const, hash: theirs.hash, innerHash: inner.hash, successful: true, ledger: 7 };
     const gateway = new FakeGateway();
     gateway.transactions.set(theirs.hash, record);
     gateway.transactions.set(inner.hash, record);
@@ -539,7 +539,7 @@ describe('submit: fee bumps', () => {
     const theirs = feeBumped(plain.tx);
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
-    gateway.transactions.set(plain.hash, { found: true, hash: theirs.hash, successful: true, ledger: 2 });
+    gateway.transactions.set(plain.hash, { found: true, hash: theirs.hash, innerHash: plain.hash, successful: true, ledger: 2 });
     expect(await run(gateway, plain.xdr)).toEqual({
       status: 'success',
       hash: theirs.hash,
@@ -863,5 +863,51 @@ describe('submit: a broken clock ends the run', () => {
     };
     expect(await run(gateway, xdr, clock(), { now })).toEqual({ status: 'unknown', hash });
     expect(gateway.submitted).toEqual([xdr]);
+  });
+});
+
+describe('submit: a lookup must return our transaction', () => {
+  it('a lookup that returns another hash is unknown with detail, never success', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const other = 'b'.repeat(64);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(hash, { found: true, hash: other, successful: true, ledger: 4 });
+    const result = await run(gateway, xdr);
+    expect(result).toEqual({ status: 'unknown', hash, reason: 'unexpected_lookup_hash', returnedHash: other });
+    expect(canSignReplacement(result)).toBe(false);
+  });
+
+  it('a record with a malformed hash is unknown, and the malformed value is not echoed', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(hash, { found: true, hash: '<script>', successful: true });
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash, reason: 'unexpected_lookup_hash' });
+  });
+
+  it("someone else's fee bump whose inner hash is not ours is unknown", async () => {
+    const plain = signedPayment(IN_ONE_HOUR);
+    const unrelated = signedPayment(IN_ONE_HOUR);
+    const theirs = feeBumped(unrelated.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(plain.hash, { found: true, hash: theirs.hash, innerHash: unrelated.hash, successful: true });
+    expect(await run(gateway, plain.xdr)).toEqual({
+      status: 'unknown',
+      hash: plain.hash,
+      reason: 'unexpected_lookup_hash',
+      returnedHash: theirs.hash,
+      returnedInnerHash: unrelated.hash,
+    });
+  });
+
+  it('a fee bump found by its inner hash, with the inner hash as the record hash: success', async () => {
+    const inner = signedPayment(IN_ONE_HOUR);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(inner.hash, { found: true, hash: inner.hash, successful: true, ledger: 6 });
+    expect(await run(gateway, ours.xdr)).toMatchObject({ status: 'success', hash: inner.hash, foundBy: 'inner_hash' });
   });
 });

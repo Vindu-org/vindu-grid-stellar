@@ -11,6 +11,11 @@
  * safe (Stellar applies a transaction once); asking for a new signature is
  * never done here.
  *
+ * A lookup is believed only when the record it returns is ours: its hash is
+ * the hash looked up, our envelope hash or our inner hash, or its inner
+ * transaction's hash is our inner (or plain) hash. Any other record ends the
+ * submission as `unknown` with reason `unexpected_lookup_hash`.
+ *
  * Whether a transaction expired is decided by the network, never by the
  * local clock. `expired_not_landed` needs every one of these:
  * - the transaction has a maxTime;
@@ -99,8 +104,23 @@ export type SubmitResult =
       /** The hash Horizon answered with. */
       readonly returnedHash: string;
     }
-  /** Not known to be on the ledger, and not proven unable to land. Check again later; do not re-sign. */
-  | { readonly status: 'unknown'; readonly hash: string; readonly innerHash?: string; readonly lastError?: SubmitError }
+  /**
+   * Not known to be on the ledger, and not proven unable to land. Check
+   * again later; do not re-sign. With reason `unexpected_lookup_hash` a
+   * lookup returned a record that is not this transaction: the Horizon
+   * answer cannot be trusted.
+   */
+  | {
+      readonly status: 'unknown';
+      readonly hash: string;
+      readonly innerHash?: string;
+      readonly lastError?: SubmitError;
+      readonly reason?: 'unexpected_lookup_hash';
+      /** The record's hash, when it is a well-formed hash. */
+      readonly returnedHash?: string;
+      /** The record's inner transaction hash, when it is a well-formed hash. */
+      readonly returnedInnerHash?: string;
+    }
   /**
    * Horizon proved it can never land: see the module documentation for the
    * rule. A replacement may be signed.
@@ -198,6 +218,8 @@ const TIMED_OUT = Symbol('timed out');
 /** Result of looking the transaction up by every local hash. */
 type Lookup =
   | { readonly kind: 'found'; readonly record: HorizonTransactionFound; readonly by: FoundBy }
+  /** Found a record that is not this transaction. */
+  | { readonly kind: 'foreign'; readonly record: HorizonTransactionFound }
   /** Every lookup answered "not found"; the ingested ledger each reported, when it did. */
   | { readonly kind: 'not_found'; readonly latestLedgers: ReadonlyArray<number | undefined> }
   /** A lookup failed or timed out, and none found it: proves nothing. */
@@ -240,6 +262,10 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   // Every hash the transaction can be found by, the envelope's first.
   const lookups: ReadonlyArray<readonly [string, FoundBy]> =
     innerHash === undefined ? [[hash, 'hash']] : [[hash, 'hash'], [innerHash, 'inner_hash']];
+  // A record is ours when it carries one of these as its hash...
+  const ownHashes = new Set(innerHash === undefined ? [hash] : [hash, innerHash]);
+  // ...or this one as its inner transaction's hash.
+  const ownInnerHash = innerHash ?? hash;
   const done = (result: SubmitResult): SubmitResult => {
     logger.info('stellar submission settled', { hash, status: result.status });
     return result;
@@ -289,6 +315,16 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     }
   }
 
+  /** The record is this transaction: see the module documentation. */
+  function isOurs(record: HorizonTransactionFound, requested: string): boolean {
+    const recordHash = wellFormedHash(record.hash);
+    const recordInner = wellFormedHash(record.innerHash);
+    return (
+      (recordHash !== undefined && (recordHash === requested || ownHashes.has(recordHash))) ||
+      (recordInner !== undefined && recordInner === ownInnerHash)
+    );
+  }
+
   /** Looks the transaction up by every local hash. A failed or timed-out lookup never counts as not found. */
   async function lookup(): Promise<Lookup> {
     let failed = false;
@@ -305,7 +341,10 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
           latestLedgers.push(result.latestLedger);
           continue;
         }
-        if (!HASH.test(result.hash)) throw new Error('Horizon returned a transaction with an invalid hash');
+        if (!isOurs(result, h)) {
+          logger.error('Horizon returned another transaction for our hash', { hash: h });
+          return { kind: 'foreign', record: result };
+        }
         return { kind: 'found', record: result, by };
       } catch (e) {
         failed = true;
@@ -326,6 +365,19 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     };
     if (found.successful) return { status: 'success', ...landed };
     return { status: 'failed', ...landed, ...(error === undefined ? {} : { error }) };
+  };
+
+  const fromForeign = (record: HorizonTransactionFound): SubmitResult => {
+    const returnedHash = wellFormedHash(record.hash);
+    const returnedInnerHash = wellFormedHash(record.innerHash);
+    return {
+      status: 'unknown',
+      hash,
+      ...inner,
+      reason: 'unexpected_lookup_hash',
+      ...(returnedHash === undefined ? {} : { returnedHash }),
+      ...(returnedInnerHash === undefined ? {} : { returnedInnerHash }),
+    };
   };
 
   const fromAccepted = (accepted: Extract<HorizonSubmitResponse, { kind: 'accepted' }>): SubmitResult => {
@@ -379,13 +431,14 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   /**
    * Reads the ledger first (only when there is a maxTime), then looks the
    * transaction up, so the lookups are made after that ledger was ingested.
-   * Settles on a landing or on proven expiry.
+   * Settles on a landing, on a record that is not ours, or on proven expiry.
    * `null`: not settled.
    */
   async function probe(before: HorizonLedger | null, error?: SubmitError): Promise<SubmitResult | null> {
     const checked = maxTime === undefined ? null : await latestLedger(requestTimeoutMs);
     const look = await lookup();
     if (look.kind === 'found') return fromLookup(look.record, look.by, error);
+    if (look.kind === 'foreign') return fromForeign(look.record);
     if (look.kind === 'error' || checked === null || maxTime === undefined) return null;
     const doubt = expiryDoubt(before, checked, look.latestLedgers);
     if (doubt !== null) {
@@ -448,6 +501,11 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
 
 const HASH = /^[0-9a-f]{64}$/i;
 
+/** The lower-case hash, or `undefined` when `value` is not 64 hex characters. */
+function wellFormedHash(value: unknown): string | undefined {
+  return typeof value === 'string' && HASH.test(value) ? value.toLowerCase() : undefined;
+}
+
 function isLedgerNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
@@ -496,9 +554,13 @@ export type StellarSubmitDetail = {
   readonly ledger?: number;
   readonly foundBy?: FoundBy;
   readonly submittedHash?: string;
-  /** `rejected` only: `refused` by Horizon, or `hash_mismatch`. */
-  readonly reason?: 'refused' | 'hash_mismatch';
+  /**
+   * `rejected`: `refused` by Horizon, or `hash_mismatch`. `unknown`:
+   * `unexpected_lookup_hash` when a lookup returned another transaction.
+   */
+  readonly reason?: 'refused' | 'hash_mismatch' | 'unexpected_lookup_hash';
   readonly returnedHash?: string;
+  readonly returnedInnerHash?: string;
   readonly error?: SubmitError;
   readonly lastError?: SubmitError;
   readonly maxTime?: number;
