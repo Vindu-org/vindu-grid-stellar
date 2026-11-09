@@ -31,9 +31,10 @@ yarn workspace testnet-demo start --blindpay-dry-run
 | States | The transfer moves `quoted -> awaiting_pix -> funding -> funded -> payout_quoted -> awaiting_signature -> payout_submitted -> payout_processing -> completed`, each step through core's `transition`. |
 | Funding | The mock partner returns a fake PIX code, then sends USDC from its treasury on the in-memory ledger. The read layer (`createReadLayer` with `InMemoryCursorStore`) sees the payment, `matchPaymentToLeg` matches it, and `partnerAndChainAgree` confirms the partner's figure and the chain agree before `funded`. |
 | Tolerance | `checkPayoutTolerance` compares the fresh payout quote with the estimate the client saw before `payout_quoted`. |
-| Signing | The mock partner returns a real unsigned testnet transaction. The test-key signer (`custody: 'test_key'`) calls `assertSigningAllowed`, decodes the XDR and checks source, destination, asset and amount before it signs. The demo shows it refusing twice: once when asked too early, once for a transaction that pays another account. |
-| Submit | `submitSignedTransaction` against the in-memory Horizon. Horizon is set to time out once after the transaction lands, so the submitter checks the hash, finds it and returns `success` without a second signature. |
-| Payout | The partner gets the signed transaction and its hash. The read layer resumes from its cursor and matches the outgoing payment on hash and memo. |
+| Signing | The mock partner returns a real unsigned testnet transaction. The test-key signer (`custody: 'test_key'`) calls `assertSigningAllowed`, decodes the XDR and refuses anything but exactly one payment operation. It checks the source (and the operation's own source, when set), the destination, the asset and issuer, the exact amount, a fee cap (default 1 000 000 stroops) and, with `assertMaxTimeWithinQuote`, the maxTime. The demo shows it refusing twice: once when asked too early, once, through `runSignedPayout`, for a transaction that pays another account. |
+| Payout flow | Core's `runSignedPayout` with grid-stellar's `createStellarSubmitter`: prepare, sign once, submit, then create the partner payout only after a `success` outcome. Horizon is set to time out once after the transaction lands, so the submitter checks the hash, finds it and returns `success` without a second signature. |
+| Reconciliation | The partner gets the signed transaction and its hash. The read layer resumes from its cursor and matches the outgoing payment on source, hash and memo. |
+| Failure edges | Where the flow can stop, the transfer takes the failure edge from core's table: a failed payout quote (`funded -> needs_attention`), a quote too close to expiry before the transaction leaves (`awaiting_signature -> funded`), a submit outcome other than `success` (`awaiting_signature -> needs_attention`), a payout the partner does not take (`payout_submitted -> needs_attention`). Nothing is re-signed, refunded or rerouted automatically. The tests run the refused-submission case. |
 
 ## Files
 
@@ -42,10 +43,10 @@ yarn workspace testnet-demo start --blindpay-dry-run
 | `src/demo.ts` | `runDemo`: setup, routing, then the two legs. |
 | `src/funding-leg.ts`, `src/payout-leg.ts` | The two legs, step by step. |
 | `src/mock-partner.ts` | `MockPartner`, a core `PartnerAdapter`, and both partners' capabilities as data. |
-| `src/test-key-signer.ts` | `TestKeySigner`, a core `Signer` with a throwaway key. |
+| `src/test-key-signer.ts` | `TestKeySigner`, a core `Signer` with a throwaway key. Read it as a reference for the checks a signer must make; `test/test-key-signer.test.ts` covers each refusal. |
 | `src/fake-horizon.ts` | `FakeHorizon`, an in-memory `HorizonGateway` that checks signatures, sequence numbers and time bounds. |
 | `src/chain-watch.ts` | The read layer over the client's account, and leg matching. |
-| `src/blindpay-dry-run.ts` | The `--blindpay-dry-run` flow. |
+| `src/blindpay-dry-run.ts` | The `--blindpay-dry-run` flow: `runStellarPayout` with the BlindPay adapter and `createStellarSubmitter`. |
 
 ## Pointing it at real testnet
 
