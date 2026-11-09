@@ -71,6 +71,25 @@ Your application authenticates the user, checks permissions, reads its own secre
 | `contracts/registry` | Soroban contract for transfer and verification attestations | Planned (tranche 2) |
 | [`examples/testnet-demo`](examples/testnet-demo) | End-to-end two-leg transfer on Stellar with a mock partner, offline | 0.1.0, unreleased |
 
+## Getting started
+
+Requirements: Node 22.12 or later, and Yarn 4 through corepack.
+
+```sh
+corepack enable
+yarn install
+yarn build
+yarn test
+```
+
+Then run the demo, a full two-leg transfer with mock partners and an in-memory Horizon. It runs offline and needs no credentials:
+
+```sh
+yarn workspace testnet-demo start
+```
+
+Packages are versioned by git tags in this repository. They are not on npm yet.
+
 ## Roadmap
 
 | Tranche | Scope in this repository | Target |
