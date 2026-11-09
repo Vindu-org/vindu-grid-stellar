@@ -83,7 +83,8 @@ const result = await runStellarPayout({
   idempotencyKey,                          // stored before the call, reused on retries
   signing: {
     signer,                                // your key holder; checks the XDR
-    submitter: createStellarSubmitter(...), // core's StellarSubmitter, with its maxDurationMs
+    submitter: createStellarSubmitter(...), // core's StellarSubmitter, with its maxDurationMs,
+                                           // over one Horizon you trust, not a public load-balanced URL
     destination: blindpayAccount,          // the BlindPay account the payment must reach
     // Compare-and-set: payout_quoted -> awaiting_signature, or throw.
     onAuthorized: async () => (await moveIf('payout_quoted', 'awaiting_signature', 'signed_payout_flow')).state,
