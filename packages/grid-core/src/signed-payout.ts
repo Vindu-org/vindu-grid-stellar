@@ -295,10 +295,36 @@ export async function retryPayoutExecute(
   pending: PendingPayout<ExecutePayoutInput>,
   logger: Logger = noopLogger,
 ): Promise<SignedPayoutResult> {
-  if (pending.body.idempotencyKey !== pending.idempotencyKey) {
-    throw new InvalidInputError('The pending payout body and its idempotency key do not match');
-  }
+  checkPending(pending);
+  if (typeof adapter?.executePayout !== 'function') throw new InvalidInputError('The adapter has no executePayout');
   return execute(adapter, pending, logger);
+}
+
+/**
+ * The pending create must be what a run stored: a body and key that agree,
+ * the transfer and the payout quote, and, when present, a signed XDR and a
+ * well-formed hash. Anything else is refused before the partner is called.
+ */
+function checkPending(pending: unknown): asserts pending is PendingPayout<ExecutePayoutInput> {
+  const fail = (what: string): never => {
+    throw new InvalidInputError(`The pending payout is not usable: ${what}`);
+  };
+  if (typeof pending !== 'object' || pending === null) fail('it is missing');
+  const { body, idempotencyKey } = pending as { body?: unknown; idempotencyKey?: unknown };
+  if (typeof idempotencyKey !== 'string' || idempotencyKey === '') fail('no idempotency key');
+  if (typeof body !== 'object' || body === null) fail('no body');
+  const b = body as Partial<Record<keyof ExecutePayoutInput, unknown>>;
+  if (b.idempotencyKey !== idempotencyKey) fail('the body and its idempotency key do not match');
+  if (typeof b.transferId !== 'string' || b.transferId === '') fail('no transfer id');
+  const quote = b.quote as { id?: unknown; kind?: unknown } | null | undefined;
+  if (typeof quote !== 'object' || quote === null || typeof quote.id !== 'string' || quote.kind !== 'payout') {
+    fail('no payout quote');
+  }
+  const account = b.account as { address?: unknown } | null | undefined;
+  if (typeof account !== 'object' || account === null || typeof account.address !== 'string') fail('no account');
+  if (b.signedXdr !== undefined && (typeof b.signedXdr !== 'string' || b.signedXdr === '')) fail('an empty signed XDR');
+  if (b.txHash !== undefined && (typeof b.txHash !== 'string' || !TX_HASH_RE.test(b.txHash))) fail('a malformed hash');
+  if (b.txHash !== undefined && b.signedXdr === undefined) fail('a hash without a signed XDR');
 }
 
 /**

@@ -709,11 +709,36 @@ describe('signed payout', () => {
     expect(e.pending?.idempotencyKey).toBe(KEY);
   });
 
-  it('refuses a retry whose body and key disagree', async () => {
-    const { input, executePayout } = setup();
-    const body = { quote, account, transferId: 'tr_1', idempotencyKey: 'other' };
-    await expect(retryPayoutExecute(input.adapter, { body, idempotencyKey: KEY })).rejects.toThrow(InvalidInputError);
-    expect(executePayout).not.toHaveBeenCalled();
+  describe('retry input', () => {
+    const body = { quote, account, transferId: 'tr_1', idempotencyKey: KEY, signedXdr: SIGNED, txHash: HASH };
+    type Pending = Parameters<typeof retryPayoutExecute>[1];
+
+    // Review probe: retryPayoutExecute(adapter, undefined) failed with a TypeError.
+    it.each<[string, unknown]>([
+      ['nothing', undefined],
+      ['null', null],
+      ['no body', { idempotencyKey: KEY }],
+      ['no key', { body }],
+      ['an empty key', { body: { ...body, idempotencyKey: '' }, idempotencyKey: '' }],
+      ['a body and key that disagree', { body: { ...body, idempotencyKey: 'other' }, idempotencyKey: KEY }],
+      ['no transfer id', { body: { ...body, transferId: '' }, idempotencyKey: KEY }],
+      ['a funding quote', { body: { ...body, quote: { ...quote, kind: 'funding' } }, idempotencyKey: KEY }],
+      ['no quote', { body: { ...body, quote: undefined }, idempotencyKey: KEY }],
+      ['no account', { body: { ...body, account: null }, idempotencyKey: KEY }],
+      ['an empty signed XDR', { body: { ...body, signedXdr: '' }, idempotencyKey: KEY }],
+      ['a malformed hash', { body: { ...body, txHash: 'zz' }, idempotencyKey: KEY }],
+      ['a hash without a signed XDR', { body: { ...body, signedXdr: undefined }, idempotencyKey: KEY }],
+    ])('refuses %s before calling the partner', async (_name, pending) => {
+      const { input, executePayout } = setup();
+      await expect(retryPayoutExecute(input.adapter, pending as Pending)).rejects.toThrow(InvalidInputError);
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it('sends a well-formed pending create as is', async () => {
+      const { input, executePayout } = setup();
+      await expect(retryPayoutExecute(input.adapter, { body, idempotencyKey: KEY })).resolves.toMatchObject({ leg: LEG });
+      expect(executePayout).toHaveBeenCalledWith(body);
+    });
   });
 
   describe('the amount is bounded by the funds', () => {
