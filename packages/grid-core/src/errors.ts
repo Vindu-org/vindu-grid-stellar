@@ -173,6 +173,43 @@ export class QuoteExpiredError extends GridError {
   }
 }
 
+/** How the partner's authorize step failed. */
+export type PayoutAuthorizationFailure = 'threw' | 'invalid_authorization';
+
+const CAUSE_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * The partner's authorize step (`preparePayout`) threw, or returned an
+ * authorization the flow does not know. Nothing was signed or submitted,
+ * and the transfer is still in `payout_quoted`: take
+ * `payout_quoted -> needs_attention`.
+ *
+ * It keeps the cause's `code` (e.g. `partner_http`), never its message or
+ * the error itself: a partner's error text can carry client data.
+ */
+export class PayoutAuthorizationError extends GridError {
+  readonly failure: PayoutAuthorizationFailure;
+  /** The `code` of what `preparePayout` threw, when it had a plain one. */
+  readonly causeCode: string | undefined;
+
+  constructor(failure: PayoutAuthorizationFailure, cause?: unknown) {
+    const causeCode = codeOf(cause);
+    super(
+      'payout_authorization_failed',
+      failure === 'threw'
+        ? `The partner's payout authorization failed (${causeCode ?? 'no code'}): nothing was signed`
+        : "The partner returned a payout authorization this flow does not know: nothing was signed",
+    );
+    this.failure = failure;
+    this.causeCode = causeCode;
+  }
+}
+
+function codeOf(cause: unknown): string | undefined {
+  const code = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && CAUSE_CODE_RE.test(code) ? code : undefined;
+}
+
 /** A signer refused to sign, or was asked to sign in a state where signing is not allowed. */
 export class SigningNotAllowedError extends GridError {
   constructor(message: string) {

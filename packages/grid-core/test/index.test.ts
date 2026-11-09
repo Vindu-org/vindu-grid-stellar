@@ -29,6 +29,7 @@ describe('index exports', () => {
     'InvalidConfigError',
     'InvalidInputError',
     'QuoteExpiredError',
+    'PayoutAuthorizationError',
     'PayoutIncompleteError',
   ])('exports %s', (name) => {
     expect(core).toHaveProperty(name);

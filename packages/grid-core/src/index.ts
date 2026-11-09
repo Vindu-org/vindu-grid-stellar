@@ -37,6 +37,8 @@ export {
   InvalidTransitionError,
   PartnerHttpError,
   type PartnerHttpErrorInit,
+  PayoutAuthorizationError,
+  type PayoutAuthorizationFailure,
   PayoutIncompleteError,
   type PayoutIncompleteInit,
   type PendingPayout,

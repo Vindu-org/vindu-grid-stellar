@@ -5,6 +5,7 @@ import {
   InvalidInputError,
   PARTNER_ERROR_SNIPPET_MAX,
   PartnerHttpError,
+  PayoutAuthorizationError,
   PayoutIncompleteError,
   QuoteExpiredError,
 } from '../src/errors';
@@ -82,5 +83,39 @@ describe('shared errors', () => {
     expect(e).toMatchObject({ stage: 'create', pending, txHash: undefined, outcome: undefined });
     expect(e.cause).toBe(cause);
     expect(e.message).toMatch(/same body and idempotency key/);
+  });
+
+  it('an authorization failure keeps the cause code, never its message or the error', () => {
+    const cause = new PartnerHttpError({ ...base, status: 400, bodySnippet: 'customer Jane Doe 123' });
+    const e = new PayoutAuthorizationError('threw', cause);
+    expect(e).toBeInstanceOf(GridError);
+    expect(e).toMatchObject({
+      code: 'payout_authorization_failed',
+      name: 'PayoutAuthorizationError',
+      failure: 'threw',
+      causeCode: 'partner_http',
+    });
+    expect(e.cause).toBeUndefined();
+    expect(e.message).toBe("The partner's payout authorization failed (partner_http): nothing was signed");
+    expect(JSON.stringify({ ...e, message: e.message })).not.toMatch(/Jane|POST|v1/);
+  });
+
+  it.each<[string, unknown]>([
+    ['a plain Error', new Error('secret detail')],
+    ['a string', 'secret detail'],
+    ['a code with spaces', { code: 'not a code' }],
+    ['a code that is too long', { code: 'x'.repeat(65) }],
+    ['a numeric code', { code: 42 }],
+  ])('an authorization failure from %s has no cause code', (_name, cause) => {
+    const e = new PayoutAuthorizationError('threw', cause);
+    expect(e.causeCode).toBeUndefined();
+    expect(e.message).toMatch(/\(no code\)/);
+    expect(e.message).not.toMatch(/secret/);
+  });
+
+  it('an unknown authorization says so', () => {
+    const e = new PayoutAuthorizationError('invalid_authorization');
+    expect(e).toMatchObject({ failure: 'invalid_authorization', causeCode: undefined });
+    expect(e.message).toMatch(/does not know: nothing was signed/);
   });
 });
