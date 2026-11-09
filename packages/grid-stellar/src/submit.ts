@@ -30,7 +30,14 @@
  * number is spent and nothing moved). Every other status means the first
  * transaction could still land.
  */
-import { InvalidConfigError, InvalidInputError, type Logger, noopLogger } from '@vindu/grid-core';
+import {
+  InvalidConfigError,
+  InvalidInputError,
+  type Logger,
+  type StellarSubmitter,
+  type SubmitOutcomeStatus,
+  noopLogger,
+} from '@vindu/grid-core';
 import type { HorizonGateway, HorizonLedger, HorizonSubmitResponse, HorizonTransactionFound } from './horizon';
 import { type SubmitError, mapResultCodes } from './result-codes';
 import { FeeBumpTransaction, TransactionBuilder } from './sdk';
@@ -178,9 +185,7 @@ const TIMED_OUT = Symbol('timed out');
 export async function submitSignedTransaction(options: SubmitOptions): Promise<SubmitResult> {
   const { gateway, signedXdr } = options;
   assertSameNetwork(gateway, options.networkPassphrase);
-  const timeoutMs = duration(options.timeoutMs ?? 30_000, 'timeoutMs', 1);
-  const pollIntervalMs = duration(options.pollIntervalMs ?? 5_000, 'pollIntervalMs', 1);
-  const maxWaitMs = duration(options.maxWaitMs ?? 120_000, 'maxWaitMs', 0);
+  const { timeoutMs, pollIntervalMs, maxWaitMs } = durations(options);
   const resubmit = options.resubmit ?? true;
   const logger = options.logger ?? noopLogger;
   const now = options.now ?? Date.now;
@@ -349,6 +354,14 @@ function assertSameNetwork(gateway: HorizonGateway, networkPassphrase: string): 
   }
 }
 
+function durations(options: Omit<SubmitOptions, 'signedXdr'>) {
+  return {
+    timeoutMs: duration(options.timeoutMs ?? 30_000, 'timeoutMs', 1),
+    pollIntervalMs: duration(options.pollIntervalMs ?? 5_000, 'pollIntervalMs', 1),
+    maxWaitMs: duration(options.maxWaitMs ?? 120_000, 'maxWaitMs', 0),
+  };
+}
+
 /** Longest delay `setTimeout` honours; anything longer fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -358,4 +371,67 @@ function duration(value: unknown, name: string, min: number): number {
     throw new InvalidInputError(`${name} must be a finite number of milliseconds from ${min} to ${MAX_TIMER_MS}`);
   }
   return value;
+}
+
+/** Everything a {@link SubmitResult} says besides its status and hash. Never the signed XDR. */
+export type StellarSubmitDetail = {
+  readonly innerHash?: string;
+  readonly ledger?: number;
+  readonly foundBy?: FoundBy;
+  readonly submittedHash?: string;
+  /** `rejected` only: `refused` by Horizon, or `hash_mismatch`. */
+  readonly reason?: 'refused' | 'hash_mismatch';
+  readonly returnedHash?: string;
+  readonly error?: SubmitError;
+  readonly lastError?: SubmitError;
+  readonly maxTime?: number;
+  readonly checkedLedger?: { readonly sequence: number; readonly closedAt: string };
+};
+
+/** Core's `SubmitOutcome` with the full {@link StellarSubmitDetail}, on every status. */
+export type StellarSubmitOutcome =
+  | { readonly status: 'success'; readonly hash: string; readonly detail: StellarSubmitDetail }
+  | {
+      readonly status: Exclude<SubmitOutcomeStatus, 'success'>;
+      readonly hash: string;
+      readonly detail: StellarSubmitDetail;
+    };
+
+/** A core `StellarSubmitter` whose outcomes also carry the full detail. */
+export interface DetailedStellarSubmitter extends StellarSubmitter {
+  submit(signedXdr: string): Promise<StellarSubmitOutcome>;
+}
+
+export type StellarSubmitterOptions = Omit<SubmitOptions, 'signedXdr'>;
+
+/**
+ * Core's `SubmitOutcome` for a {@link SubmitResult}. The status is the same
+ * word with the same meaning (only `success` lets a payout be created; only
+ * `failed` and `expired_not_landed` allow a replacement). Every other field
+ * moves to `detail` unchanged, so nothing is lost: for a hash mismatch
+ * `detail.reason` is `'hash_mismatch'`.
+ */
+export function toSubmitOutcome(result: SubmitResult): StellarSubmitOutcome {
+  const { status, hash, ...detail } = result;
+  return { status, hash, detail } as StellarSubmitOutcome;
+}
+
+/**
+ * Core's `StellarSubmitter` over {@link submitSignedTransaction}, for the
+ * signed payout flow. Each `submit` runs `submitSignedTransaction` with these
+ * options and returns {@link toSubmitOutcome} of its result.
+ *
+ * The options are checked here, once, before any transaction exists.
+ *
+ * @throws {InvalidConfigError} when the gateway's network passphrase is not `networkPassphrase`.
+ * @throws {InvalidInputError} when a duration is not a finite number in range.
+ */
+export function createStellarSubmitter(options: StellarSubmitterOptions): DetailedStellarSubmitter {
+  assertSameNetwork(options.gateway, options.networkPassphrase);
+  durations(options);
+  return {
+    async submit(signedXdr) {
+      return toSubmitOutcome(await submitSignedTransaction({ ...options, signedXdr }));
+    },
+  };
 }
