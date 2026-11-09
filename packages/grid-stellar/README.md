@@ -25,7 +25,8 @@ No environment reads, no keys, no signing. Your signer signs; the network passph
 | Payments | `ChainPayment`: payments, path payments and account creation, with core assets and canonical 7-decimal amounts. |
 | Matching | `matchPaymentToLeg` by destination, asset and issuer, exact amount, and source, hash or reference when known. `{ requireSource: true }` refuses legs without a source. `partnerAndChainAgree` for the funded check. |
 | Accounts | `assessReceiveReadiness`: account exists, trustline for the asset and issuer, optional XLM reserve (1 XLM plus 0.5 per trustline). |
-| Submit | `submitSignedTransaction`: hashes computed locally first (outer and inner for a fee bump), hashes checked before any retry, expiry decided by Horizon's ingested ledger, typed result codes. `createStellarSubmitter` adapts it to core's `StellarSubmitter`. |
+| Submit | `submitSignedTransaction`: hashes computed locally first (outer and inner for a fee bump), hashes checked before any retry, expiry proven by Horizon's ingested ledgers, typed result codes, a fixed time budget. `createStellarSubmitter` adapts it to core's `StellarSubmitter` and reports `maxDurationMs`. |
+| Payout check | `assertPayoutXdrMatches(unsignedXdr, context, { networkPassphrase, maxFeeStroops? })`: a key-free check, for signers, that the partner's unsigned transaction is exactly the expected payment. |
 
 ## Read layer: at least once
 
@@ -89,16 +90,43 @@ A failed or timed-out ledger read or lookup never counts. The local clock only b
 
 **Fee bumps.** Anyone can wrap a signed transaction in a fee bump of their own. For a fee bump both the outer hash and the inner transaction hash are looked up; either found means landed. The result says which (`foundBy`), carries `innerHash`, and `submittedHash` when what landed is another envelope.
 
-Resubmitting the same signed envelope is always safe. This package does not build transactions: the partner does, and your signer refuses one without a maxTime (core's `assertMaxTimeWithinQuote`). Without a maxTime a lost transaction would stay `unknown` forever.
+Resubmitting the same signed envelope is always safe. This package does not build transactions: the partner does, and your signer refuses one without a maxTime (`assertPayoutXdrMatches` below). Without a maxTime a lost transaction would stay `unknown` forever.
 
 ### With the core payout flow
 
 ```ts
 const submitter = createStellarSubmitter({ gateway, networkPassphrase });
+submitter.maxDurationMs; // timeoutMs + maxWaitMs: 150 000 with the defaults
 // runSignedPayout({ ..., submitter }): only { status: 'success' } creates the payout.
 ```
 
-Each outcome keeps the status and hash; every other field of the result is in `detail` (for a mismatch, `detail.reason` is `'hash_mismatch'`).
+Each outcome keeps the status and hash; every other field of the result is in `detail` (for a mismatch, `detail.reason` is `'hash_mismatch'`). `maxDurationMs` is the longest one `submit` can take: keep at least that much quote time, plus a margin, before signing.
+
+## Check the payout transaction before signing
+
+The partner builds the transaction, so a signer that signs whatever it is handed signs whatever the partner asks. `assertPayoutXdrMatches` holds no key; call it in your signer, or before handing the XDR to a custodian, and sign only if it returns:
+
+```ts
+import { assertPayoutXdrMatches } from '@vindu/grid-stellar';
+
+async signStellar(account, unsignedXdr, context) {
+  assertSigningAllowed(context);   // core: state, quote expiry, clock
+  assertPayoutXdrMatches(unsignedXdr, context, { networkPassphrase, maxFeeStroops: 1_000_000 });
+  return sign(unsignedXdr);        // under the same networkPassphrase
+}
+```
+
+It throws `PayoutXdrMismatchError` (code `payout_xdr_mismatch`, with `check` naming the failed check) unless all of these hold:
+
+- the XDR decodes for `networkPassphrase` as a plain transaction, not a fee bump (an envelope does not name its network: sign under the same passphrase, which binds the signature to it);
+- exactly one operation, a `payment`;
+- the transaction source is `context.expected.source`;
+- the operation has no source, or the same account, including a muxed `M...` form of it;
+- the destination is `expected.destination`;
+- the asset code and issuer, and the exact amount, are `expected.amount`;
+- the total fee is at most `maxFeeStroops` (default 1 000 000 stroops);
+- a `maxTime` greater than 0 and no later than the quote expiry (core's `assertMaxTimeWithinQuote`);
+- none of the newer preconditions: minimum account sequence, its age or ledger gap, extra signers, ledger bounds (unset or zero only).
 
 ## Testing
 
