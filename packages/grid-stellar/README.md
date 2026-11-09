@@ -45,7 +45,7 @@ const layer = createReadLayer({
 await layer.pollAccount(registeredAccount);
 ```
 
-A record the layer cannot read (for example an amount that is not a valid decimal) never blocks the cursor. It goes to `onMalformed(record, error)` and the poll moves on; by default that logs a warning with the operation id and transaction hash only. Throw from `onMalformed` to stop instead, with the cursor left before that record. Positions past skipped records are stored once per page, not once per record.
+A record the layer cannot read (for example an amount that is not a valid decimal, or no string `id`, `paging_token` or `transaction_hash`) never blocks the cursor. It goes to `onMalformed(record, error)` and the poll moves on; by default that logs a warning with the operation id and transaction hash only. Throw from `onMalformed` to stop instead, with the cursor left before that record. Positions past skipped records are stored once per page, not once per record. The cursor only ever moves to a record's own paging token: a record without one never clears it or sends the next page back to the start.
 
 Follow the accounts you registered for your clients, not a partner's shared treasury address. Transactions a partner builds for you may not carry a memo, so the registered account is what ties a payment to a client.
 
@@ -59,7 +59,7 @@ Follow the accounts you registered for your clients, not a partner's shared trea
 const result = await submitSignedTransaction({ gateway, signedXdr, networkPassphrase });
 ```
 
-`networkPassphrase` must equal `gateway.networkPassphrase`; otherwise `InvalidConfigError` is thrown before anything is sent, because the local hash would never be found. Durations that are not finite (`NaN`, `Infinity`) or out of range throw `InvalidInputError`, also before anything is sent.
+`networkPassphrase` must equal `gateway.networkPassphrase`; otherwise `InvalidConfigError` is thrown before anything is sent, because the local hash would never be found. Durations that are not finite (`NaN`, `Infinity`) or out of range, and a clock that is not finite when the run starts, throw `InvalidInputError`, also before anything is sent.
 
 | Status | Meaning | May you sign a replacement? |
 |---|---|---|
