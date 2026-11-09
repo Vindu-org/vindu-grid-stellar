@@ -23,12 +23,12 @@ Pure TypeScript. No network calls, no environment reads, no partner code. Partne
 | Transfer states | Twelve states, the transition table with a reason code and label per rule (failure edges included), `canTransition` and `transition(from, to, reason?)` (throws `InvalidTransitionError`). |
 | Ports | `PartnerAdapter`: quote and create the funding leg, quote, prepare and execute the payout, read a leg (with the partner's amount), parse a webhook (async). `StellarSubmitter`: submit a signed transaction and report a typed outcome. |
 | Signer | `Signer.signStellar(account, unsignedXdr, context)`. Keys never enter this library. `assertSigningAllowed` and `assertMaxTimeWithinQuote` cover the checks that need no Stellar SDK. |
-| Payout flow | `runSignedPayout`: prepare, sign once, submit, then create the partner payout only after a confirmed success. `retryPayoutExecute` repeats a failed create unchanged. |
+| Payout flow | `runSignedPayout`: from `payout_quoted`, authorize, let you store `awaiting_signature`, sign once, submit, then create the partner payout only after a confirmed success. Each error names the transition to take. `retryPayoutExecute` repeats a failed create unchanged. |
 | Capabilities | Chains, account model per chain and rails per currency. The registry is data your application passes in. |
 | Routing | `selectRoute`: Stellar route first, best price otherwise. `assertRouteImmutable` keeps the route fixed after the funding leg exists. |
 | Tolerance | `checkPayoutTolerance`: a payout quote outside the tolerance moves the transfer to `needs_attention`. |
 | Observability | `Logger`, `noopLogger`, and the `PartnerCall` shape for `onCall` hooks. |
-| Errors | `GridError` with a stable `code`, and typed subclasses shared by every adapter: `InvalidConfigError`, `InvalidInputError`, `QuoteExpiredError`, `PayoutIncompleteError` and more. |
+| Errors | `GridError` with a stable `code`, and typed subclasses shared by every adapter: `InvalidConfigError`, `InvalidInputError`, `QuoteExpiredError`, `PayoutAuthorizationError`, `PayoutIncompleteError` and more. |
 
 ## Routing
 
@@ -78,14 +78,26 @@ const result = await runSignedPayout({
   signer,                        // your key holder
   submitter,                     // a StellarSubmitter, e.g. from @vindu/grid-stellar
   submission: 'client_submits',  // or 'partner_submits'
-  context: { transferId, state: 'awaiting_signature', quote, account, destination },
+  context: { transferId, state: 'payout_quoted', quote, account, destination },
   now: Date.now,
   idempotencyKey,                // stored before the call, reused on every retry
+  // The partner authorized: store the move and return the stored state.
+  onAuthorized: async () => (await moveTransfer('awaiting_signature', 'signed_payout_flow')).state,
   onSigned: (signedXdr) => store(signedXdr), // keep it before it leaves
 });
 ```
 
-The quote must have more than `expiryMarginMs` left (default one minute) before signing and again before submitting. Only a submit outcome of `success` lets the payout be created. Any other outcome throws `PayoutIncompleteError` with `stage: 'submit'` and the outcome: sign a replacement only when `canSignReplacement(outcome)` is true (`failed` or `expired_not_landed`), never while the first transaction could still land (`unknown`, `rejected`). A failed create throws `stage: 'create'` with the exact input and key; pass `error.pending` to `retryPayoutExecute`.
+The run starts in `payout_quoted`, and the transfer moves to `awaiting_signature` only in `onAuthorized`, once the partner's authorization exists. The signer receives the state `onAuthorized` returns, so it signs only when that is `awaiting_signature`. Each error says which transition to take:
+
+| Error | Transfer is in | Take |
+|---|---|---|
+| `QuoteExpiredError`, `stage: 'authorization'` | `payout_quoted` | `payout_quoted -> funded`, then get a fresh quote |
+| `PayoutAuthorizationError` (the authorize step threw or returned something unknown; keeps the cause's `code`, not its text) | `payout_quoted` | `payout_quoted -> needs_attention` |
+| `QuoteExpiredError`, `stage: 'signing'` | `awaiting_signature` | `awaiting_signature -> funded`, then get a fresh quote |
+| `PayoutIncompleteError`, `stage: 'submit'` | `awaiting_signature` | `awaiting_signature -> needs_attention` |
+| `PayoutIncompleteError`, `stage: 'create'` | `payout_submitted` (after a success you stored) | retry with `retryPayoutExecute`; `payout_submitted -> needs_attention` if the partner never takes it |
+
+The quote must have more than `expiryMarginMs` left (default one minute) before authorizing, before signing and again before submitting. Only a submit outcome of `success` lets the payout be created. Any other outcome throws `PayoutIncompleteError` with `stage: 'submit'` and the outcome: sign a replacement only when `canSignReplacement(outcome)` is true (`failed` or `expired_not_landed`), never while the first transaction could still land (`unknown`, `rejected`). A failed create throws `stage: 'create'` with the exact input and key; pass `error.pending` to `retryPayoutExecute`.
 
 ## License
 
