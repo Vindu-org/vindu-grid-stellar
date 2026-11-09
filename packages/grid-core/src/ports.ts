@@ -197,6 +197,13 @@ export interface LegEvent {
 
 export type WebhookHeaders = Readonly<Record<string, string | undefined>>;
 
+/**
+ * A partner integration. When `runSignedPayout` calls `preparePayout` or
+ * `executePayout`, the input is a frozen copy made of plain data (strings,
+ * numbers, arrays and plain objects). Never mutate it, and never rely on
+ * class instances, `Date`s or getters inside it: a mutation throws in strict
+ * mode and stops the run.
+ */
 export interface PartnerAdapter {
   readonly id: PartnerId;
   quoteFunding(input: FundingQuoteInput): Promise<LegQuote>;
