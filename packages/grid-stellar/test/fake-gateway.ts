@@ -106,7 +106,7 @@ export function paymentRecord(
   seq += 1;
   const record: Record<string, unknown> = {
     id: `op-${seq}`,
-    paging_token: `pt-${seq}`,
+    paging_token: `${seq * 4096}`,
     type: 'payment',
     transaction_hash: `${seq.toString(16).padStart(64, '0')}`,
     transaction_successful: true,

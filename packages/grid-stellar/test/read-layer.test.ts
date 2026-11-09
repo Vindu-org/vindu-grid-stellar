@@ -412,6 +412,43 @@ describe('read layer', () => {
     expect(await cursorStore.get(ACCOUNT)).toBeUndefined();
   });
 
+  it.each(['', '   ', 'pt-7', '-1', '1.5', '1e3', ' 12', '12\n'])(
+    'a paging_token of %j is malformed and never becomes the cursor',
+    async (token) => {
+      // Review probe: an empty paging_token was stored as the cursor, and
+      // the next poll read the account from the start again.
+      const records = [paymentRecord(), paymentRecord({ paging_token: token }), paymentRecord()];
+      const gateway = new FakeGateway();
+      gateway.payments.set(ACCOUNT, records);
+      const cursorStore = new InMemoryCursorStore();
+      const stored: string[] = [];
+      const set = cursorStore.set.bind(cursorStore);
+      cursorStore.set = async (account, cursor) => {
+        stored.push(cursor);
+        return set(account, cursor);
+      };
+      const seen: string[] = [];
+      const bad: unknown[] = [];
+      const layer = createReadLayer({
+        gateway,
+        cursorStore,
+        onEvent: (p) => {
+          seen.push(p.id);
+        },
+        onMalformed: (_record, error) => {
+          bad.push(error);
+        },
+      });
+      expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 2, malformed: 1 });
+      expect(bad).toEqual([expect.any(InvalidInputError)]);
+      expect(stored).not.toContain(token);
+      expect(await cursorStore.get(ACCOUNT)).toBe(records[2]!.paging_token);
+      // Nothing is delivered twice.
+      expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 0, malformed: 0 });
+      expect(seen).toEqual([records[0]!.id, records[2]!.id]);
+    },
+  );
+
   it('validates its options', () => {
     const base = { gateway: new FakeGateway(), cursorStore: new InMemoryCursorStore(), onEvent: () => undefined };
     expect(() => createReadLayer({ ...base, pageSize: 0 })).toThrow(RangeError);

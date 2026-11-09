@@ -29,7 +29,7 @@ export const NATIVE_ASSET_CODE = 'XLM';
 export interface ChainPayment {
   /** Horizon operation id. Unique per payment: use it to drop duplicate deliveries. */
   readonly id: string;
-  /** Horizon paging token of the operation. */
+  /** Horizon paging token of the operation: a decimal string. */
   readonly pagingToken: string;
   readonly txHash: string;
   readonly type: ChainPaymentType;
@@ -58,14 +58,14 @@ export interface ChainPayment {
  * is not a payment type this package reports, did not succeed, or does not
  * have `account` as sender or receiver.
  *
- * @throws {InvalidInputError} when the record has no string `id`,
- * `paging_token` or `transaction_hash`, whatever its type: without them it
- * cannot be told apart from others or passed over.
+ * @throws {InvalidInputError} when the record has no string `id` or
+ * `transaction_hash`, or no `paging_token` made of decimal digits, whatever
+ * its type: without them it cannot be told apart from others or passed over.
  * @throws {InvalidMoneyError} when Horizon sends an amount that is not a valid decimal.
  */
 export function normalisePayment(record: HorizonPaymentRecord, account: string): ChainPayment | null {
   if (!hasIdentity(record)) {
-    throw new InvalidInputError('Horizon payment record without a string id, paging_token or transaction_hash');
+    throw new InvalidInputError('Horizon payment record without a string id, a decimal paging_token or a transaction_hash');
   }
   if (record.transaction_successful === false) return null;
   if (!isChainPaymentType(record.type)) return null;
@@ -113,6 +113,9 @@ export function normalisePayment(record: HorizonPaymentRecord, account: string):
   return { ...base, ...extra };
 }
 
+/** Horizon paging tokens are decimal numbers. Anything else (empty, signed, spaced) is malformed. */
+export const PAGING_TOKEN = /^[0-9]+$/;
+
 /** True when the record has the string fields that identify it and its position. */
 function hasIdentity(record: unknown): boolean {
   const r = record as Partial<Record<'id' | 'paging_token' | 'transaction_hash', unknown>> | null;
@@ -121,6 +124,7 @@ function hasIdentity(record: unknown): boolean {
     r !== null &&
     typeof r.id === 'string' &&
     typeof r.paging_token === 'string' &&
+    PAGING_TOKEN.test(r.paging_token) &&
     typeof r.transaction_hash === 'string'
   );
 }
