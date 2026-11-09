@@ -62,7 +62,9 @@ export class FakeGateway implements HorizonGateway {
   ): Promise<readonly HorizonPaymentRecord[]> {
     this.paymentQueries.push({ account, query });
     const all = this.payments.get(account) ?? [];
-    const start = query.cursor === undefined ? 0 : all.findIndex((r) => r.paging_token === query.cursor) + 1;
+    // Like Horizon, a cursor is an operation's paging token or, the same number, its id.
+    const at = (key: 'paging_token' | 'id') => all.findIndex((r) => r[key] === query.cursor);
+    const start = query.cursor === undefined ? 0 : (at('paging_token') >= 0 ? at('paging_token') : at('id')) + 1;
     return all.slice(start, start + query.limit);
   }
 

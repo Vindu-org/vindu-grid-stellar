@@ -16,9 +16,12 @@
  * from `onMalformed` to stop instead; the cursor then stays before that
  * record.
  *
- * The cursor only ever moves to a record's own paging token, and only when
- * that is decimal digits: a record without one never resets it or clears
- * it.
+ * The cursor only ever moves to a record's own position: its paging token
+ * when that is decimal digits, otherwise (for a malformed record) its
+ * operation id when that is, since Horizon uses the same number for both. A
+ * record with neither never resets or clears the cursor. A full page that
+ * does not move the position at all cannot be passed: the call then throws
+ * rather than read the same page again.
  *
  * Positions past skipped and malformed records are stored once per page
  * (or before stopping), not once per record.
@@ -181,12 +184,18 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
         limit: pageSize,
         order: 'asc',
       });
+      const before = position;
       for (const record of records) {
         await visit(read(record, account), record);
         position = recordPosition(record) ?? position;
       }
       await pageDone();
       if (records.length < pageSize) return { cursor: position, hasMore: false };
+      if (position === before) {
+        // Reading on would ask for this same page again, forever.
+        logger.error('payments page does not move the cursor', { records: records.length });
+        throw new Error('Horizon returned a full payments page with no position past the cursor');
+      }
     }
     return { cursor: position, hasMore: true };
   }
@@ -287,10 +296,17 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
   };
 }
 
-/** The record's paging token when it is decimal digits, else `undefined`: the position then stays where it was. */
+/**
+ * Where the record sits: its paging token when that is decimal digits, else
+ * its operation id when that is (Horizon gives both the same number), else
+ * `undefined`, and the position stays where it was.
+ */
 function recordPosition(record: HorizonPaymentRecord): string | undefined {
-  const token = stringField(record, 'paging_token');
-  return token !== undefined && PAGING_TOKEN.test(token) ? token : undefined;
+  for (const key of ['paging_token', 'id'] as const) {
+    const value = stringField(record, key);
+    if (value !== undefined && PAGING_TOKEN.test(value)) return value;
+  }
+  return undefined;
 }
 
 function stringField(record: unknown, key: 'id' | 'paging_token' | 'transaction_hash'): string | undefined {
