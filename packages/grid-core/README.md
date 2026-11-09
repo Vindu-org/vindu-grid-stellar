@@ -110,7 +110,7 @@ Each error says which transition to take. Every row is a rule of the transition 
 
 | Error | Where it stopped | Transfer is in | Take |
 |---|---|---|---|
-| `QuoteExpiredError`, `stage: 'authorization'` | before the authorization was handed over | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`), then get a fresh quote |
+| `QuoteExpiredError`, `stage: 'authorization'` | before the authorization was handed over, or, with no signature needed, before the create | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`), then get a fresh quote |
 | `PayoutAuthorizationError` (keeps the cause's `code`, not its text) | the authorize step threw, or returned something the run cannot use | `payout_quoted` | `payout_quoted -> needs_attention` (`authorization_failed`) |
 | `PayoutIncompleteError`, `stage: 'create'`, no `signedXdr` | no signature needed, the create failed | `payout_quoted` | retry with `retryPayoutExecute`; if it never succeeds, `payout_quoted -> needs_attention` (`payout_create_failed`) |
 | `QuoteExpiredError`, `stage: 'signing'` | after `onAuthorized`, before the transaction left | `awaiting_signature` | `awaiting_signature -> funded` (`quote_expired_before_signing`), then get a fresh quote |
@@ -122,7 +122,7 @@ Each error says which transition to take. Every row is a rule of the transition 
 
 `InvalidInputError` (unusable input, before any call; or a clock that breaks), `SigningNotAllowedError` (`onAuthorized` returned another state) and whatever your hooks throw have no edge: nothing was signed or submitted by the run, and the transfer waits for an operator.
 
-The quote must have more than `expiryMarginMs` left (default one minute) before authorizing. With `client_submits` it must also outlive the submit: more than `expiryMarginMs + submitter.maxDurationMs` before `onAuthorized`, before signing and again before submitting. Only a submit outcome of `success` lets the payout be created. Any other outcome throws `PayoutIncompleteError` with `stage: 'submit'` and the outcome: sign a replacement only when `canSignReplacement(outcome)` is true (`failed` or `expired_not_landed`), never while the first transaction could still land (`unknown`, `rejected`). A failed create throws `stage: 'create'` with the exact input and key; pass `error.pending` to `retryPayoutExecute`, which checks it and never signs or submits.
+The quote must have more than `expiryMarginMs` left (default one minute) before authorizing, and again before the create when the partner needs no signature. With `client_submits` it must also outlive the submit: more than `expiryMarginMs + submitter.maxDurationMs` before `onAuthorized`, before signing and again before submitting. Only a submit outcome of `success` lets the payout be created. Any other outcome throws `PayoutIncompleteError` with `stage: 'submit'` and the outcome: sign a replacement only when `canSignReplacement(outcome)` is true (`failed` or `expired_not_landed`), never while the first transaction could still land (`unknown`, `rejected`). A failed create throws `stage: 'create'` with the exact input and key; pass `error.pending` to `retryPayoutExecute`, which checks it and never signs or submits.
 
 ## License
 
