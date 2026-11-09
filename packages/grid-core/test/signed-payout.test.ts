@@ -300,6 +300,18 @@ describe('signed payout', () => {
         ['payout_quoted', 'funded', 'quote_expired_before_authorization'],
       ],
       [
+        'a quote that expired while a partner needing no signature authorized',
+        (s) => {
+          s.preparePayout.mockImplementationOnce(async () => {
+            t = expiredAt;
+            return { kind: 'none' };
+          });
+          return withoutSigning(s.input);
+        },
+        { type: QuoteExpiredError, stage: 'authorization' },
+        ['payout_quoted', 'funded', 'quote_expired_before_authorization'],
+      ],
+      [
         'a preparePayout that throws',
         (s) => {
           s.preparePayout.mockRejectedValueOnce(new Error('authorize 500'));
@@ -632,6 +644,32 @@ describe('signed payout', () => {
       expect(e).toMatchObject({ stage: 'authorization' });
       expect(onAuthorized).not.toHaveBeenCalled();
       expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    // Review probe: the no-signature path went straight to the create, so a
+    // quote that ran out while the partner authorized was still executed.
+    it('does not create a payout whose quote expired while a partner needing no signature authorized', async () => {
+      let t = NOW;
+      const { input, preparePayout, executePayout } = setup({ clock: () => t });
+      preparePayout.mockImplementationOnce(async () => {
+        t = Date.parse(EXPIRES_AT) - DEFAULT_EXPIRY_MARGIN_MS;
+        return { kind: 'none' };
+      });
+      const e = await caught(runSignedPayout(withoutSigning(input)));
+      expect(e).toBeInstanceOf(QuoteExpiredError);
+      expect(e).toMatchObject({ stage: 'authorization' });
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it('creates a no-signature payout with one millisecond more than the margin left after authorizing', async () => {
+      let t = NOW;
+      const { input, preparePayout, executePayout } = setup({ clock: () => t });
+      preparePayout.mockImplementationOnce(async () => {
+        t = Date.parse(EXPIRES_AT) - DEFAULT_EXPIRY_MARGIN_MS - 1;
+        return { kind: 'none' };
+      });
+      await expect(runSignedPayout(withoutSigning(input))).resolves.toMatchObject({ authorization: 'none' });
+      expect(executePayout).toHaveBeenCalledTimes(1);
     });
 
     // One millisecond from expiry, then a slow signer: with no margin and no

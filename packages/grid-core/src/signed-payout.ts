@@ -4,8 +4,8 @@
  *
  *   check the input, the funds and the quote -> preparePayout (the partner's
  *   authorize step)
- *     -> none: executePayout (the partner moves the funds itself; no
- *          `signing` inputs needed)
+ *     -> none: check the quote -> executePayout (the partner moves the
+ *          funds itself; no `signing` inputs needed)
  *     -> stellar_xdr: check the quote -> onAuthorized (the caller stores
  *          `awaiting_signature`) -> check the stored state, then the quote
  *          -> sign once -> onSigned -> check the quote again
@@ -35,7 +35,8 @@
  * - The signer is called at most once per run, and only after `onAuthorized`
  *   returned `awaiting_signature`. A quote with no more than
  *   `expiryMarginMs` left is refused with {@link QuoteExpiredError} before
- *   authorizing. With `client_submits`, the quote must also outlive the
+ *   authorizing, and, when the partner needs no signature, again before the
+ *   payout is created. With `client_submits`, the quote must also outlive the
  *   submitter's `maxDurationMs`: no more than `expiryMarginMs +
  *   maxDurationMs` left is refused before `onAuthorized`, before signing,
  *   and again before the signed transaction leaves this function. Get a
@@ -212,7 +213,7 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  *
  * | Error | Where it stopped | Transfer is in | Caller takes |
  * |---|---|---|---|
- * | {@link QuoteExpiredError} `authorization` | before the authorization was handed over | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`): get a fresh quote |
+ * | {@link QuoteExpiredError} `authorization` | before the authorization was handed over, or, with no signature needed, before the create | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`): get a fresh quote |
  * | {@link PayoutAuthorizationError} | `preparePayout` threw, or returned an authorization the run cannot use (unknown, `stellar_xdr` without `signing`, or for an account on another chain) | `payout_quoted` | `payout_quoted -> needs_attention` (`authorization_failed`): nothing was signed |
  * | {@link PayoutIncompleteError} `create`, no `signedXdr` | the partner needed no signature and its create failed | `payout_quoted` | retry with {@link retryPayoutExecute}; if the partner never takes it, `payout_quoted -> needs_attention` (`payout_create_failed`) |
  * | {@link QuoteExpiredError} `signing` | after `onAuthorized`, before the signed transaction left | `awaiting_signature` | `awaiting_signature -> funded` (`quote_expired_before_signing`): drop any signed XDR, it was never submitted |
@@ -253,6 +254,9 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   const base: ExecutePayoutInput = { quote, account, transferId, idempotencyKey: input.idempotencyKey };
 
   if (auth.kind === 'none') {
+    // The partner moves the funds on create: a quote that ran out while it
+    // authorized is dropped here, still in payout_quoted, never created.
+    assertFresh('authorization');
     logger.info('payout needs no signature', { transferId, quoteId: quote.id });
     return execute(adapter, { body: base, idempotencyKey: input.idempotencyKey }, logger);
   }
