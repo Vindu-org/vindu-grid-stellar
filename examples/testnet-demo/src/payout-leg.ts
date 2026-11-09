@@ -109,8 +109,8 @@ export async function runPayoutLeg(
     state: 'payout_quoted',
     quote,
     account: ctx.account,
-    destination: partner.treasuryAddress,
   };
+  const destination = partner.treasuryAddress;
   const submitterOptions = {
     gateway: ledger,
     networkPassphrase,
@@ -122,7 +122,7 @@ export async function runPayoutLeg(
   // 2. The signer checks what it signs. Asked too early, it refuses; nothing is signed.
   const stranger = await xdrPayingAnotherAccount(ctx, quote);
   await expectRefusal(log, 'asked to sign before awaiting_signature', () =>
-    signer.signStellar(ctx.account, stranger, signingContextFor(payoutContext, transfer.state)),
+    signer.signStellar(ctx.account, stranger, signingContextFor({ ...payoutContext, destination }, transfer.state)),
   );
 
   // 3. The real run: authorize, move to awaiting_signature, sign once,
@@ -162,26 +162,31 @@ export async function runPayoutLeg(
   try {
     result = await runSignedPayout({
       adapter: partner,
-      signer,
-      submitter,
-      submission: 'client_submits',
       context: payoutContext,
+      // The funding leg's confirmed amount: the quote may not move more.
+      funded,
       now: ctx.now,
       idempotencyKey: `${transfer.id}:payout`,
-      // The partner authorized: store awaiting_signature before anything is signed.
-      onAuthorized: async () => {
-        transfer.move('awaiting_signature', `${partner.id} pays out from the client's own account, so the client's key holder signs`);
-        // A transaction that pays someone other than the partner is refused.
-        await expectRefusal(log, 'XDR that pays another account', () =>
-          signer.signStellar(ctx.account, stranger, signingContextFor(payoutContext, transfer.state)),
-        );
-        return transfer.state;
+      signing: {
+        signer,
+        submitter,
+        submission: 'client_submits',
+        destination,
+        // The partner authorized: store awaiting_signature before anything is signed.
+        onAuthorized: async () => {
+          transfer.move('awaiting_signature', `${partner.id} pays out from the client's own account, so the client's key holder signs`);
+          // A transaction that pays someone other than the partner is refused.
+          await expectRefusal(log, 'XDR that pays another account', () =>
+            signer.signStellar(ctx.account, stranger, signingContextFor({ ...payoutContext, destination }, transfer.state)),
+          );
+          return transfer.state;
+        },
+        onSigned: () =>
+          log(
+            `    signer (${signer.custody}) checked state, expiry, source and operation source, destination, ` +
+              'asset, amount, fee and maxTime, then signed once; the signed XDR is stored before it leaves',
+          ),
       },
-      onSigned: () =>
-        log(
-          `    signer (${signer.custody}) checked state, expiry, source and operation source, destination, ` +
-            'asset, amount, fee and maxTime, then signed once; the signed XDR is stored before it leaves',
-        ),
     });
   } catch (e) {
     stopPayout(transfer, e);
