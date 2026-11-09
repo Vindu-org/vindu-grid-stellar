@@ -203,9 +203,10 @@ export interface PartnerAdapter {
   executePayout(input: ExecutePayoutInput): Promise<LegRef>;
   readLeg(ref: LegRef): Promise<LegStatus>;
   /**
-   * Verifies the webhook signature over the exact raw body and returns the
-   * event, or `null` for event types the adapter does not track. Throws when
-   * the signature is missing, wrong or stale.
+   * Verifies the webhook signature over the exact raw body and resolves with
+   * the event, or `null` for event types the adapter does not track. Rejects
+   * when the signature is missing, wrong or stale. Asynchronous so an adapter
+   * can verify with async crypto or fetch a signing key.
    */
-  parseWebhook(rawBody: Uint8Array | string, headers: WebhookHeaders): LegEvent | null;
+  parseWebhook(rawBody: Uint8Array | string, headers: WebhookHeaders): Promise<LegEvent | null>;
 }

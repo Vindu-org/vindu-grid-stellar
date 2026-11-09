@@ -185,7 +185,7 @@ export class MockPartner implements PartnerAdapter {
     };
   }
 
-  parseWebhook(): never {
+  async parseWebhook(): Promise<never> {
     throw new GridError('webhook_rejected', `${this.id} sends no webhooks; read legs with readLeg`);
   }
 

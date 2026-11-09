@@ -174,27 +174,27 @@ describe('adapter webhook', () => {
     ['payin.complete', 'pi_000000000001', 'refunded', 'funding'],
     ['payout.update', 'po_000000000001', 'failed', 'payout'],
     ['payout.complete', 'po_000000000001', 'completed', 'payout'],
-  ])('turns %s for %s with status %s into a LegEvent keyed by svix-id', (event, id, status, kind) => {
+  ])('turns %s for %s with status %s into a LegEvent keyed by svix-id', async (event, id, status, kind) => {
     const { adapter } = setup();
     const body = JSON.stringify({ webhook_event: event, id, status, tracking_transaction: { transaction_hash: HASH } });
     // The Svix timestamp is the delivery time; BlindPay sends no change time of its own.
-    expect(adapter.parseWebhook(body, sign(body, ts))).toEqual({
+    await expect(adapter.parseWebhook(body, sign(body, ts))).resolves.toEqual({
       eventId: 'msg_000000000001', ref: { partner: 'blindpay', kind, id }, status, deliveredAt: '2030-01-01T00:00:00.000Z', txHash: HASH,
     });
   });
 
-  it('returns null for events that are not legs', () => {
+  it('returns null for events that are not legs', async () => {
     const { adapter } = setup();
     const body = '{"webhook_event":"customer.update","id":"re_000000000000","kyc_status":"approved"}';
-    expect(adapter.parseWebhook(body, sign(body, ts))).toBeNull();
+    await expect(adapter.parseWebhook(body, sign(body, ts))).resolves.toBeNull();
   });
 
-  it('throws on a bad signature or a stale delivery, and without a secret', () => {
+  it('rejects a bad signature or a stale delivery, and without a secret', async () => {
     const { adapter } = setup();
     const body = '{"webhook_event":"payout.update","id":"po_000000000001","status":"failed"}';
-    expect(() => adapter.parseWebhook(body.replace('failed', 'completed'), sign(body, ts))).toThrow(WebhookVerificationError);
-    expect(() => adapter.parseWebhook(body, sign(body, String(NOW / 1000 - 301)))).toThrow(/too old/);
+    await expect(adapter.parseWebhook(body.replace('failed', 'completed'), sign(body, ts))).rejects.toThrow(WebhookVerificationError);
+    await expect(adapter.parseWebhook(body, sign(body, String(NOW / 1000 - 301)))).rejects.toThrow(/too old/);
     const bare = createBlindPayAdapter(config(mockFetch([]).fetch), { network: 'stellar' });
-    expect(() => bare.parseWebhook(body, sign(body, ts))).toThrow(InvalidConfigError);
+    await expect(bare.parseWebhook(body, sign(body, ts))).rejects.toThrow(InvalidConfigError);
   });
 });

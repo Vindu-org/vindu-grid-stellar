@@ -156,7 +156,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
       return { ref: ref(leg.kind, resource.id), status: toLegStatus(resource.status), ...(txHash === undefined ? {} : { txHash }) };
     },
 
-    parseWebhook(rawBody, headers) {
+    async parseWebhook(rawBody, headers) {
       if (options.webhookSecret === undefined) throw new InvalidConfigError('parseWebhook needs options.webhookSecret');
       const verified = verifyWebhook({
         rawBody,
