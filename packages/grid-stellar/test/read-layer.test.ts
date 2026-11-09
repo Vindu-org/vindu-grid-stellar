@@ -412,6 +412,121 @@ describe('read layer', () => {
     expect(await cursorStore.get(ACCOUNT)).toBeUndefined();
   });
 
+  it.each(['', '   ', 'pt-7', '-1', '1.5', '1e3', ' 12', '12\n'])(
+    'a paging_token of %j is malformed and never becomes the cursor',
+    async (token) => {
+      // Review probe: an empty paging_token was stored as the cursor, and
+      // the next poll read the account from the start again.
+      const records = [paymentRecord(), paymentRecord({ paging_token: token }), paymentRecord()];
+      const gateway = new FakeGateway();
+      gateway.payments.set(ACCOUNT, records);
+      const cursorStore = new InMemoryCursorStore();
+      const stored: string[] = [];
+      const set = cursorStore.set.bind(cursorStore);
+      cursorStore.set = async (account, cursor) => {
+        stored.push(cursor);
+        return set(account, cursor);
+      };
+      const seen: string[] = [];
+      const bad: unknown[] = [];
+      const layer = createReadLayer({
+        gateway,
+        cursorStore,
+        onEvent: (p) => {
+          seen.push(p.id);
+        },
+        onMalformed: (_record, error) => {
+          bad.push(error);
+        },
+      });
+      expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 2, malformed: 1 });
+      expect(bad).toEqual([expect.any(InvalidInputError)]);
+      expect(stored).not.toContain(token);
+      expect(await cursorStore.get(ACCOUNT)).toBe(records[2]!.paging_token);
+      // Nothing is delivered twice.
+      expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 0, malformed: 0 });
+      expect(seen).toEqual([records[0]!.id, records[2]!.id]);
+    },
+  );
+
+  it('a full page of malformed records without paging tokens still advances, by operation id', async () => {
+    // Review probe: a full page of records without paging_token never moved
+    // the cursor, so every poll read the same page maxPages times and
+    // reported hasMore forever.
+    const records = [
+      paymentRecord({ id: '40960', paging_token: undefined }),
+      paymentRecord({ id: '45056', paging_token: '' }),
+      paymentRecord(),
+    ];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const onMalformed = jest.fn();
+    const seen: string[] = [];
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      pageSize: 2,
+      maxPages: 5,
+      onMalformed,
+      onEvent: (p) => {
+        seen.push(p.id);
+      },
+    });
+    expect(await layer.pollAccount(ACCOUNT)).toMatchObject({
+      delivered: 1,
+      malformed: 2,
+      cursor: records[2]!.paging_token,
+      hasMore: false,
+    });
+    expect(onMalformed).toHaveBeenCalledTimes(2);
+    expect(gateway.paymentQueries.map((q) => q.query.cursor)).toEqual([undefined, '45056']);
+    expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 0, malformed: 0, hasMore: false });
+    expect(onMalformed).toHaveBeenCalledTimes(2);
+    expect(seen).toEqual([records[2]!.id]);
+  });
+
+  it('a full page with no position at all throws instead of reading the same page again', async () => {
+    const page = [paymentRecord({ paging_token: undefined }), paymentRecord({ paging_token: 'x' })];
+    const gateway = new FakeGateway();
+    let calls = 0;
+    gateway.paymentsForAccount = async () => {
+      calls += 1;
+      return page;
+    };
+    const cursorStore = new InMemoryCursorStore();
+    const onMalformed = jest.fn();
+    const layer = createReadLayer({ gateway, cursorStore, pageSize: 2, maxPages: 50, onEvent: () => undefined, onMalformed });
+    await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('no position past the cursor');
+    expect(calls).toBe(1);
+    expect(onMalformed).toHaveBeenCalledTimes(2);
+    expect(await cursorStore.get(ACCOUNT)).toBeUndefined();
+    await expect(layer.reconcile(ACCOUNT)).rejects.toThrow('no position past the cursor');
+  });
+
+  it('a page that repeats itself past its last position throws, never hasMore forever', async () => {
+    // A Horizon that ignores the cursor: the position reached is never passed.
+    const page = [paymentRecord({ id: '10', paging_token: undefined }), paymentRecord({ id: '11', paging_token: undefined })];
+    const gateway = new FakeGateway();
+    let calls = 0;
+    gateway.paymentsForAccount = async () => {
+      calls += 1;
+      return page;
+    };
+    const cursorStore = new InMemoryCursorStore();
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      pageSize: 2,
+      maxPages: 50,
+      onEvent: () => undefined,
+      onMalformed: () => undefined,
+    });
+    await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('no position past the cursor');
+    expect(calls).toBe(2);
+    expect(await cursorStore.get(ACCOUNT)).toBe('11');
+  });
+
   it('validates its options', () => {
     const base = { gateway: new FakeGateway(), cursorStore: new InMemoryCursorStore(), onEvent: () => undefined };
     expect(() => createReadLayer({ ...base, pageSize: 0 })).toThrow(RangeError);

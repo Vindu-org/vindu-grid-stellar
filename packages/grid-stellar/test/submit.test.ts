@@ -15,11 +15,18 @@ const T0 = Date.UTC(2026, 10, 9, 12, 0, 0);
 type Tx = ReturnType<InstanceType<typeof TransactionBuilder>['build']>;
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
 
-/** A real payment envelope signed with a throwaway key on the testnet passphrase. No network. */
-function signedPayment(maxTimeSeconds: number): { xdr: string; hash: string; tx: Tx } {
+/**
+ * A real payment envelope signed with a throwaway key on the testnet
+ * passphrase. No network. The source account is at `accountSequence`, so the
+ * transaction's sequence number is one more (101 by default).
+ */
+function signedPayment(
+  maxTimeSeconds: number,
+  accountSequence = '100',
+): { xdr: string; hash: string; tx: Tx; source: string } {
   const source = Keypair.random();
   const issuer = Keypair.random().publicKey();
-  const tx = new TransactionBuilder(new Account(source.publicKey(), '100'), {
+  const tx = new TransactionBuilder(new Account(source.publicKey(), accountSequence), {
     fee: '100',
     networkPassphrase: Networks.TESTNET,
     timebounds: { minTime: 0, maxTime: maxTimeSeconds },
@@ -29,7 +36,7 @@ function signedPayment(maxTimeSeconds: number): { xdr: string; hash: string; tx:
     )
     .build();
   tx.sign(source);
-  return { xdr: tx.toXDR(), hash: hex(tx.hash()), tx };
+  return { xdr: tx.toXDR(), hash: hex(tx.hash()), tx, source: source.publicKey() };
 }
 
 /** `inner` wrapped in a fee bump paid and signed by a throwaway key. */
@@ -74,12 +81,17 @@ function run(gateway: FakeGateway, xdr: string, c = clock(), extra: Partial<Para
 const IN_ONE_HOUR = T0 / 1000 + 3600;
 
 /** A ledger Horizon has ingested, closed at `seconds` (unix). */
-const ledgerAt = (seconds: number, sequence = 100) => ({ sequence, closedAt: new Date(seconds * 1000), elderLedger: 1 });
+const ledgerAt = (seconds: number, sequence = 100) => ({ sequence, closedAt: new Date(seconds * 1000) });
 
 describe('submit', () => {
   it('computes the hash locally, equal to the SDK hash and the returned hash', async () => {
-    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
-    expect(inspectSignedTransaction(xdr, TESTNET_NETWORK_PASSPHRASE)).toEqual({ hash, maxTime: IN_ONE_HOUR });
+    const { xdr, hash, tx } = signedPayment(IN_ONE_HOUR);
+    expect(inspectSignedTransaction(xdr, TESTNET_NETWORK_PASSPHRASE)).toEqual({
+      hash,
+      maxTime: IN_ONE_HOUR,
+      source: tx.source,
+      sequence: '101',
+    });
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'accepted', hash, ledger: 7, successful: true }];
     const result = await run(gateway, xdr);
@@ -197,8 +209,9 @@ describe('submit', () => {
 
   it('maps tx_too_late: rejected until an ingested ledger closed after maxTime, expired_not_landed then', async () => {
     const maxTime = T0 / 1000 - 10;
-    const { xdr, hash } = signedPayment(maxTime);
+    const { xdr, hash, source } = signedPayment(maxTime);
     const gateway = new FakeGateway();
+    gateway.setAccount(source, '100');
     gateway.submitResponses = [{ kind: 'rejected', status: 400, transactionCode: 'tx_too_late', operationCodes: [] }];
     // The local clock is far past maxTime; Horizon has not ingested a later ledger.
     gateway.ledger = ledgerAt(maxTime - 1);
@@ -213,8 +226,9 @@ describe('submit', () => {
       status: 'expired_not_landed',
       hash,
       maxTime,
-      checkedLedger: { sequence: 101, closedAt: new Date((maxTime + 5) * 1000).toISOString(), elderLedger: 1 },
-      ledgerBeforeSubmission: 101,
+      transactionSequence: '101',
+      checkedLedger: { sequence: 101, closedAt: new Date((maxTime + 5) * 1000).toISOString() },
+      sourceAccount: { id: source, sequence: '100', latestLedger: 101 },
     });
   });
 
@@ -287,9 +301,10 @@ describe('submit', () => {
 describe('submit: expiry is decided by the ingested ledger', () => {
   const maxTime = T0 / 1000 + 60;
 
-  it('expired_not_landed once a ledger closed after maxTime and a later lookup finds nothing', async () => {
-    const { xdr, hash } = signedPayment(maxTime);
+  it('expired_not_landed once a ledger closed after maxTime, the lookup finds nothing and the sequence is unused', async () => {
+    const { xdr, hash, source } = signedPayment(maxTime);
     const gateway = new FakeGateway();
+    gateway.setAccount(source, '100');
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(maxTime + 6, 77);
     const result = await run(gateway, xdr);
@@ -297,12 +312,14 @@ describe('submit: expiry is decided by the ingested ledger', () => {
       status: 'expired_not_landed',
       hash,
       maxTime,
-      checkedLedger: { sequence: 77, closedAt: new Date((maxTime + 6) * 1000).toISOString(), elderLedger: 1 },
-      ledgerBeforeSubmission: 77,
+      transactionSequence: '101',
+      checkedLedger: { sequence: 77, closedAt: new Date((maxTime + 6) * 1000).toISOString() },
+      sourceAccount: { id: source, sequence: '100', latestLedger: 77 },
     });
-    // Once before submitting, then before the lookup that found nothing.
-    expect(gateway.ledgerReads).toEqual([0, 0]);
+    // Nothing is read before submitting; the ledger is read before the lookup.
+    expect(gateway.ledgerReads).toEqual([0]);
     expect(gateway.transactionLookups).toEqual([hash]);
+    expect(gateway.accountReads).toEqual([source]);
   });
 
   it('Horizon lagging behind the local clock: unknown, then success when it ingests the landing', async () => {
@@ -329,8 +346,9 @@ describe('submit: expiry is decided by the ingested ledger', () => {
   });
 
   it('a ledger closed exactly at maxTime is not past it: the transaction could still be in the next one', async () => {
-    const { xdr } = signedPayment(maxTime);
+    const { xdr, source } = signedPayment(maxTime);
     const gateway = new FakeGateway();
+    gateway.setAccount(source, '100');
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(maxTime);
     expect((await run(gateway, xdr)).status).toBe('unknown');
@@ -356,8 +374,9 @@ describe('submit: expiry is decided by the ingested ledger', () => {
   });
 
   it('a ledger that moves past maxTime during the wait settles as expired_not_landed', async () => {
-    const { xdr, hash } = signedPayment(maxTime);
+    const { xdr, hash, source } = signedPayment(maxTime);
     const gateway = new FakeGateway();
+    gateway.setAccount(source, '100');
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(maxTime - 30);
     gateway.onLookup = (_h, count) => {
@@ -368,8 +387,9 @@ describe('submit: expiry is decided by the ingested ledger', () => {
   });
 
   it('a failing latest-ledger read never counts as expired', async () => {
-    const { xdr, hash } = signedPayment(T0 / 1000 - 3600);
+    const { xdr, hash, source } = signedPayment(T0 / 1000 - 3600);
     const gateway = new FakeGateway();
+    gateway.setAccount(source, '100');
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = new Error('horizon down');
     expect(await run(gateway, xdr, clock(T0 + 86_400_000))).toEqual({ status: 'unknown', hash });
@@ -385,13 +405,15 @@ describe('submit: expiry is decided by the ingested ledger', () => {
     expect((await run(gateway, xdr)).status).toBe('unknown');
   });
 
-  it('a transaction without maxTime never reads the ledger and is never expired', async () => {
-    const { xdr } = signedPayment(0);
+  it('a transaction without maxTime never reads the ledger or the account and is never expired', async () => {
+    const { xdr, source } = signedPayment(0);
     const gateway = new FakeGateway();
+    gateway.setAccount(source, '100');
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(T0 / 1000 + 10 * 365 * 86_400);
     expect((await run(gateway, xdr, clock(), { maxWaitMs: 10 * 60_000 })).status).toBe('unknown');
     expect(gateway.ledgerReads).toEqual([]);
+    expect(gateway.accountReads).toEqual([]);
   });
 });
 
@@ -446,6 +468,27 @@ describe('submit: fee bumps', () => {
       hash: ours.hash,
       innerHash: inner.hash,
       maxTime: IN_ONE_HOUR,
+      // The inner transaction's: the fee source spends no sequence number.
+      source: inner.tx.source,
+      sequence: '101',
+    });
+  });
+
+  it('reads the base account of a muxed source', () => {
+    const source = Keypair.random();
+    const muxed = new stellarSdk.MuxedAccount(new Account(source.publicKey(), '41'), '7');
+    const tx = new TransactionBuilder(muxed, {
+      fee: '100',
+      networkPassphrase: Networks.TESTNET,
+      timebounds: { minTime: 0, maxTime: IN_ONE_HOUR },
+    })
+      .addOperation(Operation.bumpSequence({ bumpTo: '50' }))
+      .build();
+    tx.sign(source);
+    expect(tx.source.startsWith('M')).toBe(true);
+    expect(inspectSignedTransaction(tx.toXDR(), TESTNET_NETWORK_PASSPHRASE)).toMatchObject({
+      source: source.publicKey(),
+      sequence: '42',
     });
   });
 
@@ -454,7 +497,7 @@ describe('submit: fee bumps', () => {
     const ours = feeBumped(inner.tx);
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
-    const result = await run(gateway, ours.xdr, clock(), { maxWaitMs: 0 });
+    const result = await run(gateway, ours.xdr, clock(), { maxWaitMs: 1_000 });
     expect(result).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
     expect(gateway.transactionLookups).toEqual([ours.hash, inner.hash]);
   });
@@ -511,6 +554,7 @@ describe('submit: fee bumps', () => {
     const inner = signedPayment(T0 / 1000 + 60);
     const ours = feeBumped(inner.tx);
     const gateway = new FakeGateway();
+    gateway.setAccount(inner.source, '100');
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(T0 / 1000 + 61);
     expect(await run(gateway, ours.xdr)).toMatchObject({
@@ -589,90 +633,153 @@ describe('submit result code mapping', () => {
   });
 });
 
-describe('submit: ingestion proof', () => {
+describe('submit: the source account sequence proves expiry', () => {
   const maxTime = T0 / 1000 + 60;
 
-  /** A timed-out submission with an ingested ledger past maxTime: expiry hinges on the proof. */
-  function pastMaxTime() {
-    const { xdr, hash } = signedPayment(maxTime);
+  /** A timed-out submission with an ingested ledger past maxTime and an unused sequence: expiry hinges on the proof. */
+  function pastMaxTime(accountSequence = '100') {
+    const { xdr, hash, source } = signedPayment(maxTime);
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(maxTime + 6, 77);
-    return { xdr, hash, gateway };
+    gateway.setAccount(source, accountSequence);
+    return { xdr, hash, source, gateway };
   }
 
   it('the proof holds: expired_not_landed', async () => {
     const { xdr, gateway } = pastMaxTime();
+    const result = await run(gateway, xdr);
+    expect(result.status).toBe('expired_not_landed');
+    expect(canSignReplacement(result)).toBe(true);
+  });
+
+  it('a used sequence number with nothing found is unknown, never expired_not_landed', async () => {
+    // A transaction that landed used its sequence number. The instance may
+    // no longer keep its history, so a lookup finding nothing proves nothing.
+    for (const used of ['101', '102', '9000']) {
+      const { xdr, hash, gateway } = pastMaxTime(used);
+      const result = await run(gateway, xdr);
+      expect(result).toEqual({ status: 'unknown', hash });
+      expect(canSignReplacement(result)).toBe(false);
+    }
+  });
+
+  it('a missing source account is unknown', async () => {
+    const { xdr, hash, source, gateway } = pastMaxTime();
+    gateway.accounts.delete(source);
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+    expect(gateway.accountReads.length).toBeGreaterThan(0);
+  });
+
+  it('an account read from an instance behind the checked ledger is unknown', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.accountLedger = 76;
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+    gateway.accountLedger = 77;
     expect((await run(gateway, xdr)).status).toBe('expired_not_landed');
   });
 
-  it('a not-found lookup without a Latest-Ledger header proves nothing: unknown', async () => {
+  it('an account read without a Latest-Ledger header is unknown', async () => {
     const { xdr, hash, gateway } = pastMaxTime();
-    gateway.lookupLedger = null;
+    gateway.accountLedger = null;
     expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
   });
 
-  it('a not-found lookup from an instance behind the checked ledger proves nothing: unknown', async () => {
-    const { xdr, hash, gateway } = pastMaxTime();
-    gateway.lookupLedger = 76;
+  it('an account read that fails, hangs, or answers for another account is unknown', async () => {
+    const { xdr, hash, source, gateway } = pastMaxTime();
+    const read = gateway.account.bind(gateway);
+    gateway.account = async () => {
+      throw new Error('horizon down');
+    };
     expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
-    gateway.lookupLedger = 77;
+    gateway.account = () => new Promise<never>(() => undefined);
+    expect(await run(gateway, xdr, clock(), { requestTimeoutMs: 5 })).toEqual({ status: 'unknown', hash });
+    gateway.account = async (address) => {
+      const account = await read(address);
+      return account === null ? null : { ...account, id: Keypair.random().publicKey() };
+    };
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+    gateway.account = async (address) => {
+      const account = await read(address);
+      return account === null ? null : { ...account, sequence: '1e3' };
+    };
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+    gateway.account = read;
     expect((await run(gateway, xdr)).status).toBe('expired_not_landed');
+    expect(gateway.accountReads.every((a) => a === source)).toBe(true);
   });
 
-  it('a fee bump needs both not-found lookups to have ingested the checked ledger', async () => {
+  it('compares sequence numbers as integers, beyond 2^53', async () => {
+    // As JavaScript numbers 9007199254740992 and 9007199254740993 are equal.
+    const { xdr, hash, source } = signedPayment(maxTime, '9007199254740992');
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.ledger = ledgerAt(maxTime + 6, 77);
+    gateway.setAccount(source, '9007199254740992');
+    expect(await run(gateway, xdr)).toMatchObject({
+      status: 'expired_not_landed',
+      transactionSequence: '9007199254740993',
+      sourceAccount: { sequence: '9007199254740992' },
+    });
+    gateway.setAccount(source, '9007199254740993');
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+  });
+
+  it("a fee bump reads the inner transaction's source, never the fee source", async () => {
     const inner = signedPayment(maxTime);
     const ours = feeBumped(inner.tx);
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(maxTime + 6, 77);
-    const lookup = gateway.transaction.bind(gateway);
-    gateway.transaction = async (h) => {
-      const result = await lookup(h);
-      return h === inner.hash ? { found: false, latestLedger: 70 } : result;
-    };
+    gateway.setAccount(inner.source, '100');
+    expect(await run(gateway, ours.xdr)).toMatchObject({
+      status: 'expired_not_landed',
+      hash: ours.hash,
+      innerHash: inner.hash,
+      sourceAccount: { id: inner.source, sequence: '100', latestLedger: 77 },
+    });
+    expect(gateway.accountReads).toEqual([inner.source]);
+
+    // The inner source used its sequence: unknown, whatever the lookups say.
+    gateway.setAccount(inner.source, '101');
     expect(await run(gateway, ours.xdr)).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
   });
 
-  it('an instance whose history starts after the pre-submission ledger proves nothing: unknown', async () => {
-    const { xdr, hash, gateway } = pastMaxTime();
-    gateway.ledger = { ...ledgerAt(maxTime + 6, 77), elderLedger: 78 };
-    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
-  });
-
-  it('an instance that does not report its elder ledger proves nothing: unknown', async () => {
-    const { xdr, hash, gateway } = pastMaxTime();
-    gateway.ledger = { sequence: 77, closedAt: new Date((maxTime + 6) * 1000) };
-    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
-  });
-
-  it('the elder ledger is compared with the ledger read before the first submission', async () => {
+  it("a lookup's Latest-Ledger header is not part of the proof: the account read is", async () => {
     const { xdr, gateway } = pastMaxTime();
-    // Before submitting Horizon is at 50; by the check it keeps history from 60 on.
-    gateway.ledger = ledgerAt(maxTime - 30, 50);
-    gateway.submitTransaction = async (signed) => {
-      gateway.submitted.push(signed);
-      gateway.ledger = { ...ledgerAt(maxTime + 6, 77), elderLedger: 60 };
-      return { kind: 'timeout' };
-    };
-    expect((await run(gateway, xdr)).status).toBe('unknown');
-    expect(gateway.ledgerReads.length).toBeGreaterThan(1);
+    gateway.lookupLedger = null;
+    expect((await run(gateway, xdr)).status).toBe('expired_not_landed');
   });
 
-  it('a failed ledger read before submitting still submits, but never proves expiry', async () => {
+  it('a failed lookup still blocks the proof', async () => {
     const { xdr, hash, gateway } = pastMaxTime();
-    const checked = gateway.ledger;
-    let reads = 0;
-    gateway.latestLedger = async () => {
-      reads += 1;
-      if (reads === 1) throw new Error('horizon down');
-      return checked as ReturnType<typeof ledgerAt>;
+    gateway.transaction = async () => {
+      throw new Error('horizon down');
     };
     expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
-    expect(gateway.submitted.length).toBeGreaterThan(0);
+    expect(gateway.accountReads).toEqual([]);
   });
 
-  it('records the ledger once, before the first submission', async () => {
+  it('re-running a stored envelope that landed long ago, on pruned history: unknown, never expired', async () => {
+    // Review probe: the transaction landed in an early ledger; the instance
+    // has since pruned that history, so every lookup finds nothing, and the
+    // ledger is days past maxTime. Its sequence number is used, though.
+    const old = T0 / 1000 - 3 * 86_400;
+    const { xdr, hash, source } = signedPayment(old);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'rejected', status: 400, transactionCode: 'tx_too_late', operationCodes: [] }];
+    gateway.ledger = ledgerAt(T0 / 1000, 10_000);
+    gateway.setAccount(source, '101');
+    const result = await run(gateway, xdr);
+    expect(result).toMatchObject({ status: 'rejected', reason: 'refused', hash, error: { code: 'too_late' } });
+    expect(canSignReplacement(result)).toBe(false);
+
+    // The same envelope that never landed: its sequence is unused.
+    gateway.setAccount(source, '100');
+    expect(await run(gateway, xdr)).toMatchObject({ status: 'expired_not_landed', hash });
+  });
+
+  it('reads nothing before the first submission', async () => {
     const { xdr, gateway } = pastMaxTime();
     const order: string[] = [];
     const read = gateway.latestLedger.bind(gateway);
@@ -685,30 +792,56 @@ describe('submit: ingestion proof', () => {
       order.push('submit');
       return submit(signed);
     };
+    const account = gateway.account.bind(gateway);
+    gateway.account = async (address) => {
+      order.push('account');
+      return account(address);
+    };
     await run(gateway, xdr);
-    expect(order.slice(0, 2)).toEqual(['ledger', 'submit']);
-    expect(order.filter((o) => o === 'ledger').length).toBe(2);
+    expect(order).toEqual(['submit', 'ledger', 'account']);
   });
 
-  it('with maxWaitMs 0 nothing is read before submitting, so it never expires', async () => {
+  it('with maxWaitMs 0 nothing is read or looked up, so it never expires', async () => {
     const { xdr, hash, gateway } = pastMaxTime();
     expect(await run(gateway, xdr, clock(), { maxWaitMs: 0 })).toEqual({ status: 'unknown', hash });
+    expect(gateway.ledgerReads).toEqual([]);
+    expect(gateway.transactionLookups).toEqual([]);
+    expect(gateway.accountReads).toEqual([]);
+  });
+
+  it('with maxWaitMs 0 a quick network error is unknown without a lookup', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.submitResponses = [{ kind: 'unavailable', status: null }];
+    expect(await run(gateway, xdr, clock(), { maxWaitMs: 0 })).toEqual({ status: 'unknown', hash });
+    expect(gateway.transactionLookups).toEqual([]);
+  });
+
+  it('with maxWaitMs 0 a refusal is reported as is, without a lookup', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.submitResponses = [{ kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] }];
+    gateway.transactions.set(hash, { found: true, hash, successful: true });
+    expect(await run(gateway, xdr, clock(), { maxWaitMs: 0 })).toMatchObject({
+      status: 'rejected',
+      reason: 'refused',
+      error: { code: 'bad_seq' },
+    });
+    expect(gateway.transactionLookups).toEqual([]);
   });
 });
 
 describe('submit: load-balanced Horizon (real HTTP, default gateway)', () => {
   // Review probe: two Horizon instances behind one URL. Instance A has
   // ingested ledger 105 (closed after maxTime); instance B lags at 102. The
-  // transaction landed in ledger 104, before maxTime. The ledger read hits A
-  // and the lookup hits B: without the ingestion proof this was a false
-  // expired_not_landed, and a replacement could be signed.
+  // transaction landed in ledger 104, before maxTime, so A shows its
+  // sequence number used and B does not yet. Reads that reach B must never
+  // prove expiry.
   let server: Server;
   let url: string;
   const maxTime = Math.floor(Date.now() / 1000) + 30;
-  const { xdr, hash } = signedPayment(maxTime);
+  const { xdr, hash, source } = signedPayment(maxTime);
   const instances = {
-    A: { ledger: 105, closed: maxTime + 3, elder: 2, has: true },
-    B: { ledger: 102, closed: maxTime - 6, elder: 2, has: false },
+    A: { ledger: 105, closed: maxTime + 3, has: true, sequence: '101' },
+    B: { ledger: 102, closed: maxTime - 6, has: false, sequence: '100' },
   };
   let route: (req: IncomingMessage) => keyof typeof instances;
 
@@ -723,11 +856,12 @@ describe('submit: load-balanced Horizon (real HTTP, default gateway)', () => {
           JSON.stringify({
             history_latest_ledger: i.ledger,
             history_latest_ledger_closed_at: new Date(i.closed * 1000).toISOString(),
-            history_elder_ledger: i.elder,
           }),
         );
       } else if (path.startsWith('/transactions/') && i.has) {
         res.end(JSON.stringify({ hash, successful: true, ledger: 104 }));
+      } else if (path === `/accounts/${source}`) {
+        res.end(JSON.stringify({ id: source, sequence: i.sequence, subentry_count: 0, balances: [] }));
       } else {
         res.statusCode = 404;
         res.end(JSON.stringify({ status: 404, title: 'Resource Missing' }));
@@ -754,16 +888,96 @@ describe('submit: load-balanced Horizon (real HTTP, default gateway)', () => {
     });
   }
 
-  it('ledger read on the leading instance, lookup on the lagging one: unknown, never expired_not_landed', async () => {
+  it('ledger read on the leading instance, the rest on the lagging one: unknown, never expired_not_landed', async () => {
     route = (req) => (req.url === '/' ? 'A' : 'B');
     const result = await submitThrough();
     expect(result).toEqual({ status: 'unknown', hash });
     expect(canSignReplacement(result)).toBe(false);
   });
 
+  it('lookup on the lagging instance, account on the leading one: the used sequence gives unknown', async () => {
+    route = (req) => (req.url?.startsWith('/transactions/') === true ? 'B' : 'A');
+    expect(await submitThrough()).toEqual({ status: 'unknown', hash });
+  });
+
   it('the same lookup on the leading instance finds the landing', async () => {
     route = () => 'A';
     expect(await submitThrough()).toMatchObject({ status: 'success', hash, ledger: 104 });
+  });
+});
+
+describe('submit: re-run on an instance with pruned history (real HTTP, default gateway)', () => {
+  // Review probe: one Horizon instance that keeps recent history only. A
+  // stored envelope that landed long ago is submitted again: Horizon
+  // refuses it as too late and no lookup finds it. Only its source account
+  // still shows that it landed.
+  let server: Server;
+  let url: string;
+  const maxTime = Math.floor(Date.now() / 1000) - 3 * 86_400;
+  const { xdr, hash, source } = signedPayment(maxTime);
+  let account: 'used' | 'unused' | 'missing' | 'no_header';
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      res.setHeader('content-type', 'application/hal+json');
+      const path = req.url ?? '';
+      if (!(account === 'no_header' && path.startsWith('/accounts/'))) res.setHeader('Latest-Ledger', '10000');
+      if (path === '/') {
+        res.end(JSON.stringify({ history_latest_ledger: 10_000, history_latest_ledger_closed_at: new Date().toISOString() }));
+      } else if (path === `/accounts/${source}` && account !== 'missing') {
+        res.end(JSON.stringify({ id: source, sequence: account === 'used' ? '101' : '100', subentry_count: 0, balances: [] }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ status: 404, title: 'Resource Missing' }));
+      }
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise((r) => server.close(r));
+  });
+
+  function rerun() {
+    const gateway = createHorizonGateway({ horizonUrl: url, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, allowHttp: true });
+    gateway.submitTransaction = async () => ({ kind: 'rejected', status: 400, transactionCode: 'tx_too_late', operationCodes: [] });
+    return submitSignedTransaction({
+      gateway,
+      signedXdr: xdr,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      maxWaitMs: 20,
+      pollIntervalMs: 5,
+      sleep: async () => undefined,
+    });
+  }
+
+  it('the sequence number is used: never expired_not_landed', async () => {
+    account = 'used';
+    const result = await rerun();
+    expect(result).toMatchObject({ status: 'rejected', reason: 'refused', hash, error: { code: 'too_late' } });
+    expect(canSignReplacement(result)).toBe(false);
+  });
+
+  it('the source account is missing, or its read has no Latest-Ledger: never expired_not_landed', async () => {
+    for (const mode of ['missing', 'no_header'] as const) {
+      account = mode;
+      const result = await rerun();
+      expect(result.status).toBe('rejected');
+      expect(canSignReplacement(result)).toBe(false);
+    }
+  });
+
+  it('the sequence number is unused: expired_not_landed', async () => {
+    account = 'unused';
+    const result = await rerun();
+    expect(result).toMatchObject({
+      status: 'expired_not_landed',
+      hash,
+      transactionSequence: '101',
+      sourceAccount: { id: source, sequence: '100', latestLedger: 10_000 },
+    });
+    expect(canSignReplacement(result)).toBe(true);
   });
 });
 
@@ -777,7 +991,7 @@ describe('submit: Horizon reads time out', () => {
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(T0 / 1000);
     gateway.transaction = hang;
-    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 1_000 });
     expect(result).toEqual({ status: 'unknown', hash });
   });
 
@@ -799,7 +1013,7 @@ describe('submit: Horizon reads time out', () => {
       if (options?.signal !== undefined) signals.push(options.signal);
       return hang();
     };
-    await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 1_000 });
     expect(signals.length).toBeGreaterThan(0);
     expect(signals.every((s) => s.aborted)).toBe(true);
   });

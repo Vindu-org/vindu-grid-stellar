@@ -7,6 +7,12 @@
  * field that decides where money goes, against the `SigningContext` the
  * payout flow gives the signer. It needs no key: call it in the signer
  * (or before handing the XDR to a custodian) and sign only if it returns.
+ *
+ * The network is the one thing it cannot check: an unsigned envelope does
+ * not name its network, and the same bytes decode under any passphrase. The
+ * signature binds the passphrase: the signer signs the hash computed for
+ * it, so the signed transaction is valid on that network only. Sign under
+ * the passphrase given here.
  */
 import {
   type Asset,
@@ -25,7 +31,6 @@ import { FeeBumpTransaction, Transaction, TransactionBuilder, stellarSdk } from 
 
 /** Which check refused the transaction. */
 export type PayoutXdrCheck =
-  | 'network'
   | 'decode'
   | 'fee_bump'
   | 'operations'
@@ -37,6 +42,7 @@ export type PayoutXdrCheck =
   | 'amount'
   | 'fee'
   | 'max_time'
+  | 'min_time'
   | 'preconditions';
 
 /**
@@ -56,12 +62,19 @@ export class PayoutXdrMismatchError extends GridError {
 
 export interface PayoutXdrOptions {
   /**
-   * Passphrase of the network the signer signs for. The XDR is decoded and
-   * hashed for it, so a signature made under it is only valid there.
+   * Passphrase of the network the signer signs for. The XDR is decoded for
+   * it; the envelope itself cannot show which network it was built for, so
+   * this is not checked against the XDR. A signature made under it is only
+   * valid on that network.
    */
   readonly networkPassphrase: string;
   /** Highest total fee, in stroops. Default {@link DEFAULT_MAX_FEE_STROOPS}. A positive safe integer. */
   readonly maxFeeStroops?: number;
+  /**
+   * Clock in ms since epoch, read only when the transaction has a minTime,
+   * to refuse one that cannot land yet. Default `Date.now`.
+   */
+  readonly now?: () => number;
 }
 
 /** Default fee cap: 1 000 000 stroops (0.1 XLM) for the whole transaction. */
@@ -72,9 +85,9 @@ export const DEFAULT_MAX_FEE_STROOPS = 1_000_000;
  * payment `context.expected` describes:
  *
  * - `networkPassphrase` is set, and the XDR decodes for it as a plain
- *   transaction (no fee bump). An envelope does not name its network: the
- *   signer must sign under this same passphrase, which binds the signature
- *   to that network;
+ *   transaction (no fee bump). The network itself cannot be checked: an
+ *   unsigned envelope does not name it. Sign under this same passphrase,
+ *   which binds the signature to that network;
  * - it has exactly one operation, and that is a `payment`;
  * - the transaction source is `expected.source`;
  * - the operation has no source of its own, or one that is (or is a muxed
@@ -84,6 +97,9 @@ export const DEFAULT_MAX_FEE_STROOPS = 1_000_000;
  * - the total fee is at most `maxFeeStroops`;
  * - it has a `maxTime`, no later than the quote expiry
  *   (`assertMaxTimeWithinQuote`);
+ * - its `minTime` is zero (or absent) or no later than now (`now`): a
+ *   transaction that cannot land before some later time would hold the
+ *   payout back while the quote runs out;
  * - it has none of the newer preconditions: minimum account sequence, its
  *   age or ledger gap, extra signers, or ledger bounds (unset or zero only).
  *
@@ -91,7 +107,8 @@ export const DEFAULT_MAX_FEE_STROOPS = 1_000_000;
  * the quote expiry against the clock are `assertSigningAllowed`'s job.
  *
  * @throws {PayoutXdrMismatchError} on any mismatch.
- * @throws {InvalidConfigError} when `networkPassphrase` is empty or `maxFeeStroops` is not a positive safe integer.
+ * @throws {InvalidConfigError} when `networkPassphrase` is empty, `maxFeeStroops` is not a positive safe integer,
+ * or `now` does not return a finite number when it is read.
  */
 export function assertPayoutXdrMatches(unsignedXdr: string, context: SigningContext, options: PayoutXdrOptions): void {
   const { networkPassphrase } = options;
@@ -163,10 +180,33 @@ export function assertPayoutXdrMatches(unsignedXdr: string, context: SigningCont
     });
   }
 
+  const rawMinTime = tx.timeBounds?.minTime;
+  const minTime = rawMinTime === undefined ? 0 : Number(rawMinTime);
+  if (minTime > 0) {
+    const nowMs = readNow(options.now ?? Date.now);
+    if (minTime * 1000 > nowMs) {
+      throw new PayoutXdrMismatchError('min_time', 'The transaction cannot land before its minTime, which is later than now');
+    }
+  }
+
   const precondition = setPrecondition(tx);
   if (precondition !== null) {
     throw new PayoutXdrMismatchError('preconditions', `The transaction sets ${precondition}: not signed`);
   }
+}
+
+/** The clock's reading, or {@link InvalidConfigError} when it throws or is not a finite number. */
+function readNow(now: () => number): number {
+  let value: unknown;
+  try {
+    value = now();
+  } catch {
+    throw new InvalidConfigError('now() failed');
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new InvalidConfigError('now() must return a finite number of milliseconds');
+  }
+  return value;
 }
 
 /** The G... account behind an account or muxed (M...) address. */

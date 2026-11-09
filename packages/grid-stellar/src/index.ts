@@ -26,6 +26,7 @@ export {
 } from './accounts';
 export {
   createHorizonGateway,
+  DEFAULT_HORIZON_MAX_RESPONSE_BYTES,
   DEFAULT_HORIZON_REQUEST_TIMEOUT_MS,
   type HorizonAccount,
   type HorizonBalanceLine,
@@ -86,11 +87,13 @@ export {
 } from './read-layer';
 export type { SubmitError, SubmitErrorCode } from './result-codes';
 export {
+  type CheckedLedger,
   createStellarSubmitter,
   type DetailedStellarSubmitter,
   type FoundBy,
   inspectSignedTransaction,
   type SignedTransactionInfo,
+  type SourceAccountProof,
   type StellarSubmitDetail,
   type StellarSubmitOutcome,
   type StellarSubmitterOptions,

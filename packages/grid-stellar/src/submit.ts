@@ -17,19 +17,31 @@
  * submission as `unknown` with reason `unexpected_lookup_hash`.
  *
  * Whether a transaction expired is decided by the network, never by the
- * local clock. `expired_not_landed` needs every one of these:
- * - the transaction has a maxTime;
- * - the latest ledger Horizon had ingested (read before the lookups) closed
- *   after that maxTime, so no later ledger can include it;
- * - every lookup that found nothing reports, in Horizon's `Latest-Ledger`
- *   header, an ingested ledger at least as recent as that checked ledger;
- * - the checked instance keeps history back to a ledger no later than the
- *   one read before the first submission (`history_elder_ledger`).
+ * local clock, and never by an absent history record. `expired_not_landed`
+ * needs every one of these:
+ * - the transaction has a maxTime (greater than 0);
+ * - the latest ledger Horizon had ingested closed strictly after that
+ *   maxTime, so no later ledger can include it (the checked ledger);
+ * - a read of the source account (the inner transaction's source for a fee
+ *   bump), answered by an instance whose `Latest-Ledger` is at least the
+ *   checked ledger, shows an account sequence number lower than the
+ *   transaction's;
+ * - the lookup by every hash succeeded and found nothing.
  *
- * A failed or timed-out ledger read or lookup, a missing header, or any
- * other doubt never counts: the result is then `unknown`. Point the gateway
- * at one Horizon instance you operate or trust: behind a load balancer the
- * ledger read and the lookups may hit instances at different ledgers.
+ * A transaction that lands, successful or failed, uses its sequence number:
+ * the account's sequence is at least the transaction's from then on (an
+ * account can only be merged while its sequence is below the current
+ * ledger's starting sequence, and a re-created account starts at that
+ * ledger's, so this holds across a merge too). An unused sequence after the
+ * checked ledger therefore means it never landed and never will. This holds
+ * on a re-run and on an instance that no longer keeps the transaction's
+ * history: there a used sequence with no record found gives `unknown`.
+ *
+ * A failed or timed-out read or lookup, a missing account, a missing
+ * header, or any other doubt never counts: the result is then `unknown`.
+ * Point the gateway at one Horizon instance you operate or trust: behind a
+ * load balancer the reads may hit instances at different ledgers, and the
+ * `Latest-Ledger` check then gives `unknown` rather than a proof.
  *
  * Horizon's answer to the submission is checked too: an accepted submission
  * whose hash is not the locally computed envelope hash is `rejected` with
@@ -53,9 +65,15 @@ import {
   type SubmitOutcomeStatus,
   noopLogger,
 } from '@vindu/grid-core';
-import type { HorizonGateway, HorizonLedger, HorizonSubmitResponse, HorizonTransactionFound } from './horizon';
+import type {
+  HorizonAccount,
+  HorizonGateway,
+  HorizonLedger,
+  HorizonSubmitResponse,
+  HorizonTransactionFound,
+} from './horizon';
 import { type SubmitError, mapResultCodes } from './result-codes';
-import { FeeBumpTransaction, TransactionBuilder } from './sdk';
+import { FeeBumpTransaction, TransactionBuilder, stellarSdk } from './sdk';
 
 /** Which locally computed hash found the transaction on Horizon. */
 export type FoundBy = 'hash' | 'inner_hash';
@@ -135,11 +153,30 @@ export type SubmitResult =
       readonly innerHash?: string;
       /** The transaction's maxTime, unix seconds. */
       readonly maxTime: number;
-      /** The ingested ledger that closed after maxTime, and the oldest ledger that instance keeps. */
-      readonly checkedLedger: { readonly sequence: number; readonly closedAt: string; readonly elderLedger: number };
-      /** The latest ingested ledger read before the first submission. */
-      readonly ledgerBeforeSubmission: number;
+      /** The transaction's sequence number. */
+      readonly transactionSequence: string;
+      /** The ingested ledger that closed after maxTime. */
+      readonly checkedLedger: CheckedLedger;
+      /** The source account read that shows the sequence number unused. */
+      readonly sourceAccount: SourceAccountProof;
     };
+
+/** An ingested ledger that closed after the transaction's maxTime. */
+export interface CheckedLedger {
+  readonly sequence: number;
+  /** ISO-8601 close time. */
+  readonly closedAt: string;
+}
+
+/** The source account as an instance that had ingested the checked ledger showed it. */
+export interface SourceAccountProof {
+  /** The account whose sequence number the transaction uses. */
+  readonly id: string;
+  /** Its sequence number then: lower than the transaction's. */
+  readonly sequence: string;
+  /** `Latest-Ledger` of that read: at least the checked ledger. */
+  readonly latestLedger: number;
+}
 
 export type SubmitStatus = SubmitResult['status'];
 
@@ -158,8 +195,10 @@ export interface SubmitOptions {
   readonly pollIntervalMs?: number;
   /**
    * Longest extra wait, after `timeoutMs`, before returning `unknown`.
-   * Default 2 min. With 0, no ledger is read before submitting, so the
-   * result is never `expired_not_landed`.
+   * Default 2 min. With 0 nothing is looked up: the submission's own answer
+   * is the result (a refusal is reported without checking whether the
+   * transaction already landed, and no answer gives `unknown`), so it is
+   * never `expired_not_landed`.
    */
   readonly maxWaitMs?: number;
   /**
@@ -188,11 +227,20 @@ export interface SignedTransactionInfo {
   readonly innerHash?: string;
   /** maxTime in unix seconds, or `undefined` when the transaction has no upper time bound. */
   readonly maxTime: number | undefined;
+  /**
+   * The account whose sequence number the transaction uses: the source of
+   * the inner transaction for a fee bump, as a `G...` account (a muxed
+   * `M...` source gives its base account).
+   */
+  readonly source: string;
+  /** The transaction's sequence number, a decimal string. */
+  readonly sequence: string;
 }
 
 /**
- * Hashes and maxTime of a signed envelope, computed locally. For a fee bump,
- * maxTime is the inner transaction's.
+ * Hashes, maxTime, source account and sequence number of a signed envelope,
+ * computed locally. For a fee bump, maxTime, source and sequence are the
+ * inner transaction's.
  *
  * @throws {InvalidInputError} when the envelope cannot be decoded.
  */
@@ -210,6 +258,8 @@ export function inspectSignedTransaction(signedXdr: string, networkPassphrase: s
     hash: hex(tx.hash()),
     ...(inner === tx ? {} : { innerHash: hex(inner.hash()) }),
     maxTime: maxTime > 0 ? maxTime : undefined,
+    source: inner.source.startsWith('M') ? stellarSdk.extractBaseAddress(inner.source) : inner.source,
+    sequence: inner.sequence,
   };
 }
 
@@ -224,8 +274,8 @@ type Lookup =
   | { readonly kind: 'found'; readonly record: HorizonTransactionFound; readonly by: FoundBy }
   /** Found a record that is not this transaction. */
   | { readonly kind: 'foreign'; readonly record: HorizonTransactionFound }
-  /** Every lookup answered "not found"; the ingested ledger each reported, when it did. */
-  | { readonly kind: 'not_found'; readonly latestLedgers: ReadonlyArray<number | undefined> }
+  /** Every lookup answered "not found". */
+  | { readonly kind: 'not_found' }
   /** A lookup failed or timed out, and none found it: proves nothing. */
   | { readonly kind: 'error' };
 
@@ -261,7 +311,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   const deadline = readClock() + timeoutMs + maxWaitMs;
   if (!Number.isFinite(deadline)) throw new InvalidInputError('now() must return a finite number of milliseconds');
 
-  const { hash, innerHash, maxTime } = inspectSignedTransaction(signedXdr, options.networkPassphrase);
+  const { hash, innerHash, maxTime, source, sequence } = inspectSignedTransaction(signedXdr, options.networkPassphrase);
   const inner = innerHash === undefined ? {} : { innerHash };
   // Every hash the transaction can be found by, the envelope's first.
   const lookups: ReadonlyArray<readonly [string, FoundBy]> =
@@ -332,7 +382,6 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   /** Looks the transaction up by every local hash. A failed or timed-out lookup never counts as not found. */
   async function lookup(): Promise<Lookup> {
     let failed = false;
-    const latestLedgers: Array<number | undefined> = [];
     for (const [h, by] of lookups) {
       try {
         const result = await bounded(requestTimeoutMs, (signal) => gateway.transaction(h, { signal }));
@@ -341,10 +390,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
           logger.warn('transaction lookup timed out', { hash: h });
           continue;
         }
-        if (!result.found) {
-          latestLedgers.push(result.latestLedger);
-          continue;
-        }
+        if (!result.found) continue;
         if (!isOurs(result, h)) {
           logger.error('Horizon returned another transaction for our hash', { hash: h });
           return { kind: 'foreign', record: result };
@@ -355,7 +401,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
         logger.warn('transaction lookup failed', { hash: h, error: errorName(e) });
       }
     }
-    return failed ? { kind: 'error' } : { kind: 'not_found', latestLedgers };
+    return failed ? { kind: 'error' } : { kind: 'not_found' };
   }
 
   const fromLookup = (found: HorizonTransactionFound, by: FoundBy): SubmitResult => {
@@ -417,39 +463,48 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   }
 
   /**
-   * Why the evidence does not prove that the transaction can never land, or
-   * `null` when it does.
+   * The source account as an instance that ingested `checked` shows it, when
+   * it proves the sequence number unused; otherwise why it does not.
    */
-  function expiryDoubt(
-    before: HorizonLedger | null,
-    checked: HorizonLedger,
-    latestLedgers: ReadonlyArray<number | undefined>,
-  ): string | null {
-    if (maxTime === undefined || !(Math.floor(checked.closedAt.getTime() / 1000) > maxTime)) return 'not_past_max_time';
-    if (before === null) return 'no_ledger_before_submission';
-    if (latestLedgers.length !== lookups.length) return 'lookup_missing';
-    if (!latestLedgers.every((l) => isLedgerNumber(l) && l >= checked.sequence)) return 'lookup_behind_checked_ledger';
-    if (!isLedgerNumber(checked.elderLedger) || checked.elderLedger > before.sequence) {
-      return 'history_does_not_cover_submission';
+  async function sourceAccountProof(checked: HorizonLedger): Promise<SourceAccountProof | string> {
+    let account: HorizonAccount | null | typeof TIMED_OUT;
+    try {
+      account = await bounded(requestTimeoutMs, (signal) => gateway.account(source, { signal }));
+    } catch (e) {
+      logger.warn('source account read failed', { hash, error: errorName(e) });
+      return 'account_read_failed';
     }
-    return null;
+    if (account === TIMED_OUT) return 'account_read_timed_out';
+    if (account === null) return 'account_missing';
+    if (account.id !== source) return 'account_mismatch';
+    const latest = account.latestLedger;
+    if (!isLedgerNumber(latest) || latest < checked.sequence) return 'account_behind_checked_ledger';
+    if (typeof account.sequence !== 'string' || !DECIMAL.test(account.sequence)) return 'account_sequence_unusable';
+    // Used: the transaction, or another one with the same number, is on the ledger.
+    if (BigInt(account.sequence) >= BigInt(sequence)) return 'sequence_used';
+    return { id: source, sequence: account.sequence, latestLedger: latest };
   }
 
   /**
    * Reads the ledger first (only when there is a maxTime), then looks the
-   * transaction up, so the lookups are made after that ledger was ingested.
-   * Settles on a landing, on a record that is not ours, or on proven expiry.
-   * `null`: not settled.
+   * transaction up, then, when the ledger closed after maxTime and nothing
+   * was found, reads the source account. Settles on a landing, on a record
+   * that is not ours, or on proven expiry. `null`: not settled.
    */
-  async function probe(before: HorizonLedger | null): Promise<SubmitResult | null> {
+  async function probe(): Promise<SubmitResult | null> {
     const checked = maxTime === undefined ? null : await latestLedger(requestTimeoutMs);
     const look = await lookup();
     if (look.kind === 'found') return fromLookup(look.record, look.by);
     if (look.kind === 'foreign') return fromForeign(look.record);
     if (look.kind === 'error' || checked === null || maxTime === undefined) return null;
-    const doubt = expiryDoubt(before, checked, look.latestLedgers);
-    if (doubt !== null) {
-      if (doubt !== 'not_past_max_time') logger.warn('expiry not proven', { hash, reason: doubt });
+    if (!(Math.floor(checked.closedAt.getTime() / 1000) > maxTime)) return null;
+    if (!DECIMAL.test(sequence)) {
+      logger.warn('expiry not proven', { hash, reason: 'transaction_sequence_unusable' });
+      return null;
+    }
+    const proof = await sourceAccountProof(checked);
+    if (typeof proof === 'string') {
+      logger.warn('expiry not proven', { hash, reason: proof });
       return null;
     }
     return {
@@ -457,29 +512,23 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
       hash,
       ...inner,
       maxTime,
-      checkedLedger: {
-        sequence: checked.sequence,
-        closedAt: checked.closedAt.toISOString(),
-        elderLedger: checked.elderLedger as number,
-      },
-      ledgerBeforeSubmission: (before as HorizonLedger).sequence,
+      transactionSequence: sequence,
+      checkedLedger: { sequence: checked.sequence, closedAt: checked.closedAt.toISOString() },
+      sourceAccount: proof,
     };
   }
 
-  // The ledger before the first submission bounds where the transaction can
-  // be: Horizon's history must reach back to it for "not found" to mean
-  // anything. It comes out of the wait budget, so the first submission
-  // still gets its full timeoutMs.
-  const before = maxTime === undefined || maxWaitMs === 0 ? null : await latestLedger(Math.min(requestTimeoutMs, maxWaitMs));
-
   const first = await attempt(true);
   if (first.kind === 'accepted') return done(fromAccepted(first));
+  // No time to wait means no lookup: report the submission's own answer.
+  const settle = maxWaitMs > 0;
   if (first.kind === 'rejected') {
     const error = mapResultCodes(first.transactionCode, first.operationCodes);
+    if (!settle) return done({ status: 'rejected', reason: 'refused', hash, ...inner, error });
     // A rejection of an envelope that already landed (e.g. tx_bad_seq on a
     // retry, or another fee bump around the same transaction) must not hide
     // the landing: check the hashes first.
-    const settled = await probe(before);
+    const settled = await probe();
     if (settled !== null) return done(settled);
     logger.warn('stellar submission rejected', { hash, code: error.code });
     return done({ status: 'rejected', reason: 'refused', hash, ...inner, error });
@@ -488,11 +537,12 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   // Timed out or no answer: the transaction may be on its way. Check the
   // hashes before anything else, and keep checking. The number of rounds is
   // bounded too, so a clock that stops moving cannot keep the loop alive.
+  if (!settle) return unknown(undefined);
   logger.warn('stellar submission without answer; checking the hash', { hash, kind: first.kind });
   const rounds = Math.floor(maxWaitMs / pollIntervalMs) + 1;
   let lastError: SubmitError | undefined;
   for (let round = 1; ; round += 1) {
-    const settled = await probe(before);
+    const settled = await probe();
     if (settled !== null) return done(settled);
     const t = readClock();
     if (!Number.isFinite(t) || round >= rounds || t + pollIntervalMs >= deadline) return unknown(lastError);
@@ -507,6 +557,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
 }
 
 const HASH = /^[0-9a-f]{64}$/i;
+const DECIMAL = /^[0-9]+$/;
 
 /** The lower-case hash, or `undefined` when `value` is not 64 hex characters. */
 function wellFormedHash(value: unknown): string | undefined {
@@ -571,8 +622,9 @@ export type StellarSubmitDetail = {
   readonly error?: SubmitError;
   readonly lastError?: SubmitError;
   readonly maxTime?: number;
-  readonly checkedLedger?: { readonly sequence: number; readonly closedAt: string; readonly elderLedger: number };
-  readonly ledgerBeforeSubmission?: number;
+  readonly transactionSequence?: string;
+  readonly checkedLedger?: CheckedLedger;
+  readonly sourceAccount?: SourceAccountProof;
 };
 
 /** Core's `SubmitOutcome` with the full {@link StellarSubmitDetail}, on every status. */

@@ -41,7 +41,7 @@ function fakeFetch(routes: Record<string, Answer | (() => Promise<Answer>)>) {
     return {
       status: answer.status ?? 200,
       headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
-      json: async () => answer.body,
+      body: new Response(JSON.stringify(answer.body ?? null)).body,
     };
   };
   return { fetch, calls };
@@ -83,9 +83,18 @@ describe('horizon gateway', () => {
     expect(gatewayWith({}).gateway.networkPassphrase).toBe(TESTNET_NETWORK_PASSPHRASE);
   });
 
-  it('refuses http without allowHttp, a non-URL, and a URL with query or credentials', () => {
+  it('refuses http without allowHttp, a non-URL, and a URL with a query, a fragment or credentials', () => {
     const base = { networkPassphrase: TESTNET_NETWORK_PASSPHRASE, fetch: fakeFetch({}).fetch };
-    for (const horizonUrl of ['http://horizon.example', 'not a url', 'https://h.example/?a=1', 'https://u:p@h.example']) {
+    for (const horizonUrl of [
+      'http://horizon.example',
+      'not a url',
+      'https://h.example/?a=1',
+      'https://u:p@h.example',
+      // An empty query or fragment parses away; the raw characters are refused.
+      'https://h.example/?',
+      'https://h.example/#',
+      'https://h.example/x?#',
+    ]) {
       expect(() => createHorizonGateway({ ...base, horizonUrl })).toThrow(InvalidConfigError);
     }
     expect(() => createHorizonGateway({ ...base, horizonUrl: 'http://127.0.0.1:8000', allowHttp: true })).not.toThrow();
@@ -102,7 +111,7 @@ describe('horizon gateway', () => {
     ).toThrow(InvalidConfigError);
   });
 
-  it('reads the latest ingested ledger and the elder ledger from the root resource', async () => {
+  it('reads the latest ingested ledger from the root resource', async () => {
     const { gateway, calls } = gatewayWith({
       '/': {
         body: {
@@ -113,22 +122,10 @@ describe('horizon gateway', () => {
         },
       },
     });
-    expect(await gateway.latestLedger()).toEqual({
-      sequence: 51,
-      closedAt: new Date('2026-11-09T12:00:05Z'),
-      elderLedger: 2,
-    });
+    expect(await gateway.latestLedger()).toEqual({ sequence: 51, closedAt: new Date('2026-11-09T12:00:05Z') });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(`${TESTNET_HORIZON_URL}/`);
     expect(calls[0]?.init).toMatchObject({ method: 'GET', redirect: 'error' });
-  });
-
-  it('leaves elderLedger out when Horizon does not report a usable one', async () => {
-    const body = { history_latest_ledger: 51, history_latest_ledger_closed_at: '2026-11-09T12:00:05Z', history_elder_ledger: '2' };
-    expect(await gatewayWith({ '/': { body } }).gateway.latestLedger()).toEqual({
-      sequence: 51,
-      closedAt: new Date('2026-11-09T12:00:05Z'),
-    });
   });
 
   it('fails latestLedger when Horizon returns no usable ledger', async () => {
@@ -259,17 +256,190 @@ describe('horizon gateway', () => {
     await expect(pending).rejects.toThrow('aborted');
   });
 
+  it('refuses a maxResponseBytes that is not a positive whole number', () => {
+    for (const maxResponseBytes of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        createHorizonGateway({
+          horizonUrl: TESTNET_HORIZON_URL,
+          networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+          fetch: fakeFetch({}).fetch,
+          maxResponseBytes,
+        }),
+      ).toThrow(InvalidConfigError);
+    }
+  });
+
+  /** A fetch whose 200 body streams `chunks` one by one, and reports what was pulled and cancelled. */
+  function streamingFetch(chunks: readonly Uint8Array[], headers: Record<string, string> = {}) {
+    const seen = { pulled: 0, cancelled: false };
+    const fetch: HorizonFetch = async () => {
+      let i = 0;
+      const source = {
+        pull(controller: ReadableStreamDefaultController<Uint8Array>) {
+          const chunk = chunks[i++];
+          seen.pulled += 1;
+          if (chunk === undefined) controller.close();
+          else controller.enqueue(chunk);
+        },
+        cancel() {
+          seen.cancelled = true;
+        },
+      };
+      // No read ahead: a chunk is pulled only when the gateway asks for it.
+      const body = new ReadableStream<Uint8Array>(source, { highWaterMark: 0 });
+      return { status: 200, headers: { get: (name: string) => headers[name.toLowerCase()] ?? null }, body };
+    };
+    return { fetch, seen };
+  }
+
+  it('reads a body in chunks and stops, as an error, once it grows past maxResponseBytes', async () => {
+    const chunk = new Uint8Array(400).fill(0x20);
+    const { fetch, seen } = streamingFetch(Array.from({ length: 1000 }, () => chunk));
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      maxResponseBytes: 1_000,
+    });
+    const error = await gateway.transaction(HASH).catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: 'HorizonResponseTooLargeError', maxResponseBytes: 1_000 });
+    // The third chunk passes the cap: the rest is never pulled.
+    expect(seen.pulled).toBe(3);
+    expect(seen.cancelled).toBe(true);
+  });
+
+  it('refuses a body whose Content-Length is over the cap without reading it', async () => {
+    const { fetch, seen } = streamingFetch([new TextEncoder().encode('{}')], { 'content-length': '2000000' });
+    const gateway = createHorizonGateway({ horizonUrl: TESTNET_HORIZON_URL, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, fetch });
+    await expect(gateway.latestLedger()).rejects.toMatchObject({ name: 'HorizonResponseTooLargeError' });
+    expect(seen.pulled).toBe(0);
+    expect(seen.cancelled).toBe(true);
+  });
+
+  it('a body over the cap on a lookup is an error, never "not found"', async () => {
+    const big = new TextEncoder().encode(JSON.stringify({ hash: HASH, successful: true, pad: 'x'.repeat(2_000) }));
+    const { fetch } = streamingFetch([big]);
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      maxResponseBytes: 1_024,
+    });
+    await expect(gateway.transaction(HASH)).rejects.toThrow('over 1024 bytes');
+  });
+
+  it('reads a body that arrives in several chunks, up to the cap', async () => {
+    const text = JSON.stringify({ history_latest_ledger: 9, history_latest_ledger_closed_at: '2026-11-09T12:00:05Z' });
+    const bytes = new TextEncoder().encode(text);
+    const { fetch } = streamingFetch([bytes.subarray(0, 10), bytes.subarray(10)]);
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      maxResponseBytes: bytes.byteLength,
+    });
+    expect(await gateway.latestLedger()).toMatchObject({ sequence: 9 });
+  });
+
+  it('stops reading a body that trickles in past requestTimeoutMs', async () => {
+    let timer: NodeJS.Timeout | undefined;
+    const fetch: HorizonFetch = async () => ({
+      status: 200,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"hash":"'));
+          timer = setInterval(() => controller.enqueue(new TextEncoder().encode('a')), 5);
+        },
+        cancel() {
+          clearInterval(timer);
+        },
+      }),
+    });
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      requestTimeoutMs: 30,
+    });
+    const started = Date.now();
+    await expect(gateway.transaction(HASH)).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    clearInterval(timer);
+  });
+
   it('treats a missing account as not found', async () => {
     const { gateway } = gatewayWith({});
     expect(await gateway.account(Keypair.random().publicKey())).toBeNull();
   });
 
-  it('reads an account', async () => {
+  it('reads an account, its known fields only, with the Latest-Ledger header', async () => {
+    const id = Keypair.random().publicKey();
+    const issuer = Keypair.random().publicKey();
+    const { gateway } = gatewayWith({
+      [`/accounts/${id}`]: {
+        headers: { 'Latest-Ledger': '812' },
+        body: {
+          id,
+          sequence: '9223372036854775807',
+          subentry_count: 1,
+          num_sponsoring: 0,
+          balances: [
+            { asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: issuer, balance: '5.0000000', limit: '922337203685.4775807', is_authorized: true, sponsor: 'x' },
+            { asset_type: 'native', balance: '2.5000000', buying_liabilities: '0.0000000' },
+          ],
+          _links: {},
+          signers: [],
+        },
+      },
+    });
+    expect(await gateway.account(id)).toEqual({
+      id,
+      sequence: '9223372036854775807',
+      subentry_count: 1,
+      num_sponsoring: 0,
+      balances: [
+        { asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: issuer, balance: '5.0000000', limit: '922337203685.4775807', is_authorized: true },
+        { asset_type: 'native', balance: '2.5000000', buying_liabilities: '0.0000000' },
+      ],
+      latestLedger: 812,
+    });
+  });
+
+  it('leaves latestLedger out of an account read without a usable Latest-Ledger header', async () => {
     const id = Keypair.random().publicKey();
     const { gateway } = gatewayWith({
-      [`/accounts/${id}`]: { body: { id, sequence: '7', subentry_count: 1, balances: [], _links: {}, signers: [] } },
+      [`/accounts/${id}`]: { headers: { 'Latest-Ledger': 'soon' }, body: { id, sequence: '7', subentry_count: 0, balances: [] } },
     });
-    expect(await gateway.account(id)).toEqual({ id, sequence: '7', subentry_count: 1, balances: [] });
+    expect(await gateway.account(id)).toEqual({ id, sequence: '7', subentry_count: 0, balances: [] });
+  });
+
+  it('refuses an account answer for another account or with fields that are not well formed', async () => {
+    const id = Keypair.random().publicKey();
+    const good = { id, sequence: '7', subentry_count: 0, balances: [{ asset_type: 'native', balance: '1.0000000' }] };
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ ...good, id: Keypair.random().publicKey() }, 'id'],
+      [{ ...good, id: undefined }, 'id'],
+      [{ ...good, sequence: 7 }, 'sequence'],
+      [{ ...good, sequence: '' }, 'sequence'],
+      [{ ...good, sequence: '-1' }, 'sequence'],
+      [{ ...good, sequence: '1e3' }, 'sequence'],
+      [{ ...good, sequence: '12345678901234567890' }, 'sequence'],
+      [{ ...good, subentry_count: -1 }, 'subentry_count'],
+      [{ ...good, subentry_count: '1' }, 'subentry_count'],
+      [{ ...good, num_sponsored: 1.5 }, 'num_sponsored'],
+      [{ ...good, balances: {} }, 'balances'],
+      [{ ...good, balances: [null] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: 'lots' }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: '1.00000001' }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'credit_alphanum4', balance: '1', asset_code: 'USDC' }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: '1', limit: 5 }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: '1', is_authorized: 'yes' }] }, 'balance'],
+    ];
+    for (const [body, field] of cases) {
+      const { gateway } = gatewayWith({ [`/accounts/${id}`]: { headers: { 'Latest-Ledger': '9' }, body } });
+      await expect(gateway.account(id)).rejects.toThrow(`unusable ${field}`);
+    }
   });
 
   it('keeps known payment fields and the joined memo only, and passes the query', async () => {

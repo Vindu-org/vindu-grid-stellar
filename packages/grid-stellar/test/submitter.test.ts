@@ -22,7 +22,7 @@ const { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } = ste
 const T0 = Date.UTC(2026, 10, 9, 12, 0, 0);
 const MAX_TIME = T0 / 1000 + 300;
 
-function signed(maxTime = MAX_TIME): { xdr: string; hash: string } {
+function signed(maxTime = MAX_TIME): { xdr: string; hash: string; source: string } {
   const source = Keypair.random();
   const tx = new TransactionBuilder(new Account(source.publicKey(), '100'), {
     fee: '100',
@@ -38,7 +38,7 @@ function signed(maxTime = MAX_TIME): { xdr: string; hash: string } {
     )
     .build();
   tx.sign(source);
-  return { xdr: tx.toXDR(), hash: Buffer.from(tx.hash()).toString('hex') };
+  return { xdr: tx.toXDR(), hash: Buffer.from(tx.hash()).toString('hex'), source: source.publicKey() };
 }
 
 function submitterFor(gateway: FakeGateway, extra: { maxWaitMs?: number } = {}) {
@@ -102,19 +102,21 @@ describe('createStellarSubmitter', () => {
     expect(canSignReplacement(outcome)).toBe(false);
   });
 
-  it('expired_not_landed keeps the ledger evidence and allows a replacement', async () => {
-    const { xdr, hash } = signed();
+  it('expired_not_landed keeps the ledger and account evidence and allows a replacement', async () => {
+    const { xdr, hash, source } = signed();
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
-    gateway.ledger = { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000), elderLedger: 2 };
+    gateway.ledger = { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000) };
+    gateway.setAccount(source, '100');
     const outcome = await submitterFor(gateway).submit(xdr);
     expect(outcome).toEqual({
       status: 'expired_not_landed',
       hash,
       detail: {
         maxTime: MAX_TIME,
-        checkedLedger: { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000).toISOString(), elderLedger: 2 },
-        ledgerBeforeSubmission: 9,
+        transactionSequence: '101',
+        checkedLedger: { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000).toISOString() },
+        sourceAccount: { id: source, sequence: '100', latestLedger: 9 },
       },
     });
     expect(canSignReplacement(outcome)).toBe(true);
