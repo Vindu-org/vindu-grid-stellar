@@ -105,14 +105,15 @@ describe('createStellarSubmitter', () => {
     const { xdr, hash } = signed();
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
-    gateway.ledger = { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000) };
+    gateway.ledger = { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000), elderLedger: 2 };
     const outcome = await submitterFor(gateway).submit(xdr);
     expect(outcome).toEqual({
       status: 'expired_not_landed',
       hash,
       detail: {
         maxTime: MAX_TIME,
-        checkedLedger: { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000).toISOString() },
+        checkedLedger: { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000).toISOString(), elderLedger: 2 },
+        ledgerBeforeSubmission: 9,
       },
     });
     expect(canSignReplacement(outcome)).toBe(true);
@@ -142,6 +143,47 @@ describe('createStellarSubmitter', () => {
       hash: 'a'.repeat(64),
       detail: { innerHash: 'b'.repeat(64), ledger: 3, foundBy: 'inner_hash', submittedHash: 'c'.repeat(64) },
     });
+  });
+
+  it('reports maxDurationMs = timeoutMs + maxWaitMs, read-only', () => {
+    const gateway = new FakeGateway();
+    const submitter = createStellarSubmitter({
+      gateway,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      timeoutMs: 7_000,
+      maxWaitMs: 45_000,
+    });
+    expect(submitter.maxDurationMs).toBe(52_000);
+    expect(() => {
+      (submitter as { maxDurationMs: number }).maxDurationMs = 1;
+    }).toThrow(TypeError);
+    expect(submitter.maxDurationMs).toBe(52_000);
+    // The defaults: 30 s to submit plus 2 min of waiting.
+    expect(createStellarSubmitter({ gateway, networkPassphrase: TESTNET_NETWORK_PASSPHRASE }).maxDurationMs).toBe(150_000);
+  });
+
+  it('one submit never runs longer than maxDurationMs, even when every Horizon call hangs', async () => {
+    const { xdr } = signed();
+    const gateway = new FakeGateway();
+    gateway.submitResponses = ['hang'];
+    const hang = () => new Promise<never>(() => undefined);
+    gateway.latestLedger = hang;
+    gateway.transaction = hang;
+    const submitter = createStellarSubmitter({
+      gateway,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      timeoutMs: 40,
+      maxWaitMs: 80,
+      pollIntervalMs: 20,
+      requestTimeoutMs: 1_000,
+    });
+    const started = Date.now();
+    const outcome = await submitter.submit(xdr);
+    const elapsed = Date.now() - started;
+    expect(outcome.status).toBe('unknown');
+    // Timers may fire late on a busy machine; the bound that matters is far
+    // below the 1 s request timeout that would apply without the deadline.
+    expect(elapsed).toBeLessThan(submitter.maxDurationMs + 300);
   });
 
   it('checks the passphrase and durations when it is created', () => {

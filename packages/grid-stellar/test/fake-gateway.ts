@@ -6,6 +6,7 @@ import type {
   HorizonGateway,
   HorizonLedger,
   HorizonPaymentRecord,
+  HorizonRequestOptions,
   HorizonSubmitResponse,
   HorizonTransactionLookup,
   PaymentsQuery,
@@ -22,7 +23,12 @@ export const USDC_ISSUER = `G${'D'.repeat(55)}`;
 export class FakeGateway implements HorizonGateway {
   networkPassphrase: string = Networks.TESTNET;
   /** The latest ingested ledger; set it to move Horizon's view of time. An `Error` makes the call fail. */
-  ledger: HorizonLedger | Error = { sequence: 1, closedAt: new Date(Date.UTC(2026, 10, 9, 12, 0, 0)) };
+  ledger: HorizonLedger | Error = { sequence: 1, closedAt: new Date(Date.UTC(2026, 10, 9, 12, 0, 0)), elderLedger: 1 };
+  /**
+   * Latest ingested ledger a lookup reports, as Horizon's `Latest-Ledger`
+   * header does. Default: the current `ledger`'s sequence. `null`: no header.
+   */
+  lookupLedger: number | null | undefined;
   readonly ledgerReads: number[] = [];
   /** Payment history per account, oldest first. */
   readonly payments = new Map<string, HorizonPaymentRecord[]>();
@@ -36,23 +42,29 @@ export class FakeGateway implements HorizonGateway {
   /** Runs after each lookup, e.g. to make a transaction appear later. */
   onLookup: ((hash: string, count: number) => void) | undefined;
 
-  async latestLedger(): Promise<HorizonLedger> {
+  async latestLedger(_options?: HorizonRequestOptions): Promise<HorizonLedger> {
     this.ledgerReads.push(this.transactionLookups.length);
     if (this.ledger instanceof Error) throw this.ledger;
     return this.ledger;
   }
 
-  async paymentsForAccount(account: string, query: PaymentsQuery): Promise<readonly HorizonPaymentRecord[]> {
+  async paymentsForAccount(
+    account: string,
+    query: PaymentsQuery,
+    _options?: HorizonRequestOptions,
+  ): Promise<readonly HorizonPaymentRecord[]> {
     this.paymentQueries.push({ account, query });
     const all = this.payments.get(account) ?? [];
     const start = query.cursor === undefined ? 0 : all.findIndex((r) => r.paging_token === query.cursor) + 1;
     return all.slice(start, start + query.limit);
   }
 
-  async transaction(hash: string): Promise<HorizonTransactionLookup> {
+  async transaction(hash: string, _options?: HorizonRequestOptions): Promise<HorizonTransactionLookup> {
     this.transactionLookups.push(hash);
     this.onLookup?.(hash, this.transactionLookups.length);
-    return this.transactions.get(hash) ?? { found: false };
+    const latest = this.lookupLedger === undefined ? (this.ledger instanceof Error ? null : this.ledger.sequence) : this.lookupLedger;
+    const ingested = latest === null ? {} : { latestLedger: latest };
+    return { ...(this.transactions.get(hash) ?? { found: false }), ...ingested };
   }
 
   async submitTransaction(signedXdr: string): Promise<HorizonSubmitResponse> {
@@ -64,7 +76,7 @@ export class FakeGateway implements HorizonGateway {
     return next;
   }
 
-  async account(address: string): Promise<HorizonAccount | null> {
+  async account(address: string, _options?: HorizonRequestOptions): Promise<HorizonAccount | null> {
     return this.accounts.get(address) ?? null;
   }
 }

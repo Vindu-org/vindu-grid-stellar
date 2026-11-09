@@ -6,7 +6,7 @@
  * turns each record into a {@link ChainPayment}: core assets, canonical core
  * amounts, and the direction relative to the account being followed.
  */
-import { type Asset, formatAmount, parseAmount } from '@vindu/grid-core';
+import { type Asset, InvalidInputError, formatAmount, parseAmount } from '@vindu/grid-core';
 import type { HorizonPaymentRecord } from './horizon';
 
 /** Operation types the read layer reports. Everything else is skipped. */
@@ -58,9 +58,15 @@ export interface ChainPayment {
  * is not a payment type this package reports, did not succeed, or does not
  * have `account` as sender or receiver.
  *
+ * @throws {InvalidInputError} when the record has no string `id`,
+ * `paging_token` or `transaction_hash`, whatever its type: without them it
+ * cannot be told apart from others or passed over.
  * @throws {InvalidMoneyError} when Horizon sends an amount that is not a valid decimal.
  */
 export function normalisePayment(record: HorizonPaymentRecord, account: string): ChainPayment | null {
+  if (!hasIdentity(record)) {
+    throw new InvalidInputError('Horizon payment record without a string id, paging_token or transaction_hash');
+  }
   if (record.transaction_successful === false) return null;
   if (!isChainPaymentType(record.type)) return null;
 
@@ -105,6 +111,18 @@ export function normalisePayment(record: HorizonPaymentRecord, account: string):
   if (record.memo !== undefined) extra.memo = record.memo;
   if (record.memo_type !== undefined) extra.memoType = record.memo_type;
   return { ...base, ...extra };
+}
+
+/** True when the record has the string fields that identify it and its position. */
+function hasIdentity(record: unknown): boolean {
+  const r = record as Partial<Record<'id' | 'paging_token' | 'transaction_hash', unknown>> | null;
+  return (
+    typeof r === 'object' &&
+    r !== null &&
+    typeof r.id === 'string' &&
+    typeof r.paging_token === 'string' &&
+    typeof r.transaction_hash === 'string'
+  );
 }
 
 function isChainPaymentType(type: string): type is ChainPaymentType {

@@ -1,4 +1,4 @@
-import type { Logger } from '@vindu/grid-core';
+import { InvalidInputError, type Logger } from '@vindu/grid-core';
 import type { ChainPayment } from '../src/payments';
 import { InMemoryCursorStore, createReadLayer } from '../src/read-layer';
 import { ACCOUNT, FakeGateway, OTHER, THIRD, USDC_ISSUER, paymentRecord } from './fake-gateway';
@@ -258,6 +258,96 @@ describe('read layer', () => {
     expect(lines[0]).toContain(record.transaction_hash);
     expect(lines[0]).toContain('InvalidMoneyError');
     for (const secret of [ACCOUNT, OTHER, 'client-ref', '1e3']) expect(lines[0]).not.toContain(secret);
+  });
+
+  it('a record without a paging token is malformed and never resets the cursor to the start', async () => {
+    // Review probe: a record without paging_token set the position to
+    // undefined, so the next page was read from the start and the stored
+    // cursor was cleared.
+    const records = [paymentRecord(), paymentRecord({ paging_token: undefined, amount: 'bad' }), paymentRecord()];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const stored: Array<string | undefined> = [];
+    const set = cursorStore.set.bind(cursorStore);
+    cursorStore.set = async (account, cursor) => {
+      stored.push(cursor);
+      return set(account, cursor);
+    };
+    const seen: string[] = [];
+    const bad: unknown[] = [];
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      pageSize: 2,
+      maxPages: 5,
+      onEvent: (p) => {
+        seen.push(p.id);
+      },
+      onMalformed: (_record, error) => {
+        bad.push(error);
+      },
+    });
+    const result = await layer.pollAccount(ACCOUNT);
+    expect(seen).toEqual([records[0]!.id, records[2]!.id]);
+    expect(bad.length).toBeGreaterThanOrEqual(1);
+    expect(bad[0]).toBeInstanceOf(InvalidInputError);
+    expect(result).toMatchObject({ delivered: 2, cursor: records[2]!.paging_token, hasMore: false });
+    expect(await cursorStore.get(ACCOUNT)).toBe(records[2]!.paging_token);
+    expect(stored.every((c) => typeof c === 'string')).toBe(true);
+    // After the first page, every page continues from a real paging token.
+    expect(gateway.paymentQueries.slice(1).every((q) => typeof q.query.cursor === 'string')).toBe(true);
+  });
+
+  it.each(['id', 'paging_token', 'transaction_hash'] as const)(
+    'a record without a string %s goes to onMalformed, whatever its type',
+    async (field) => {
+      for (const overrides of [{ [field]: undefined }, { [field]: 42 as unknown as string }]) {
+        for (const type of ['payment', 'change_trust']) {
+          const records = [paymentRecord(), paymentRecord({ type, ...overrides }), paymentRecord()];
+          const gateway = new FakeGateway();
+          gateway.payments.set(ACCOUNT, records);
+          const cursorStore = new InMemoryCursorStore();
+          const bad: unknown[] = [];
+          const layer = createReadLayer({
+            gateway,
+            cursorStore,
+            onEvent: () => undefined,
+            onMalformed: (_record, error) => {
+              bad.push(error);
+            },
+          });
+          expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 2, malformed: 1 });
+          expect(bad).toEqual([expect.any(InvalidInputError)]);
+          expect(await cursorStore.get(ACCOUNT)).toBe(records[2]!.paging_token);
+        }
+      }
+    },
+  );
+
+  it('a tokenless record alone leaves the stored cursor as it was', async () => {
+    const first = paymentRecord();
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, [first]);
+    const cursorStore = new InMemoryCursorStore();
+    const layer = createReadLayer({ gateway, cursorStore, onEvent: () => undefined, onMalformed: () => undefined });
+    await layer.pollAccount(ACCOUNT);
+    gateway.payments.get(ACCOUNT)!.push(paymentRecord({ paging_token: undefined }));
+    expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ malformed: 1, cursor: first.paging_token });
+    expect(await cursorStore.get(ACCOUNT)).toBe(first.paging_token);
+  });
+
+  it('reconcile reports a tokenless record as malformed and keeps its last cursor', async () => {
+    const records = [paymentRecord(), paymentRecord({ paging_token: undefined })];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const layer = createReadLayer({
+      gateway,
+      cursorStore: new InMemoryCursorStore(),
+      onEvent: () => undefined,
+      onMalformed: () => undefined,
+    });
+    expect(await layer.reconcile(ACCOUNT)).toMatchObject({ malformed: 1, lastCursor: records[0]!.paging_token });
   });
 
   it('an onMalformed that throws stops the poll with the cursor before that record', async () => {

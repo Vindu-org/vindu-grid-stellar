@@ -1,4 +1,7 @@
-import { InvalidConfigError, InvalidInputError } from '@vindu/grid-core';
+import { type IncomingMessage, type Server, createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { InvalidConfigError, InvalidInputError, canSignReplacement } from '@vindu/grid-core';
+import { createHorizonGateway } from '../src/horizon';
 import { TESTNET_NETWORK_PASSPHRASE } from '../src/networks';
 import { mapResultCodes } from '../src/result-codes';
 import { stellarSdk } from '../src/sdk';
@@ -71,7 +74,7 @@ function run(gateway: FakeGateway, xdr: string, c = clock(), extra: Partial<Para
 const IN_ONE_HOUR = T0 / 1000 + 3600;
 
 /** A ledger Horizon has ingested, closed at `seconds` (unix). */
-const ledgerAt = (seconds: number, sequence = 100) => ({ sequence, closedAt: new Date(seconds * 1000) });
+const ledgerAt = (seconds: number, sequence = 100) => ({ sequence, closedAt: new Date(seconds * 1000), elderLedger: 1 });
 
 describe('submit', () => {
   it('computes the hash locally, equal to the SDK hash and the returned hash', async () => {
@@ -210,7 +213,8 @@ describe('submit', () => {
       status: 'expired_not_landed',
       hash,
       maxTime,
-      checkedLedger: { sequence: 101, closedAt: new Date((maxTime + 5) * 1000).toISOString() },
+      checkedLedger: { sequence: 101, closedAt: new Date((maxTime + 5) * 1000).toISOString(), elderLedger: 1 },
+      ledgerBeforeSubmission: 101,
     });
   });
 
@@ -293,10 +297,11 @@ describe('submit: expiry is decided by the ingested ledger', () => {
       status: 'expired_not_landed',
       hash,
       maxTime,
-      checkedLedger: { sequence: 77, closedAt: new Date((maxTime + 6) * 1000).toISOString() },
+      checkedLedger: { sequence: 77, closedAt: new Date((maxTime + 6) * 1000).toISOString(), elderLedger: 1 },
+      ledgerBeforeSubmission: 77,
     });
-    // The ledger was read before the lookup that found nothing.
-    expect(gateway.ledgerReads).toEqual([0]);
+    // Once before submitting, then before the lookup that found nothing.
+    expect(gateway.ledgerReads).toEqual([0, 0]);
     expect(gateway.transactionLookups).toEqual([hash]);
   });
 
@@ -484,7 +489,7 @@ describe('submit: fee bumps', () => {
     const inner = signedPayment(T0 / 1000 + 60);
     const ours = feeBumped(inner.tx);
     const theirs = feeBumped(inner.tx, '500');
-    const record = { found: true as const, hash: theirs.hash, successful: true, ledger: 7 };
+    const record = { found: true as const, hash: theirs.hash, innerHash: inner.hash, successful: true, ledger: 7 };
     const gateway = new FakeGateway();
     gateway.transactions.set(theirs.hash, record);
     gateway.transactions.set(inner.hash, record);
@@ -534,7 +539,7 @@ describe('submit: fee bumps', () => {
     const theirs = feeBumped(plain.tx);
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
-    gateway.transactions.set(plain.hash, { found: true, hash: theirs.hash, successful: true, ledger: 2 });
+    gateway.transactions.set(plain.hash, { found: true, hash: theirs.hash, innerHash: plain.hash, successful: true, ledger: 2 });
     expect(await run(gateway, plain.xdr)).toEqual({
       status: 'success',
       hash: theirs.hash,
@@ -581,5 +586,368 @@ describe('submit result code mapping', () => {
     const error = mapResultCodes('tx_failed', ['op_underfunded', 'AAAA{"envelope_xdr":"..."}']);
     expect(error).toEqual({ code: 'underfunded', transactionCode: 'tx_failed', operationCodes: ['op_underfunded'] });
     expect(mapResultCodes('<html>', [])).toEqual({ code: 'other', operationCodes: [] });
+  });
+});
+
+describe('submit: ingestion proof', () => {
+  const maxTime = T0 / 1000 + 60;
+
+  /** A timed-out submission with an ingested ledger past maxTime: expiry hinges on the proof. */
+  function pastMaxTime() {
+    const { xdr, hash } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.ledger = ledgerAt(maxTime + 6, 77);
+    return { xdr, hash, gateway };
+  }
+
+  it('the proof holds: expired_not_landed', async () => {
+    const { xdr, gateway } = pastMaxTime();
+    expect((await run(gateway, xdr)).status).toBe('expired_not_landed');
+  });
+
+  it('a not-found lookup without a Latest-Ledger header proves nothing: unknown', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.lookupLedger = null;
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+  });
+
+  it('a not-found lookup from an instance behind the checked ledger proves nothing: unknown', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.lookupLedger = 76;
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+    gateway.lookupLedger = 77;
+    expect((await run(gateway, xdr)).status).toBe('expired_not_landed');
+  });
+
+  it('a fee bump needs both not-found lookups to have ingested the checked ledger', async () => {
+    const inner = signedPayment(maxTime);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.ledger = ledgerAt(maxTime + 6, 77);
+    const lookup = gateway.transaction.bind(gateway);
+    gateway.transaction = async (h) => {
+      const result = await lookup(h);
+      return h === inner.hash ? { found: false, latestLedger: 70 } : result;
+    };
+    expect(await run(gateway, ours.xdr)).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
+  });
+
+  it('an instance whose history starts after the pre-submission ledger proves nothing: unknown', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.ledger = { ...ledgerAt(maxTime + 6, 77), elderLedger: 78 };
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+  });
+
+  it('an instance that does not report its elder ledger proves nothing: unknown', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.ledger = { sequence: 77, closedAt: new Date((maxTime + 6) * 1000) };
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+  });
+
+  it('the elder ledger is compared with the ledger read before the first submission', async () => {
+    const { xdr, gateway } = pastMaxTime();
+    // Before submitting Horizon is at 50; by the check it keeps history from 60 on.
+    gateway.ledger = ledgerAt(maxTime - 30, 50);
+    gateway.submitTransaction = async (signed) => {
+      gateway.submitted.push(signed);
+      gateway.ledger = { ...ledgerAt(maxTime + 6, 77), elderLedger: 60 };
+      return { kind: 'timeout' };
+    };
+    expect((await run(gateway, xdr)).status).toBe('unknown');
+    expect(gateway.ledgerReads.length).toBeGreaterThan(1);
+  });
+
+  it('a failed ledger read before submitting still submits, but never proves expiry', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    const checked = gateway.ledger;
+    let reads = 0;
+    gateway.latestLedger = async () => {
+      reads += 1;
+      if (reads === 1) throw new Error('horizon down');
+      return checked as ReturnType<typeof ledgerAt>;
+    };
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash });
+    expect(gateway.submitted.length).toBeGreaterThan(0);
+  });
+
+  it('records the ledger once, before the first submission', async () => {
+    const { xdr, gateway } = pastMaxTime();
+    const order: string[] = [];
+    const read = gateway.latestLedger.bind(gateway);
+    gateway.latestLedger = async () => {
+      order.push('ledger');
+      return read();
+    };
+    const submit = gateway.submitTransaction.bind(gateway);
+    gateway.submitTransaction = async (signed) => {
+      order.push('submit');
+      return submit(signed);
+    };
+    await run(gateway, xdr);
+    expect(order.slice(0, 2)).toEqual(['ledger', 'submit']);
+    expect(order.filter((o) => o === 'ledger').length).toBe(2);
+  });
+
+  it('with maxWaitMs 0 nothing is read before submitting, so it never expires', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    expect(await run(gateway, xdr, clock(), { maxWaitMs: 0 })).toEqual({ status: 'unknown', hash });
+  });
+});
+
+describe('submit: load-balanced Horizon (real HTTP, default gateway)', () => {
+  // Review probe: two Horizon instances behind one URL. Instance A has
+  // ingested ledger 105 (closed after maxTime); instance B lags at 102. The
+  // transaction landed in ledger 104, before maxTime. The ledger read hits A
+  // and the lookup hits B: without the ingestion proof this was a false
+  // expired_not_landed, and a replacement could be signed.
+  let server: Server;
+  let url: string;
+  const maxTime = Math.floor(Date.now() / 1000) + 30;
+  const { xdr, hash } = signedPayment(maxTime);
+  const instances = {
+    A: { ledger: 105, closed: maxTime + 3, elder: 2, has: true },
+    B: { ledger: 102, closed: maxTime - 6, elder: 2, has: false },
+  };
+  let route: (req: IncomingMessage) => keyof typeof instances;
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      const i = instances[route(req)];
+      res.setHeader('content-type', 'application/hal+json');
+      res.setHeader('Latest-Ledger', String(i.ledger));
+      const path = req.url ?? '';
+      if (path === '/') {
+        res.end(
+          JSON.stringify({
+            history_latest_ledger: i.ledger,
+            history_latest_ledger_closed_at: new Date(i.closed * 1000).toISOString(),
+            history_elder_ledger: i.elder,
+          }),
+        );
+      } else if (path.startsWith('/transactions/') && i.has) {
+        res.end(JSON.stringify({ hash, successful: true, ledger: 104 }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ status: 404, title: 'Resource Missing' }));
+      }
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise((r) => server.close(r));
+  });
+
+  function submitThrough() {
+    const gateway = createHorizonGateway({ horizonUrl: url, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, allowHttp: true });
+    gateway.submitTransaction = async () => ({ kind: 'timeout', status: 504 });
+    return submitSignedTransaction({
+      gateway,
+      signedXdr: xdr,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      maxWaitMs: 1_000,
+      pollIntervalMs: 5_000,
+      sleep: async () => undefined,
+    });
+  }
+
+  it('ledger read on the leading instance, lookup on the lagging one: unknown, never expired_not_landed', async () => {
+    route = (req) => (req.url === '/' ? 'A' : 'B');
+    const result = await submitThrough();
+    expect(result).toEqual({ status: 'unknown', hash });
+    expect(canSignReplacement(result)).toBe(false);
+  });
+
+  it('the same lookup on the leading instance finds the landing', async () => {
+    route = () => 'A';
+    expect(await submitThrough()).toMatchObject({ status: 'success', hash, ledger: 104 });
+  });
+});
+
+describe('submit: Horizon reads time out', () => {
+  const maxTime = T0 / 1000 - 60;
+  const hang = () => new Promise<never>(() => undefined);
+
+  it('a hanging lookup counts as an error, never as not found', async () => {
+    const { xdr, hash } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.ledger = ledgerAt(T0 / 1000);
+    gateway.transaction = hang;
+    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    expect(result).toEqual({ status: 'unknown', hash });
+  });
+
+  it('a hanging ledger read counts as an error and the run still ends', async () => {
+    const { xdr, hash } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.latestLedger = hang;
+    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 10_000 });
+    expect(result).toEqual({ status: 'unknown', hash });
+  });
+
+  it('aborts the signal of a read it gives up on', async () => {
+    const { xdr } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    const signals: AbortSignal[] = [];
+    gateway.transaction = (_h, options) => {
+      if (options?.signal !== undefined) signals.push(options.signal);
+      return hang();
+    };
+    await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((s) => s.aborted)).toBe(true);
+  });
+
+  it.each([Number.NaN, 0, -1, Number.POSITIVE_INFINITY])('fails closed on requestTimeoutMs = %p', async (requestTimeoutMs) => {
+    const { xdr } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    await expect(run(gateway, xdr, clock(), { requestTimeoutMs })).rejects.toThrow(InvalidInputError);
+    expect(gateway.submitted).toEqual([]);
+  });
+});
+
+describe('submit: a broken clock ends the run', () => {
+  it('a clock that returns NaN once after the deadline is fixed ends with unknown, no tight loop', async () => {
+    // Review probe: the deadline used to be read from a second clock call; a
+    // NaN there made `t >= deadline` false forever and the loop spun.
+    const { xdr, hash } = signedPayment(T0 / 1000 + 60);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    let calls = 0;
+    let sleeps = 0;
+    const result = await run(gateway, xdr, clock(), {
+      now: () => (++calls === 2 ? Number.NaN : T0),
+      sleep: async () => {
+        sleeps += 1;
+        if (sleeps > 1_000) throw new Error('tight loop');
+      },
+      resubmit: false,
+      maxWaitMs: 1_000,
+    });
+    expect(result).toEqual({ status: 'unknown', hash });
+    expect(sleeps).toBe(0);
+  });
+
+  it('a clock that never moves ends after maxWaitMs / pollIntervalMs rounds', async () => {
+    const { xdr, hash } = signedPayment(T0 / 1000 + 60);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    let sleeps = 0;
+    const result = await run(gateway, xdr, clock(), {
+      now: () => T0,
+      sleep: async () => {
+        sleeps += 1;
+      },
+      maxWaitMs: 60_000,
+      pollIntervalMs: 5_000,
+    });
+    expect(result).toMatchObject({ status: 'unknown', hash });
+    expect(sleeps).toBe(12);
+  });
+
+  it('a clock that throws mid-way ends with unknown', async () => {
+    const { xdr, hash } = signedPayment(T0 / 1000 + 60);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    let calls = 0;
+    const now = () => {
+      calls += 1;
+      if (calls > 1) throw new Error('clock gone');
+      return T0;
+    };
+    expect(await run(gateway, xdr, clock(), { now })).toEqual({ status: 'unknown', hash });
+    expect(gateway.submitted).toEqual([xdr]);
+  });
+});
+
+describe('submit: a lookup must return our transaction', () => {
+  it('a lookup that returns another hash is unknown with detail, never success', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const other = 'b'.repeat(64);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(hash, { found: true, hash: other, successful: true, ledger: 4 });
+    const result = await run(gateway, xdr);
+    expect(result).toEqual({ status: 'unknown', hash, reason: 'unexpected_lookup_hash', returnedHash: other });
+    expect(canSignReplacement(result)).toBe(false);
+  });
+
+  it('a record with a malformed hash is unknown, and the malformed value is not echoed', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(hash, { found: true, hash: '<script>', successful: true });
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash, reason: 'unexpected_lookup_hash' });
+  });
+
+  it("someone else's fee bump whose inner hash is not ours is unknown", async () => {
+    const plain = signedPayment(IN_ONE_HOUR);
+    const unrelated = signedPayment(IN_ONE_HOUR);
+    const theirs = feeBumped(unrelated.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(plain.hash, { found: true, hash: theirs.hash, innerHash: unrelated.hash, successful: true });
+    expect(await run(gateway, plain.xdr)).toEqual({
+      status: 'unknown',
+      hash: plain.hash,
+      reason: 'unexpected_lookup_hash',
+      returnedHash: theirs.hash,
+      returnedInnerHash: unrelated.hash,
+    });
+  });
+
+  it('a fee bump found by its inner hash, with the inner hash as the record hash: success', async () => {
+    const inner = signedPayment(IN_ONE_HOUR);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(inner.hash, { found: true, hash: inner.hash, successful: true, ledger: 6 });
+    expect(await run(gateway, ours.xdr)).toMatchObject({ status: 'success', hash: inner.hash, foundBy: 'inner_hash' });
+  });
+});
+
+describe('submit: a landed failure keeps its own result codes', () => {
+  it("a resubmission's tx_bad_seq never replaces the landed transaction's codes", async () => {
+    // Review probe: the first submission timed out, the transaction landed
+    // as failed, the resubmission got tx_bad_seq, and the result said bad_seq.
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [
+      { kind: 'timeout' },
+      { kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] },
+    ];
+    gateway.onLookup = (_h, count) => {
+      if (count === 2) {
+        gateway.transactions.set(hash, {
+          found: true,
+          hash,
+          successful: false,
+          ledger: 8,
+          resultCodes: { transaction: 'tx_failed', operations: ['op_underfunded'] },
+        });
+      }
+    };
+    expect(await run(gateway, xdr)).toEqual({
+      status: 'failed',
+      hash,
+      ledger: 8,
+      foundBy: 'hash',
+      error: { code: 'underfunded', transactionCode: 'tx_failed', operationCodes: ['op_underfunded'] },
+    });
+    expect(gateway.submitted.length).toBe(2);
+  });
+
+  it('a first-submission tx_bad_seq on a transaction that landed failed: failed, without the refusal', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] }];
+    gateway.transactions.set(hash, { found: true, hash, successful: false, ledger: 3 });
+    expect(await run(gateway, xdr)).toEqual({ status: 'failed', hash, ledger: 3, foundBy: 'hash' });
   });
 });

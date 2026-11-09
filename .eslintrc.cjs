@@ -1,10 +1,12 @@
 const { builtinModules } = require('node:module');
 
-// Layering: core is pure TypeScript, and the BlindPay client stays free of
-// the Stellar SDK. These overrides make a wrong import a lint error.
+// Layering: core is pure TypeScript, the BlindPay client stays free of the
+// Stellar SDK, and the Stellar layer knows no partner. These overrides make a
+// wrong import a lint error.
 const NODE_BUILTINS = builtinModules.filter((name) => !name.startsWith('_'));
 const PURE_CORE = 'grid-core is pure: no Node built-ins, no Stellar SDK, no other @vindu package, no network.';
 const NO_STELLAR_SDK = 'grid-blindpay must not depend on the Stellar SDK or on grid-stellar.';
+const NO_PARTNER = 'grid-stellar must not depend on a partner adapter such as grid-blindpay.';
 
 /** @type {import('eslint').Linter.Config} */
 module.exports = {
@@ -63,6 +65,18 @@ module.exports = {
               { group: ['@stellar/*', '@stellar/**'], message: NO_STELLAR_SDK },
               { group: ['@vindu/grid-stellar/**'], message: NO_STELLAR_SDK },
             ],
+          },
+        ],
+      },
+    },
+    {
+      files: ['packages/grid-stellar/**'],
+      rules: {
+        'no-restricted-imports': [
+          'error',
+          {
+            paths: [{ name: '@vindu/grid-blindpay', message: NO_PARTNER }],
+            patterns: [{ group: ['@vindu/grid-blindpay/**'], message: NO_PARTNER }],
           },
         ],
       },
