@@ -13,7 +13,7 @@
  * number is spent and nothing moved). Every other status means the first
  * transaction could still land.
  */
-import { type Logger, noopLogger } from '@vindu/grid-core';
+import { InvalidInputError, type Logger, noopLogger } from '@vindu/grid-core';
 import type { HorizonGateway, HorizonSubmitResponse, HorizonTransactionLookup } from './horizon';
 import { type SubmitError, mapResultCodes } from './result-codes';
 import { FeeBumpTransaction, TransactionBuilder } from './sdk';
@@ -64,9 +64,18 @@ export interface SignedTransactionInfo {
   readonly maxTime: number | undefined;
 }
 
-/** Hash and maxTime of a signed envelope, computed locally. Throws on an invalid envelope. */
+/**
+ * Hash and maxTime of a signed envelope, computed locally.
+ *
+ * @throws {InvalidInputError} when the envelope cannot be decoded.
+ */
 export function inspectSignedTransaction(signedXdr: string, networkPassphrase: string): SignedTransactionInfo {
-  const tx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  let tx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    tx = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  } catch {
+    throw new InvalidInputError('signedXdr is not a transaction envelope');
+  }
   const inner = tx instanceof FeeBumpTransaction ? tx.innerTransaction : tx;
   const raw = inner.timeBounds?.maxTime;
   const maxTime = raw === undefined ? 0 : Number(raw);
@@ -77,19 +86,25 @@ const TIMED_OUT = Symbol('timed out');
 
 /**
  * Submits `signedXdr` and returns what is known about it. Never throws for
- * network or Horizon errors; throws only for invalid options or an envelope
- * that cannot be decoded.
+ * network or Horizon errors. Throws, before anything is sent, only for
+ * invalid options or an envelope that cannot be decoded.
+ *
+ * @throws {InvalidInputError} when a duration is not a finite number in
+ * range, the clock does not return a finite number, or the envelope cannot
+ * be decoded.
  */
 export async function submitSignedTransaction(options: SubmitOptions): Promise<SubmitResult> {
   const { gateway, signedXdr } = options;
-  const timeoutMs = positive(options.timeoutMs ?? 30_000, 'timeoutMs');
-  const pollIntervalMs = positive(options.pollIntervalMs ?? 5_000, 'pollIntervalMs');
-  const maxWaitMs = nonNegative(options.maxWaitMs ?? 120_000, 'maxWaitMs');
-  const expiryGraceMs = nonNegative(options.expiryGraceMs ?? 30_000, 'expiryGraceMs');
+  const timeoutMs = duration(options.timeoutMs ?? 30_000, 'timeoutMs', 1);
+  const pollIntervalMs = duration(options.pollIntervalMs ?? 5_000, 'pollIntervalMs', 1);
+  const maxWaitMs = duration(options.maxWaitMs ?? 120_000, 'maxWaitMs', 0);
+  const expiryGraceMs = duration(options.expiryGraceMs ?? 30_000, 'expiryGraceMs', 0);
   const resubmit = options.resubmit ?? true;
   const logger = options.logger ?? noopLogger;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  if (!Number.isFinite(now())) throw new InvalidInputError('now() must return a finite number of milliseconds');
 
   const { hash, maxTime } = inspectSignedTransaction(signedXdr, options.networkPassphrase);
   const expired = (): boolean => maxTime !== undefined && now() > maxTime * 1000 + expiryGraceMs;
@@ -161,10 +176,12 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     if (found !== null && maxTime !== undefined && expired()) {
       return done({ status: 'expired_not_landed', hash, maxTime });
     }
-    if (now() >= deadline) {
+    const t = now();
+    // A clock that stops returning numbers ends the wait instead of looping forever.
+    if (!Number.isFinite(t) || t >= deadline) {
       return done({ status: 'unknown', hash, ...(lastError === undefined ? {} : { lastError }) });
     }
-    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - t)));
     if (resubmit && !expired()) {
       const again = await attempt();
       if (again.kind === 'accepted') {
@@ -176,12 +193,13 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   }
 }
 
-function positive(value: number, name: string): number {
-  if (!Number.isFinite(value) || value <= 0) throw new RangeError(`${name} must be a positive number`);
-  return value;
-}
+/** Longest delay `setTimeout` honours; anything longer fires at once. */
+const MAX_TIMER_MS = 2_147_483_647;
 
-function nonNegative(value: number, name: string): number {
-  if (!Number.isFinite(value) || value < 0) throw new RangeError(`${name} must be zero or more`);
+/** Fails closed: NaN, Infinity, a non-number or a value out of range throws. */
+function duration(value: unknown, name: string, min: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > MAX_TIMER_MS) {
+    throw new InvalidInputError(`${name} must be a finite number of milliseconds from ${min} to ${MAX_TIMER_MS}`);
+  }
   return value;
 }

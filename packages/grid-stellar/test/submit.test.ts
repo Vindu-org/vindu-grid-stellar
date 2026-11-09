@@ -1,3 +1,4 @@
+import { InvalidInputError } from '@vindu/grid-core';
 import { TESTNET_NETWORK_PASSPHRASE } from '../src/networks';
 import { mapResultCodes } from '../src/result-codes';
 import { stellarSdk } from '../src/sdk';
@@ -208,12 +209,47 @@ describe('submit', () => {
     expect(await run(gateway, xdr)).toMatchObject({ status: 'rejected', error: { code: 'underfunded' } });
   });
 
-  it('rejects invalid options and envelopes', async () => {
+  it('rejects invalid options and envelopes before sending anything', async () => {
     const { xdr } = signedPayment(IN_ONE_HOUR);
     const gateway = new FakeGateway();
-    await expect(run(gateway, xdr, clock(), { timeoutMs: 0 })).rejects.toThrow(RangeError);
-    await expect(run(gateway, 'not-xdr')).rejects.toThrow();
+    await expect(run(gateway, xdr, clock(), { timeoutMs: 0 })).rejects.toThrow(InvalidInputError);
+    await expect(run(gateway, 'not-xdr')).rejects.toThrow(InvalidInputError);
     expect(gateway.submitted).toEqual([]);
+  });
+
+  it.each([
+    ['timeoutMs', Number.NaN],
+    ['timeoutMs', Number.POSITIVE_INFINITY],
+    ['timeoutMs', 2 ** 31],
+    ['pollIntervalMs', Number.NaN],
+    ['pollIntervalMs', Number.POSITIVE_INFINITY],
+    ['pollIntervalMs', 0],
+    ['maxWaitMs', Number.NaN],
+    ['maxWaitMs', Number.POSITIVE_INFINITY],
+    ['maxWaitMs', -1],
+  ] as const)('fails closed on %s = %p', async (name, value) => {
+    const { xdr } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    await expect(run(gateway, xdr, clock(), { [name]: value })).rejects.toThrow(InvalidInputError);
+    expect(gateway.submitted).toEqual([]);
+  });
+
+  it('fails closed on a clock that returns NaN, before sending anything', async () => {
+    const { xdr } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    await expect(run(gateway, xdr, clock(), { now: () => Number.NaN })).rejects.toThrow(InvalidInputError);
+    expect(gateway.submitted).toEqual([]);
+  });
+
+  it('ends the wait with unknown when the clock breaks mid-way', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    let calls = 0;
+    const result = await run(gateway, xdr, clock(), { now: () => (++calls > 2 ? Number.NaN : T0) });
+    expect(result).toMatchObject({ status: 'unknown', hash });
   });
 });
 
