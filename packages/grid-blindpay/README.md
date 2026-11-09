@@ -17,7 +17,7 @@ Stellar only (`stellar`, `stellar_testnet`; tokens `USDC`, `USDB`). Other networ
 | Payouts | Payout quote on `/quotes`, Stellar `authorize` (unsigned XDR) and `create`. |
 | Partner fees | Create, list, get, delete. |
 | Payout flow | `runStellarPayout`: authorize, check expiry and state, sign once, optionally submit, create. |
-| Webhooks | `verifyWebhook` (Svix, raw bytes, timestamp window both ways) and `parseWebhookEvent`. |
+| Webhooks | `verifyWebhook` (Svix, raw bytes, timestamp window both ways) and `parseWebhookEvent`. The adapter's async `parseWebhook` puts the Svix timestamp in `deliveredAt`, since it is the delivery time. |
 | Adapter | `createBlindPayAdapter(config, options)` implements the core port. `BLINDPAY_CAPABILITIES` for routing. |
 | Amounts | `toBlindPayAmount` / `fromBlindPayAmount`: exact conversion to 2-decimal minor units. |
 
@@ -38,7 +38,7 @@ The library never reads environment variables. The API key goes only into the `A
 
 Every POST and DELETE sends an `Idempotency-Key`. Pass your own and store it; when you do not, one is generated and returned on the result and on the error. BlindPay keeps keys for 24 hours: same key and body replays the result, a different body is `422 idempotency_key_payload_mismatch`, a running original is `409 idempotency_key_in_flight` (marked `retryable`, with `retryAfterMs`). The client never retries on its own.
 
-After a signed payout may be on Stellar, failures throw `StellarPayoutIncompleteError` with the signed XDR, the hash and the exact create body and key. Retry with `retryStellarPayoutCreate`: it never signs or submits again. An expired quote throws `QuoteExpiredError`: get a fresh quote and authorize again.
+After a signed payout may be on Stellar, failures throw `StellarPayoutIncompleteError` with the signed XDR, the hash and the exact create body and key. Retry with `retryStellarPayoutCreate`: it never signs or submits again. An expired quote throws core's `QuoteExpiredError`: get a fresh quote and authorize again.
 
 ## Amounts
 

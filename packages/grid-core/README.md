@@ -12,14 +12,15 @@ Pure TypeScript. No network calls, no environment reads, no partner code. Partne
 |---|---|
 | Money | `Money = { amount: string; asset: Asset }`. Exact decimal arithmetic on bigint units of 10^-7, so `0.1 + 0.2` is exactly `0.3`. Minor-unit conversion that refuses to round. |
 | Assets | `{ code, issuer? }`. Fiat has no issuer; a Stellar asset is its code plus issuer. |
-| Transfer states | Twelve states, the transition table with labelled reasons, `canTransition` and `transition` (throws `InvalidTransitionError`). |
-| Ports | `PartnerAdapter`: quote and create the funding leg, quote, prepare and execute the payout, read a leg, parse a webhook. |
-| Signer | `Signer.signStellar(account, unsignedXdr, context)`. Keys never enter this library. |
+| Transfer states | Twelve states, the transition table with a reason code and label per rule (failure edges included), `canTransition` and `transition(from, to, reason?)` (throws `InvalidTransitionError`). |
+| Ports | `PartnerAdapter`: quote and create the funding leg, quote, prepare and execute the payout, read a leg (with the partner's amount), parse a webhook (async). `StellarSubmitter`: submit a signed transaction and report a typed outcome. |
+| Signer | `Signer.signStellar(account, unsignedXdr, context)`. Keys never enter this library. `assertSigningAllowed` and `assertMaxTimeWithinQuote` cover the checks that need no Stellar SDK. |
+| Payout flow | `runSignedPayout`: prepare, sign once, submit, then create the partner payout only after a confirmed success. `retryPayoutExecute` repeats a failed create unchanged. |
 | Capabilities | Chains, account model per chain and rails per currency. The registry is data your application passes in. |
 | Routing | `selectRoute`: Stellar route first, best price otherwise. `assertRouteImmutable` keeps the route fixed after the funding leg exists. |
 | Tolerance | `checkPayoutTolerance`: a payout quote outside the tolerance moves the transfer to `needs_attention`. |
 | Observability | `Logger`, `noopLogger`, and the `PartnerCall` shape for `onCall` hooks. |
-| Errors | `GridError` with a stable `code`, and typed subclasses. |
+| Errors | `GridError` with a stable `code`, and typed subclasses shared by every adapter: `InvalidConfigError`, `InvalidInputError`, `QuoteExpiredError`, `PayoutIncompleteError` and more. |
 
 ## Routing
 
@@ -27,8 +28,10 @@ Routing runs once, at quote time:
 
 1. Keep partners where the client is approved and the corridor is supported.
 2. Keep partners with a ready account for the client.
-3. If a Stellar route remains, select it. `stellarPriceLimitBps` is only a safeguard against an abnormal quote: the Stellar route loses only when its price is worse than the best alternative by more than that limit.
+3. If a Stellar route remains, select it. `stellarPriceLimitBps` is only a safeguard against an abnormal quote: the Stellar route loses only when it costs more than the best alternative by more than that limit.
 4. Without a Stellar route, pick the best price.
+
+Prices are compared as cost, source paid per unit of target: a 100 bps gap means the Stellar route needs 1% more source for the same target, whether the partners quoted a fixed source or a fixed target. Only eligible candidates are checked for well-formed prices; the others are reported in `decision.excluded`.
 
 ```ts
 import { selectRoute } from '@vindu/grid-core';
@@ -46,7 +49,33 @@ Store `decision.route` on the transfer. It never changes after the funding leg i
 
 ## Signing
 
-Payouts that need a signature come back from `preparePayout` as an unsigned Stellar transaction. Your signer holds the key. Before it signs, it should decode the transaction and check the amount, the asset, the destination and the transfer state against the `SigningContext` it receives. `assertSigningAllowed` covers the state and quote expiry.
+Payouts that need a signature come back from `preparePayout` as an unsigned Stellar transaction. Your signer holds the key, and it must check what it signs, because the partner built the transaction. Before signing, it:
+
+1. calls `assertSigningAllowed(context, now)`: the transfer is in `awaiting_signature`, the quote has not expired, and the clock is sane;
+2. decodes the XDR for its network;
+3. checks the source account against `context.expected.source`;
+4. checks for one payment to `expected.destination`, in `expected.amount.asset` (code and issuer), for exactly `expected.amount.amount`;
+5. calls `assertMaxTimeWithinQuote(maxTime, context)`: the transaction has a `maxTime`, no later than the quote expiry;
+6. checks the fee against its own cap.
+
+## Payout flow
+
+```ts
+import { PayoutIncompleteError, canSignReplacement, runSignedPayout } from '@vindu/grid-core';
+
+const result = await runSignedPayout({
+  adapter,                       // any PartnerAdapter
+  signer,                        // your key holder
+  submitter,                     // a StellarSubmitter, e.g. from @vindu/grid-stellar
+  submission: 'client_submits',  // or 'partner_submits'
+  context: { transferId, state: 'awaiting_signature', quote, account, destination },
+  now: Date.now,
+  idempotencyKey,                // stored before the call, reused on every retry
+  onSigned: (signedXdr) => store(signedXdr), // keep it before it leaves
+});
+```
+
+The quote must have more than `expiryMarginMs` left (default one minute) before signing and again before submitting. Only a submit outcome of `success` lets the payout be created. Any other outcome throws `PayoutIncompleteError` with `stage: 'submit'` and the outcome: sign a replacement only when `canSignReplacement(outcome)` is true (`failed` or `expired_not_landed`), never while the first transaction could still land (`unknown`, `rejected`). A failed create throws `stage: 'create'` with the exact input and key; pass `error.pending` to `retryPayoutExecute`.
 
 ## License
 
