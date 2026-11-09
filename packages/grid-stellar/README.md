@@ -26,7 +26,7 @@ No environment reads, no keys, no signing. Your signer signs; the network passph
 | Matching | `matchPaymentToLeg` by destination, asset and issuer, exact amount, and source, hash or reference when known. `{ requireSource: true }` refuses legs without a source. `partnerAndChainAgree` for the funded check. |
 | Accounts | `assessReceiveReadiness`: account exists, trustline for the asset and issuer, optional XLM reserve (1 XLM plus 0.5 per trustline). |
 | Submit | `submitSignedTransaction`: hashes computed locally first (outer and inner for a fee bump), hashes checked before any retry, expiry proven by the source account's sequence number as of a ledger past maxTime, typed result codes, a fixed time budget. `inspectSignedTransaction` gives the hashes, maxTime, source account and sequence number of an envelope. `createStellarSubmitter` adapts it to core's `StellarSubmitter` and reports `maxDurationMs`. |
-| Payout check | `assertPayoutXdrMatches(unsignedXdr, context, { networkPassphrase, maxFeeStroops? })`: a key-free check, for signers, that the partner's unsigned transaction is exactly the expected payment. |
+| Payout check | `assertPayoutXdrMatches(unsignedXdr, context, { networkPassphrase, maxFeeStroops?, now? })`: a key-free check, for signers, that the partner's unsigned transaction is exactly the expected payment. |
 
 ## Horizon gateway: what it refuses
 
@@ -133,14 +133,14 @@ import { assertPayoutXdrMatches } from '@vindu/grid-stellar';
 
 async signStellar(account, unsignedXdr, context) {
   assertSigningAllowed(context);   // core: state, quote expiry, clock
-  assertPayoutXdrMatches(unsignedXdr, context, { networkPassphrase, maxFeeStroops: 1_000_000 });
+  assertPayoutXdrMatches(unsignedXdr, context, { networkPassphrase, maxFeeStroops: 1_000_000, now });
   return sign(unsignedXdr);        // under the same networkPassphrase
 }
 ```
 
 It throws `PayoutXdrMismatchError` (code `payout_xdr_mismatch`, with `check` naming the failed check) unless all of these hold:
 
-- the XDR decodes for `networkPassphrase` as a plain transaction, not a fee bump (an envelope does not name its network: sign under the same passphrase, which binds the signature to it);
+- the XDR decodes for `networkPassphrase` as a plain transaction, not a fee bump;
 - exactly one operation, a `payment`;
 - the transaction source is `context.expected.source`;
 - the operation has no source, or the same account, including a muxed `M...` form of it;
@@ -148,7 +148,10 @@ It throws `PayoutXdrMismatchError` (code `payout_xdr_mismatch`, with `check` nam
 - the asset code and issuer, and the exact amount, are `expected.amount`;
 - the total fee is at most `maxFeeStroops` (default 1 000 000 stroops);
 - a `maxTime` greater than 0 and no later than the quote expiry (core's `assertMaxTimeWithinQuote`);
+- a `minTime` of zero (or none), or no later than now (check `min_time`): a transaction that cannot land yet would hold the payout back while the quote runs out. `now` defaults to `Date.now` and is read only when there is a `minTime`; a clock that is not a finite number throws `InvalidConfigError`;
 - none of the newer preconditions: minimum account sequence, its age or ledger gap, extra signers, ledger bounds (unset or zero only).
+
+**The network cannot be checked from an unsigned envelope.** An envelope does not name its network: the same bytes decode under any passphrase, so a transaction built for another network passes these checks. What binds it to one network is the signature: the signer signs the hash computed for the passphrase it signs under, and that signature is valid on that network only. Sign under the same `networkPassphrase` you pass here.
 
 ## Testing
 
