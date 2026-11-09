@@ -37,14 +37,15 @@ function setup() {
       t += ms;
     },
   });
-  return { ledger, signed, submitter };
+  return { ledger, signed, submitter, client: client.publicKey() };
 }
 
 describe('FakeHorizon', () => {
-  it('reports its own ingestion: the elder ledger, and the latest ledger on every lookup', async () => {
-    const { ledger } = setup();
-    expect(await ledger.latestLedger()).toMatchObject({ sequence: 1000, elderLedger: 1 });
+  it('reports its own ingestion: the latest ledger on every lookup and account read', async () => {
+    const { ledger, client } = setup();
+    expect(await ledger.latestLedger()).toMatchObject({ sequence: 1000 });
     expect(await ledger.transaction('ab'.repeat(32))).toEqual({ found: false, latestLedger: 1000 });
+    expect(await ledger.account(client)).toMatchObject({ sequence: '100', latestLedger: 1000 });
   });
 
   it('lets the submitter prove a lost transaction expired, with the full ingestion evidence', async () => {
@@ -53,7 +54,7 @@ describe('FakeHorizon', () => {
     const outcome = await submitter.submit(signed(Math.floor(T0 / 1000) + 1));
     expect(outcome).toMatchObject({
       status: 'expired_not_landed',
-      detail: { checkedLedger: { sequence: 1000, elderLedger: 1 }, ledgerBeforeSubmission: 1000 },
+      detail: { checkedLedger: { sequence: 1000 }, sourceAccount: { sequence: '100', latestLedger: 1000 } },
     });
   });
 

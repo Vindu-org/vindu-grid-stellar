@@ -8,11 +8,11 @@
  * payment so the read layer can see it. It does not track balances.
  *
  * It reports what a real instance reports about its own ingestion, so the
- * submitter's proof runs in full: `latestLedger()` gives the oldest ledger
- * it keeps (`elderLedger`, Horizon's `history_elder_ledger`), and every
- * transaction lookup gives the latest ledger it had ingested (`latestLedger`,
- * Horizon's `Latest-Ledger` header). It is one instance, never a load
- * balancer: the ledger read and the lookups always agree.
+ * submitter's proof runs in full: every transaction lookup and account read
+ * gives the latest ledger it had ingested (`latestLedger`, Horizon's
+ * `Latest-Ledger` header), and an applied transaction uses its source
+ * account's sequence number. It is one instance, never a load balancer: the
+ * ledger read, the lookups and the account reads always agree.
  *
  * `timeOutNextSubmission()` makes the next submission land on the ledger but
  * answer like a Horizon 504, to show what the submitter does when it does
@@ -44,8 +44,6 @@ export class FakeHorizon implements HorizonGateway {
   private readonly records: HorizonPaymentRecord[] = [];
   private readonly transactions = new Map<string, HorizonTransactionFound>();
   private ledger = 1000;
-  /** The oldest ledger this instance keeps history for. */
-  private readonly elderLedger = 1;
   private timeoutNext = false;
   private loseNext = false;
   private rejectNext: string | undefined;
@@ -79,13 +77,9 @@ export class FakeHorizon implements HorizonGateway {
     this.rejectNext = transactionCode;
   }
 
-  /** The newest ledger, closed at the demo clock's current second, and the oldest kept. */
+  /** The newest ledger, closed at the demo clock's current second. */
   async latestLedger(): Promise<HorizonLedger> {
-    return {
-      sequence: this.ledger,
-      closedAt: new Date(Math.floor(this.now() / 1000) * 1000),
-      elderLedger: this.elderLedger,
-    };
+    return { sequence: this.ledger, closedAt: new Date(Math.floor(this.now() / 1000) * 1000) };
   }
 
   async paymentsForAccount(account: string, query: PaymentsQuery): Promise<readonly HorizonPaymentRecord[]> {
@@ -121,8 +115,10 @@ export class FakeHorizon implements HorizonGateway {
     return applied;
   }
 
+  /** The account, with the latest ledger ingested when it was read. */
   async account(address: string): Promise<HorizonAccount | null> {
-    return this.accounts.get(address) ?? null;
+    const account = this.accounts.get(address);
+    return account === undefined ? null : { ...account, latestLedger: this.ledger };
   }
 
   private apply(signedXdr: string): HorizonSubmitResponse {
