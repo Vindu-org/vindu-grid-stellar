@@ -75,6 +75,11 @@ export interface FundingQuoteInput {
   readonly rail: FundingRail;
   /** Platform spread on the funding leg, in basis points. It is locked with this quote. */
   readonly spreadBps?: number;
+  /**
+   * Tax ids allowed to pay the funding leg, for partners that can restrict the
+   * payer (e.g. a PIX payment must come from the client's own account).
+   */
+  readonly allowedPayerTaxIds?: readonly string[];
 }
 
 export interface CreateFundingInput {
