@@ -9,6 +9,9 @@ export const CUSTOMER_ID = 're_000000000000';
 export const WALLET_ID = 'bw_000000000000';
 export const BANK_ACCOUNT_ID = 'ba_000000000000';
 export const STELLAR_ADDRESS = `G${'A'.repeat(55)}`;
+/** Fake issuers, shaped like Stellar account ids. */
+export const USDC_ISSUER = `G${'C'.repeat(55)}`;
+export const USDB_ISSUER = `G${'D'.repeat(55)}`;
 
 export interface RecordedCall {
   readonly url: string;

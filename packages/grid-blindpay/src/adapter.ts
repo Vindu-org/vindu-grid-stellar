@@ -28,7 +28,8 @@ import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
 import type { SignedTransactionField } from './stellar-payout-flow';
-import type { BlindPayNetwork, StellarToken, Tracking } from './types';
+import { type StablecoinIssuers, stablecoins } from './tokens';
+import type { BlindPayNetwork, Tracking } from './types';
 import { assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
 export interface BlindPayAdapterOptions {
@@ -41,6 +42,13 @@ export interface BlindPayAdapterOptions {
   readonly partnerId?: string;
   /** `stellar` in production, `stellar_testnet` on a development instance. */
   readonly network: BlindPayNetwork;
+  /**
+   * Issuer (G...) of each stablecoin this adapter may move. Assets are matched
+   * by code AND issuer: a quote for USDC from another issuer, or for a token
+   * with no issuer here, is refused. `USDB` is accepted on `stellar_testnet`
+   * only. Leg amounts are reported only for tokens listed here.
+   */
+  readonly assetIssuers?: StablecoinIssuers;
   /** `whsec_...`. Required for `parseWebhook`. */
   readonly webhookSecret?: string;
   readonly webhookToleranceSec?: number;
@@ -62,12 +70,11 @@ export interface BlindPayAdapter extends PartnerAdapter {
   readonly client: BlindPayClient;
 }
 
-const TOKENS: readonly string[] = ['USDC', 'USDB'];
-
 export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayAdapterOptions): BlindPayAdapter {
   if (options.network !== 'stellar' && options.network !== 'stellar_testnet') {
     throw new InvalidConfigError('network must be stellar or stellar_testnet');
   }
+  const coins = stablecoins(options.network, options.assetIssuers);
   if (options.webhookToleranceSec !== undefined) assertWebhookTolerance(options.webhookToleranceSec);
   const partnerId = assertPartnerId(options.partnerId ?? config.partnerId ?? BLINDPAY_PARTNER_ID);
   const client = options.client ?? createBlindPayClient({ ...config, partnerId });
@@ -102,7 +109,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         cover_fees: coverFees,
         request_amount: toBlindPayAmount(input.source),
         payment_method: 'pix',
-        token: token(input.targetAsset),
+        token: coins.tokenFor(input.targetAsset),
         ...(input.allowedPayerTaxIds === undefined ? {} : { payer_rules: { pix_allowed_tax_ids: input.allowedPayerTaxIds } }),
         ...feeId('funding', input.spreadBps),
       });
@@ -136,7 +143,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         cover_fees: coverFees,
         request_amount: toBlindPayAmount(input.source),
         network: options.network,
-        token: token(input.source.asset),
+        token: coins.tokenFor(input.source.asset),
         ...feeId('payout', undefined),
       });
       return legQuote(partnerId, 'payout', res.data, input.source.asset, input.targetAsset);
@@ -209,11 +216,6 @@ export function toLegStatus(status: unknown): LegStatusValue {
     default:
       return 'unknown';
   }
-}
-
-function token(asset: Asset): StellarToken {
-  if (!TOKENS.includes(asset.code)) throw new InvalidInputError(`Token ${asset.code} is not supported; use USDC or USDB`);
-  return asset.code as StellarToken;
 }
 
 function hashOf(tracking: Tracking | undefined): string | undefined {

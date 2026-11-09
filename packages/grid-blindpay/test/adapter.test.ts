@@ -1,14 +1,16 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
-import { type AccountRef, InvalidConfigError, InvalidInputError, type LegQuote, fiat, money } from '@vindu/grid-core';
+import { type AccountRef, InvalidConfigError, InvalidInputError, type LegQuote, fiat, money, stellarAsset } from '@vindu/grid-core';
 
 import { DEV_SENTINEL_AMOUNTS } from '../src/amounts';
 import { type BlindPayAdapterOptions, createBlindPayAdapter, toLegStatus } from '../src/adapter';
 import { WebhookVerificationError } from '../src/webhooks';
-import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, WALLET_ID, config, mockFetch } from './helpers';
+import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, USDB_ISSUER, USDC_ISSUER, WALLET_ID, config, mockFetch } from './helpers';
 
 const NOW = Date.parse('2030-01-01T00:00:00Z');
-const usdb = fiat('USDB');
+const usdb = stellarAsset('USDB', USDB_ISSUER);
+const usdc = stellarAsset('USDC', USDC_ISSUER);
+const ISSUERS = { USDB: USDB_ISSUER, USDC: USDC_ISSUER } as const;
 const brl = fiat('BRL');
 const usd = fiat('USD');
 const account: AccountRef = { chain: 'stellar', address: STELLAR_ADDRESS, partnerAccountId: WALLET_ID };
@@ -62,7 +64,7 @@ function setup(extra: Partial<BlindPayAdapterOptions> = {}) {
   const dev = devInstance();
   const { fetch, calls } = mockFetch(dev.handler);
   const adapter = createBlindPayAdapter(config(fetch, { now: () => NOW }), {
-    network: 'stellar_testnet', webhookSecret: SECRET, ...extra,
+    network: 'stellar_testnet', webhookSecret: SECRET, assetIssuers: ISSUERS, ...extra,
   });
   return { adapter, calls };
 }
@@ -148,6 +150,8 @@ describe('adapter', () => {
     await expect(adapter.quoteFunding({ ...base, rail: 'ted' })).rejects.toThrow(InvalidInputError);
     await expect(adapter.quoteFunding({ ...base, source: money('100.001', brl) })).rejects.toThrow(/sub-cent/);
     await expect(adapter.quoteFunding({ ...base, targetAsset: fiat('EURC') })).rejects.toThrow(/USDC or USDB/);
+    await expect(adapter.quoteFunding({ ...base, targetAsset: fiat('USDB') })).rejects.toThrow(/issuer/);
+    await expect(adapter.quoteFunding({ ...base, targetAsset: stellarAsset('USDC', STELLAR_ADDRESS) })).rejects.toThrow(/issuer/);
     await expect(adapter.quoteFunding({ ...base, account: { chain: 'stellar', address: STELLAR_ADDRESS } })).rejects.toThrow(/bw_/);
     const payout = { customerId: CUSTOMER_ID, account, source: money('100', usdb), targetAsset: usd, beneficiaryId: BANK_ACCOUNT_ID } as const;
     await expect(adapter.quotePayout({ ...payout, rail: 'sepa' })).rejects.toThrow(/not supported/);
@@ -163,13 +167,48 @@ describe('adapter', () => {
   });
 });
 
+describe('adapter stablecoins', () => {
+  const fundingInput = { customerId: CUSTOMER_ID, account, source: money('100', brl), rail: 'pix' } as const;
+  const payoutInput = { customerId: CUSTOMER_ID, account, targetAsset: usd, rail: 'wire', beneficiaryId: BANK_ACCOUNT_ID } as const;
+
+  it('quotes USDC by code and issuer on both networks', async () => {
+    for (const network of ['stellar', 'stellar_testnet'] as const) {
+      const { adapter, calls } = setup({ network, assetIssuers: network === 'stellar' ? { USDC: USDC_ISSUER } : ISSUERS });
+      await adapter.quoteFunding({ ...fundingInput, targetAsset: usdc });
+      await adapter.quotePayout({ ...payoutInput, source: money('100', usdc) });
+      expect(calls.map((c) => (c.body as { token: string }).token)).toEqual(['USDC', 'USDC']);
+    }
+  });
+
+  it('refuses USDB on mainnet, in the options and in a quote', async () => {
+    expect(() => setup({ network: 'stellar', assetIssuers: ISSUERS })).toThrow(InvalidConfigError);
+    const { adapter, calls } = setup({ network: 'stellar', assetIssuers: { USDC: USDC_ISSUER } });
+    await expect(adapter.quoteFunding({ ...fundingInput, targetAsset: usdb })).rejects.toThrow(/not supported on stellar/);
+    await expect(adapter.quotePayout({ ...payoutInput, source: money('100', usdb) })).rejects.toThrow(InvalidInputError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses USDC without the expected issuer, and a token whose issuer is not configured', async () => {
+    const { adapter, calls } = setup({ assetIssuers: { USDB: USDB_ISSUER } });
+    await expect(adapter.quoteFunding({ ...fundingInput, targetAsset: usdc })).rejects.toThrow(InvalidConfigError);
+    const configured = setup().adapter;
+    await expect(configured.quoteFunding({ ...fundingInput, targetAsset: fiat('USDC') })).rejects.toThrow(InvalidInputError);
+    await expect(configured.quotePayout({ ...payoutInput, source: money('100', stellarAsset('USDC', USDB_ISSUER)) })).rejects.toThrow(/issuer/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses an issuer that is not a Stellar account id', () => {
+    expect(() => setup({ assetIssuers: { USDC: 'not-an-issuer' } })).toThrow(InvalidConfigError);
+  });
+});
+
 describe('adapter partner id', () => {
   it('uses partnerId in quotes, refs, events, errors and onCall reports', async () => {
     const dev = devInstance();
     const reports: unknown[] = [];
     const { fetch } = mockFetch(dev.handler);
     const adapter = createBlindPayAdapter(config(fetch, { now: () => NOW, onCall: (c) => reports.push(c) }), {
-      network: 'stellar_testnet', webhookSecret: SECRET, partnerId: 'blindpay-br',
+      network: 'stellar_testnet', webhookSecret: SECRET, assetIssuers: ISSUERS, partnerId: 'blindpay-br',
     });
     expect(adapter.id).toBe('blindpay-br');
     const { fq, funding, pq, payout } = await fundAndPayOut(adapter, '500', '100');
