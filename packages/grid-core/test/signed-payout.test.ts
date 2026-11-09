@@ -440,6 +440,12 @@ describe('signed payout', () => {
       expect(state).toBe(from);
       expect(transition(from, to, reason)).toMatchObject({ from, to, reason });
     });
+
+    it('is the same table as the README', () => {
+      const readme = readFileSync(join(__dirname, '../README.md'), 'utf8');
+      const key = (e: DocumentedEdge) => `${e.state} ${e.from} ${e.to} ${e.reason}`;
+      expect(documentedEdges(readme).map(key)).toEqual(edges.map(key));
+    });
   });
 
   describe('onAuthorized', () => {
