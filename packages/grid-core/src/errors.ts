@@ -14,6 +14,7 @@ export type CoreErrorCode =
   | 'route_immutable'
   | 'tolerance_exceeded'
   | 'signing_not_allowed'
+  | 'signer_refused'
   | 'partner_http'
   | 'invalid_config'
   | 'invalid_input'
@@ -210,10 +211,51 @@ function codeOf(cause: unknown): string | undefined {
   return typeof code === 'string' && CAUSE_CODE_RE.test(code) ? code : undefined;
 }
 
-/** A signer refused to sign, or was asked to sign in a state where signing is not allowed. */
+/**
+ * Signing is not allowed in the transfer's stored state.
+ *
+ * In the payout flow it means one thing: `onAuthorized` returned a state
+ * other than `awaiting_signature`. Nothing was signed, and it has no edge of
+ * its own: the stored state is not what the flow expected, so an operator
+ * looks first. Signers also throw it (through {@link assertSigningAllowed}
+ * and their own checks) to refuse; the payout flow wraps whatever a signer
+ * throws in {@link SignerRefusedError}.
+ */
 export class SigningNotAllowedError extends GridError {
   constructor(message: string) {
     super('signing_not_allowed', message);
+  }
+}
+
+/** How the signer failed: it threw or rejected, or it returned no signed transaction. */
+export type SignerRefusalKind = 'threw' | 'invalid_result';
+
+/**
+ * The signer did not return a signed transaction: it refused (a check
+ * failed), it broke (e.g. a custodian timeout), or it returned something
+ * that is not a signed XDR. Nothing was submitted or sent to the partner.
+ * The transfer is in `awaiting_signature`: take
+ * `awaiting_signature -> needs_attention` (`signer_refused`).
+ *
+ * It keeps the cause's `code` when it has a plain one (e.g.
+ * `signing_not_allowed`), never its message or the error itself: a signer's
+ * error text can quote the transaction or client data.
+ */
+export class SignerRefusedError extends GridError {
+  readonly failure: SignerRefusalKind;
+  /** The `code` of what the signer threw, when it had a plain one. */
+  readonly causeCode: string | undefined;
+
+  constructor(failure: SignerRefusalKind, cause?: unknown) {
+    const causeCode = failure === 'threw' ? codeOf(cause) : undefined;
+    super(
+      'signer_refused',
+      failure === 'threw'
+        ? `The signer refused or failed (${causeCode ?? 'no code'}): nothing was submitted`
+        : 'The signer returned no signed transaction: nothing was submitted',
+    );
+    this.failure = failure;
+    this.causeCode = causeCode;
   }
 }
 

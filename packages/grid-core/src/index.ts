@@ -47,6 +47,8 @@ export {
   type RouteExclusion,
   RouteImmutableError,
   RouteNotFoundError,
+  type SignerRefusalKind,
+  SignerRefusedError,
   SigningNotAllowedError,
   ToleranceExceededError,
   WebhookRejectedError,

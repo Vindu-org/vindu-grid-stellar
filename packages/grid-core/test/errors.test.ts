@@ -8,6 +8,8 @@ import {
   PayoutAuthorizationError,
   PayoutIncompleteError,
   QuoteExpiredError,
+  SignerRefusedError,
+  SigningNotAllowedError,
   WebhookRejectedError,
 } from '../src/errors';
 
@@ -129,5 +131,35 @@ describe('shared errors', () => {
     const e = new PayoutAuthorizationError('invalid_authorization');
     expect(e).toMatchObject({ failure: 'invalid_authorization', causeCode: undefined });
     expect(e.message).toMatch(/does not know: nothing was signed/);
+  });
+
+  it('a signer refusal keeps a plain cause code, never the message or the error', () => {
+    const refused = new SignerRefusedError('threw', new SigningNotAllowedError('pays GXYZ of Jane Doe'));
+    expect(refused).toBeInstanceOf(GridError);
+    expect(refused).toMatchObject({
+      code: 'signer_refused',
+      name: 'SignerRefusedError',
+      failure: 'threw',
+      causeCode: 'signing_not_allowed',
+    });
+    expect(refused.cause).toBeUndefined();
+    expect(JSON.stringify({ ...refused, message: refused.message })).not.toMatch(/Jane|GXYZ/);
+  });
+
+  it.each<[string, unknown]>([
+    ['a plain Error', new Error('custodian timeout for Jane')],
+    ['a rejected string', 'Jane'],
+    ['a code with free text', { code: 'Jane Doe 123' }],
+    ['nothing', undefined],
+  ])('a signer refusal from %s has no cause code', (_name, cause) => {
+    const e = new SignerRefusedError('threw', cause);
+    expect(e.causeCode).toBeUndefined();
+    expect(e.message).toBe('The signer refused or failed (no code): nothing was submitted');
+  });
+
+  it('a signer that returned no transaction says so', () => {
+    const e = new SignerRefusedError('invalid_result');
+    expect(e).toMatchObject({ failure: 'invalid_result', causeCode: undefined });
+    expect(e.message).toMatch(/no signed transaction/);
   });
 });

@@ -32,6 +32,7 @@ describe('index exports', () => {
     'PayoutAuthorizationError',
     'PayoutIncompleteError',
     'WebhookRejectedError',
+    'SignerRefusedError',
   ])('exports %s', (name) => {
     expect(core).toHaveProperty(name);
   });
