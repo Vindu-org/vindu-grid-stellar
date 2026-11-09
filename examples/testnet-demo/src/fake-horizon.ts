@@ -7,6 +7,13 @@
  * signature, the sequence number and the time bounds, and records the
  * payment so the read layer can see it. It does not track balances.
  *
+ * It reports what a real instance reports about its own ingestion, so the
+ * submitter's proof runs in full: `latestLedger()` gives the oldest ledger
+ * it keeps (`elderLedger`, Horizon's `history_elder_ledger`), and every
+ * transaction lookup gives the latest ledger it had ingested (`latestLedger`,
+ * Horizon's `Latest-Ledger` header). It is one instance, never a load
+ * balancer: the ledger read and the lookups always agree.
+ *
  * `timeOutNextSubmission()` makes the next submission land on the ledger but
  * answer like a Horizon 504, to show what the submitter does when it does
  * not know whether a transaction landed. `rejectNextSubmission()` makes the
@@ -35,6 +42,8 @@ export class FakeHorizon implements HorizonGateway {
   private readonly records: HorizonPaymentRecord[] = [];
   private readonly transactions = new Map<string, HorizonTransactionFound>();
   private ledger = 1000;
+  /** The oldest ledger this instance keeps history for. */
+  private readonly elderLedger = 1;
   private timeoutNext = false;
   private rejectNext: string | undefined;
   /** Every envelope submitted, in order. */
@@ -62,9 +71,13 @@ export class FakeHorizon implements HorizonGateway {
     this.rejectNext = transactionCode;
   }
 
-  /** The newest ledger, closed at the demo clock's current second. */
+  /** The newest ledger, closed at the demo clock's current second, and the oldest kept. */
   async latestLedger(): Promise<HorizonLedger> {
-    return { sequence: this.ledger, closedAt: new Date(Math.floor(this.now() / 1000) * 1000) };
+    return {
+      sequence: this.ledger,
+      closedAt: new Date(Math.floor(this.now() / 1000) * 1000),
+      elderLedger: this.elderLedger,
+    };
   }
 
   async paymentsForAccount(account: string, query: PaymentsQuery): Promise<readonly HorizonPaymentRecord[]> {
@@ -74,9 +87,10 @@ export class FakeHorizon implements HorizonGateway {
     return ordered.slice(start, start + query.limit);
   }
 
+  /** The transaction, with the latest ledger ingested when it was looked up. */
   async transaction(hash: string): Promise<HorizonTransactionLookup> {
     this.lookups.push(hash);
-    return this.transactions.get(hash) ?? { found: false };
+    return { ...(this.transactions.get(hash) ?? { found: false }), latestLedger: this.ledger };
   }
 
   async submitTransaction(signedXdr: string): Promise<HorizonSubmitResponse> {
