@@ -173,7 +173,20 @@ export interface PayinQuote extends QuoteAmounts {
   readonly is_otc?: boolean;
 }
 
-export interface Payin {
+/**
+ * Fields BlindPay may send on a payin or payout that the docs read so far do
+ * not list. UNCONFIRMED: used when present, never required.
+ */
+interface UnconfirmedLegFields {
+  /** The stablecoin moved, e.g. `USDC`. */
+  readonly token?: string;
+  readonly network?: string;
+  /** ISO-8601 instant of the last change. */
+  readonly updated_at?: string;
+  readonly created_at?: string;
+}
+
+export interface Payin extends UnconfirmedLegFields {
   readonly id: string;
   readonly status: TransferStatus;
   readonly customer_id?: string;
@@ -223,10 +236,17 @@ export interface CreateStellarPayoutRequest {
   readonly sender_wallet_address: string;
 }
 
-/** Response shape assumed to match a payout (UNCONFIRMED for the Stellar create call). */
-export interface Payout {
+/**
+ * Response shape assumed to match a payout (UNCONFIRMED for the Stellar create
+ * call). As on a payout quote, `sender` is the stablecoin and `receiver` the fiat.
+ */
+export interface Payout extends UnconfirmedLegFields {
   readonly id: string;
   readonly status: TransferStatus;
+  /** Stablecoin taken from the wallet, minor units. */
+  readonly sender_amount?: number;
+  /** Fiat delivered to the bank account, minor units. */
+  readonly receiver_amount?: number;
   readonly sender_wallet_address?: string;
   readonly customer_id?: string;
   readonly bank_account_id?: string;
