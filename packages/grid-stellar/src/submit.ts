@@ -10,6 +10,10 @@
  * network fails, the hashes are checked on Horizon before anything else. Resubmitting the same signed envelope is safe (Stellar
  * applies a transaction once); asking for a new signature is never done here.
  *
+ * Horizon's answer is checked too: an accepted submission whose hash is not
+ * the locally computed envelope hash is `rejected` with reason
+ * `hash_mismatch`, never `success`.
+ *
  * **Do not sign a replacement unless the status is `expired_not_landed`**
  * (the transaction's maxTime has passed and it is not on the ledger, so it
  * can never land) or `failed` (it is in a ledger as failed: its sequence
@@ -47,7 +51,27 @@ export type SubmitResult =
   /** In a ledger but failed: the fee and sequence number are spent and nothing moved. */
   | ({ readonly status: 'failed'; readonly error?: SubmitError } & Landed)
   /** Horizon refused it and it is not on the ledger yet. It may still land until its maxTime: do not re-sign. */
-  | { readonly status: 'rejected'; readonly hash: string; readonly innerHash?: string; readonly error: SubmitError }
+  | {
+      readonly status: 'rejected';
+      readonly reason: 'refused';
+      readonly hash: string;
+      readonly innerHash?: string;
+      readonly error: SubmitError;
+    }
+  /**
+   * Horizon accepted the envelope but answered with a hash that is not the
+   * locally computed one. Something is misconfigured (another network) or
+   * the answer cannot be trusted. Never a success: the payment may or may
+   * not have moved. Do not re-sign; settle it by hand.
+   */
+  | {
+      readonly status: 'rejected';
+      readonly reason: 'hash_mismatch';
+      readonly hash: string;
+      readonly innerHash?: string;
+      /** The hash Horizon answered with. */
+      readonly returnedHash: string;
+    }
   /** Not found, and it could still land (maxTime not passed, or no maxTime). Check again later; do not re-sign. */
   | { readonly status: 'unknown'; readonly hash: string; readonly innerHash?: string; readonly lastError?: SubmitError }
   /** maxTime has passed and it is not on the ledger. It can never land: a replacement may be signed. */
@@ -211,7 +235,13 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   };
 
   const fromAccepted = (accepted: Extract<HorizonSubmitResponse, { kind: 'accepted' }>): SubmitResult => {
-    if (accepted.hash !== hash) logger.warn('Horizon returned a different hash', { hash, returned: accepted.hash });
+    // Horizon answers with the hash of the envelope it applied, which for a
+    // fee bump is the outer hash. Anything else is an error, never a success.
+    if (typeof accepted.hash !== 'string' || accepted.hash.toLowerCase() !== hash) {
+      const returnedHash = String(accepted.hash);
+      logger.error('Horizon returned a different hash', { hash, returned: returnedHash });
+      return { status: 'rejected', reason: 'hash_mismatch', hash, ...inner, returnedHash };
+    }
     const ledger = accepted.ledger === undefined ? {} : { ledger: accepted.ledger };
     return { status: accepted.successful ? 'success' : 'failed', hash, ...inner, ...ledger };
   };
@@ -229,7 +259,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
       return done({ status: 'expired_not_landed', hash, ...inner, maxTime });
     }
     logger.warn('stellar submission rejected', { hash, code: error.code });
-    return done({ status: 'rejected', hash, ...inner, error });
+    return done({ status: 'rejected', reason: 'refused', hash, ...inner, error });
   }
 
   // Timed out or no answer: the transaction may be on its way. Check the

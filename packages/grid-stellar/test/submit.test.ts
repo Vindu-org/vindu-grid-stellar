@@ -186,6 +186,7 @@ describe('submit', () => {
     const result = await run(gateway, xdr);
     expect(result).toEqual({
       status: 'rejected',
+      reason: 'refused',
       hash,
       error: { code: 'bad_seq', transactionCode: 'tx_bad_seq', operationCodes: [] },
     });
@@ -274,6 +275,49 @@ describe('submit', () => {
     let calls = 0;
     const result = await run(gateway, xdr, clock(), { now: () => (++calls > 2 ? Number.NaN : T0) });
     expect(result).toMatchObject({ status: 'unknown', hash });
+  });
+});
+
+describe('submit: hash mismatch', () => {
+  it('an accepted answer with another hash is rejected as hash_mismatch, never success', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const other = 'ab'.repeat(32);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'accepted', hash: other, ledger: 7, successful: true }];
+    const errors: string[] = [];
+    const logger = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: (m: string) => errors.push(m) };
+    const result = await run(gateway, xdr, clock(), { logger });
+    expect(result).toEqual({ status: 'rejected', reason: 'hash_mismatch', hash, returnedHash: other });
+    expect(result.status).not.toBe('success');
+    expect(errors).toEqual(['Horizon returned a different hash']);
+  });
+
+  it('a fee bump accepted under its inner hash is a mismatch: Horizon answers with the outer hash', async () => {
+    const inner = signedPayment(IN_ONE_HOUR);
+    const ours = feeBumped(inner.tx);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'accepted', hash: inner.hash, successful: true }];
+    expect(await run(gateway, ours.xdr)).toEqual({
+      status: 'rejected',
+      reason: 'hash_mismatch',
+      hash: ours.hash,
+      innerHash: inner.hash,
+      returnedHash: inner.hash,
+    });
+  });
+
+  it('a resubmission accepted under another hash is a mismatch too', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }, { kind: 'accepted', hash: 'cd'.repeat(32), successful: false }];
+    expect(await run(gateway, xdr)).toMatchObject({ status: 'rejected', reason: 'hash_mismatch', hash });
+  });
+
+  it('accepts the same hash in upper case', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'accepted', hash: hash.toUpperCase(), successful: true }];
+    expect(await run(gateway, xdr)).toEqual({ status: 'success', hash });
   });
 });
 
