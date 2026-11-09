@@ -13,7 +13,7 @@
  * number is spent and nothing moved). Every other status means the first
  * transaction could still land.
  */
-import { InvalidInputError, type Logger, noopLogger } from '@vindu/grid-core';
+import { InvalidConfigError, InvalidInputError, type Logger, noopLogger } from '@vindu/grid-core';
 import type { HorizonGateway, HorizonSubmitResponse, HorizonTransactionLookup } from './horizon';
 import { type SubmitError, mapResultCodes } from './result-codes';
 import { FeeBumpTransaction, TransactionBuilder } from './sdk';
@@ -36,7 +36,10 @@ export interface SubmitOptions {
   readonly gateway: HorizonGateway;
   /** Signed transaction envelope, base64 XDR. */
   readonly signedXdr: string;
-  /** Network passphrase the envelope was signed for. The hash depends on it. */
+  /**
+   * Network passphrase the envelope was signed for. The hash depends on it,
+   * so it must equal the gateway's `networkPassphrase`.
+   */
   readonly networkPassphrase: string;
   /** Longest wait for one submission before treating it as timed out. Default 30 s. */
   readonly timeoutMs?: number;
@@ -89,12 +92,15 @@ const TIMED_OUT = Symbol('timed out');
  * network or Horizon errors. Throws, before anything is sent, only for
  * invalid options or an envelope that cannot be decoded.
  *
+ * @throws {InvalidConfigError} when the gateway's network passphrase is not
+ * `networkPassphrase`: the locally computed hash would never be found.
  * @throws {InvalidInputError} when a duration is not a finite number in
  * range, the clock does not return a finite number, or the envelope cannot
  * be decoded.
  */
 export async function submitSignedTransaction(options: SubmitOptions): Promise<SubmitResult> {
   const { gateway, signedXdr } = options;
+  assertSameNetwork(gateway, options.networkPassphrase);
   const timeoutMs = duration(options.timeoutMs ?? 30_000, 'timeoutMs', 1);
   const pollIntervalMs = duration(options.pollIntervalMs ?? 5_000, 'pollIntervalMs', 1);
   const maxWaitMs = duration(options.maxWaitMs ?? 120_000, 'maxWaitMs', 0);
@@ -190,6 +196,20 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
       }
       if (again.kind === 'rejected') lastError = mapResultCodes(again.transactionCode, again.operationCodes);
     }
+  }
+}
+
+/**
+ * Throws unless the gateway talks to the network the envelope is signed for.
+ * With different passphrases the local hash is not the network's hash, so a
+ * landed transaction would look missing.
+ */
+function assertSameNetwork(gateway: HorizonGateway, networkPassphrase: string): void {
+  if (typeof networkPassphrase !== 'string' || networkPassphrase.length === 0) {
+    throw new InvalidConfigError('networkPassphrase is required');
+  }
+  if (gateway.networkPassphrase !== networkPassphrase) {
+    throw new InvalidConfigError("The gateway's network passphrase differs from the submit networkPassphrase");
   }
 }
 

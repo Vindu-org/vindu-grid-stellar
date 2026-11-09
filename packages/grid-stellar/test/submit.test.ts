@@ -1,4 +1,4 @@
-import { InvalidInputError } from '@vindu/grid-core';
+import { InvalidConfigError, InvalidInputError } from '@vindu/grid-core';
 import { TESTNET_NETWORK_PASSPHRASE } from '../src/networks';
 import { mapResultCodes } from '../src/result-codes';
 import { stellarSdk } from '../src/sdk';
@@ -233,6 +233,19 @@ describe('submit', () => {
     gateway.submitResponses = [{ kind: 'timeout' }];
     await expect(run(gateway, xdr, clock(), { [name]: value })).rejects.toThrow(InvalidInputError);
     expect(gateway.submitted).toEqual([]);
+  });
+
+  it('refuses a passphrase that differs from the gateway, before sending anything', async () => {
+    // Review probe: an envelope signed for testnet, submitted with the mainnet
+    // passphrase, hashes differently, so a landed transaction looked missing.
+    const { xdr } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    await expect(run(gateway, xdr, clock(), { networkPassphrase: Networks.PUBLIC })).rejects.toThrow(InvalidConfigError);
+    gateway.networkPassphrase = Networks.PUBLIC;
+    await expect(run(gateway, xdr)).rejects.toThrow(InvalidConfigError);
+    expect(gateway.submitted).toEqual([]);
+    expect(gateway.transactionLookups).toEqual([]);
   });
 
   it('fails closed on a clock that returns NaN, before sending anything', async () => {
