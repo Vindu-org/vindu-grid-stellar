@@ -31,6 +31,24 @@ jobs:
       - run: yarn lint
       - run: yarn test
 
+  consumption:
+    name: Install the packed packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn build
+      # Packs each package (prepack builds it), installs the tarballs into a
+      # temp project with a grid-core resolution, requires them and type-checks.
+      - run: bash scripts/check-consumption.sh
+
   gitleaks:
     name: Secret scan
     runs-on: ubuntu-latest
