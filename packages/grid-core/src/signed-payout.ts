@@ -2,25 +2,46 @@
  * The payout leg, end to end, for any partner adapter. The transfer starts
  * in `payout_quoted`:
  *
- *   check the quote -> preparePayout (the partner's authorize step)
- *     -> none: executePayout (the partner moves the funds itself)
+ *   check the input, the funds and the quote -> preparePayout (the partner's
+ *   authorize step)
+ *     -> none: executePayout (the partner moves the funds itself; no
+ *          `signing` inputs needed)
  *     -> stellar_xdr: check the quote -> onAuthorized (the caller stores
- *          `awaiting_signature`) -> check the quote and the signing context
- *          -> sign once -> check the quote again
- *          -> [client_submits: submit, success only] -> executePayout
+ *          `awaiting_signature`) -> check the stored state, then the quote
+ *          -> sign once -> onSigned -> check the quote again
+ *          -> client_submits: submit, success only -> onSubmitted (the
+ *               caller stores `payout_submitted`) -> executePayout
+ *          -> partner_submits: executePayout with the signed XDR
  *
  * Pure orchestration: no network of its own, no state storage. The caller
- * stores the transfer state: it moves `payout_quoted -> awaiting_signature`
- * in `onAuthorized`, only once the partner's authorization exists, so a
- * failed authorization still finds the transfer in `payout_quoted`.
+ * stores the transfer state in the hooks, only once each step happened: a
+ * failed authorization still finds the transfer in `payout_quoted`, and a
+ * confirmed submit is stored as `payout_submitted` before the partner hears
+ * about it.
  *
  * Safety rules:
+ * - Core checks what any adapter could get wrong: the quote's `partner` is
+ *   the adapter's `id`; the quote moves a positive amount of the funded
+ *   asset, no more than `funded`; a transaction to sign is for a Stellar
+ *   account. The signer's expected amount is the quote's `source` only after
+ *   those checks.
+ * - `onAuthorized` must be a compare-and-set on the stored state: move
+ *   `payout_quoted -> awaiting_signature` only if the transfer is still in
+ *   `payout_quoted`. When the compare fails, throw (or return the state
+ *   found, as long as it is not `awaiting_signature`): never return
+ *   `awaiting_signature` for a move this call did not make. Two concurrent
+ *   runs for one transfer then cannot both sign. A store that cannot
+ *   compare and set must lock the transfer around the whole run.
  * - The signer is called at most once per run, and only after `onAuthorized`
  *   returned `awaiting_signature`. A quote with no more than
  *   `expiryMarginMs` left is refused with {@link QuoteExpiredError} before
- *   authorizing, before signing, and again before the signed transaction
- *   leaves this function: get a fresh quote and a new transaction. An old
- *   XDR is never reused.
+ *   authorizing. With `client_submits`, the quote must also outlive the
+ *   submitter's `maxDurationMs`: no more than `expiryMarginMs +
+ *   maxDurationMs` left is refused before `onAuthorized`, before signing,
+ *   and again before the signed transaction leaves this function. Get a
+ *   fresh quote and a new transaction; an old XDR is never reused.
+ * - Anything the signer throws, or a result that is not a signed XDR, stops
+ *   with {@link SignerRefusedError}; nothing is submitted.
  * - With `client_submits`, only `{ status: 'success' }` lets the payout be
  *   created. Any other outcome, or a submitter that throws, stops with
  *   {@link PayoutIncompleteError} (`stage: 'submit'`) carrying the outcome,
@@ -28,7 +49,8 @@
  * - When `executePayout` fails, {@link PayoutIncompleteError}
  *   (`stage: 'create'`) carries the exact input and idempotency key. Retry
  *   with {@link retryPayoutExecute}; it never signs or submits anything.
- * - A clock that returns a non-finite time, or a non-finite margin, fails closed.
+ * - A clock that returns a non-finite time, a non-finite margin or submit
+ *   budget, or a quote expiry that is not a strict ISO-8601 instant fails closed.
  */
 import { assetKey, isStellarAccountId, sameAsset } from './assets';
 import {
@@ -105,6 +127,13 @@ export interface SignedPayoutSigning {
    * anything but `awaiting_signature` stops the run with
    * {@link SigningNotAllowedError} before signing.
    *
+   * It must be a compare-and-set: store `awaiting_signature` only if the
+   * transfer is still in `payout_quoted` (e.g.
+   * `UPDATE ... SET state = 'awaiting_signature' WHERE id = ? AND state = 'payout_quoted'`).
+   * When nothing was updated, another run got there first: throw, and never
+   * return `awaiting_signature` for a move this call did not make. That is
+   * what keeps two concurrent runs from both signing.
+   *
    * Not called when the partner needs no signature, when the authorization
    * fails, or when the quote expires first. If it throws, nothing is signed
    * and the error propagates.
@@ -178,29 +207,36 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  * Runs the payout leg once, from `payout_quoted`. See the module notes for
  * the safety rules.
  *
- * Where it stops, and the edge of the transition table the caller takes:
+ * Where it stops, and the edge of the transition table the caller takes.
+ * Every row names one rule of `TRANSITIONS`, with its reason:
  *
- * | Error | Stage | Transfer is in | Caller takes |
+ * | Error | Where it stopped | Transfer is in | Caller takes |
  * |---|---|---|---|
- * | {@link QuoteExpiredError} | `authorization` | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`): get a fresh quote |
- * | {@link PayoutAuthorizationError} | authorize (`preparePayout` threw or returned an unknown authorization) | `payout_quoted` | `payout_quoted -> needs_attention` (`authorization_failed`) |
- * | {@link QuoteExpiredError} | `signing` | `awaiting_signature` | `awaiting_signature -> funded` (`quote_expired_before_signing`): any signed XDR was never submitted, drop it |
- * | {@link SigningNotAllowedError} | signing (the signer refused, or the stored state was wrong) | `awaiting_signature` | `awaiting_signature -> needs_attention` (`signer_refused`): nothing left the signer |
- * | {@link PayoutIncompleteError} | `submit` | `awaiting_signature` | `awaiting_signature -> needs_attention` (`submission_rejected_or_unknown`) |
- * | {@link PayoutIncompleteError} | `create` | `payout_submitted` (`client_submits`, stored on the success), `awaiting_signature` (`partner_submits`) or `payout_quoted` (`none`) | retry with {@link retryPayoutExecute}; if the partner never takes a signed payout, `payout_submitted -> needs_attention` (`partner_refused_or_unknown`) or `awaiting_signature -> needs_attention` |
+ * | {@link QuoteExpiredError} `authorization` | before the authorization was handed over | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`): get a fresh quote |
+ * | {@link PayoutAuthorizationError} | `preparePayout` threw, or returned an authorization the run cannot use (unknown, `stellar_xdr` without `signing`, or for an account on another chain) | `payout_quoted` | `payout_quoted -> needs_attention` (`authorization_failed`): nothing was signed |
+ * | {@link PayoutIncompleteError} `create`, no `signedXdr` | the partner needed no signature and its create failed | `payout_quoted` | retry with {@link retryPayoutExecute}; if the partner never takes it, `payout_quoted -> needs_attention` (`payout_create_failed`) |
+ * | {@link QuoteExpiredError} `signing` | after `onAuthorized`, before the signed transaction left | `awaiting_signature` | `awaiting_signature -> funded` (`quote_expired_before_signing`): drop any signed XDR, it was never submitted |
+ * | {@link SignerRefusedError} | the signer threw, rejected or returned no signed XDR | `awaiting_signature` | `awaiting_signature -> needs_attention` (`signer_refused`): nothing was submitted |
+ * | {@link PayoutIncompleteError} `submit` | the submit was not a confirmed success | `awaiting_signature` | `awaiting_signature -> needs_attention` (`submission_rejected_or_unknown`): check the hash on Stellar, never sign again |
+ * | {@link PayoutIncompleteError} `record` | the transaction is on the ledger, `onSubmitted` threw | `awaiting_signature` | `awaiting_signature -> payout_submitted` (`signed_and_on_chain`): the money moved; store it, then retry with {@link retryPayoutExecute}; never re-quote |
+ * | {@link PayoutIncompleteError} `create`, with `txHash` | `client_submits`: the create failed after `onSubmitted` stored the move | `payout_submitted` | retry with {@link retryPayoutExecute}; if the partner never takes it, `payout_submitted -> needs_attention` (`partner_refused_or_unknown`) |
+ * | {@link PayoutIncompleteError} `create`, `signedXdr` but no `txHash` | `partner_submits`: the partner did not confirm taking the signed XDR | `awaiting_signature` | retry with {@link retryPayoutExecute}; if the partner never confirms, `awaiting_signature -> needs_attention` (`partner_submission_unknown`) |
  *
- * On success the caller takes `payout_quoted -> payout_processing` for an
- * `authorization` of `none`, and `awaiting_signature -> payout_submitted`
- * (if the submitter did not already) then `payout_submitted -> payout_processing`
- * for `stellar_xdr`.
+ * On success the caller takes `payout_quoted -> payout_processing`
+ * (`partner_custodied_account`) for an `authorization` of `none`. For
+ * `stellar_xdr` the transfer is in `payout_submitted` with `client_submits`
+ * (stored by `onSubmitted`), and in `awaiting_signature` with
+ * `partner_submits`, which then takes `awaiting_signature -> payout_submitted`;
+ * both then take `payout_submitted -> payout_processing` once the partner
+ * accepts.
  *
- * The other errors have no edge of their own: nothing was submitted, and the
- * transfer stays where it is for an operator. {@link InvalidInputError} for
- * unusable input (before any call, the transfer in `payout_quoted`) or a
- * clock that breaks; {@link SigningNotAllowedError} when `onAuthorized`
- * returned a state other than `awaiting_signature` (the signer refusing is the
- * `signer_refused` row above); and whatever `onAuthorized` or `onSigned`
- * throw, unchanged.
+ * These have no edge: nothing was signed or submitted by this run, and the
+ * transfer stays where it is for an operator.
+ * - {@link InvalidInputError}: unusable input, before any call, with the
+ *   transfer in `payout_quoted`; or a clock that breaks during the run.
+ * - {@link SigningNotAllowedError}: `onAuthorized` returned a state other
+ *   than `awaiting_signature`, e.g. a concurrent run already moved it.
+ * - Whatever `onAuthorized` or `onSigned` throw, unchanged.
  */
 export async function runSignedPayout(input: RunSignedPayoutInput): Promise<SignedPayoutResult> {
   const margin = input.expiryMarginMs ?? DEFAULT_EXPIRY_MARGIN_MS;
