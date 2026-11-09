@@ -18,11 +18,14 @@
     "build": "yarn workspaces foreach -Apt run build",
     "typecheck": "yarn workspaces foreach -Apt run typecheck",
     "test": "yarn workspaces foreach -Apt run test",
-    "lint": "eslint . --max-warnings 0"
+    "lint": "eslint . --ext .ts,.js,.cjs --max-warnings 0"
   },
   "devDependencies": {
     "@types/jest": "^29",
     "@types/node": "^22",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "@typescript-eslint/parser": "^8",
+    "eslint": "8.57.0",
     "jest": "^29",
     "ts-jest": "^29",
     "typescript": "^5.5"
