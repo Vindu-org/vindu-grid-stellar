@@ -1,0 +1,24 @@
+{
+  "name": "@vindu/grid-core",
+  "version": "0.1.0",
+  "description": "Types, transfer states, routing rules and the partner adapter interface for two-leg transfers settled on Stellar.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vindu-org/vindu-grid-stellar.git",
+    "directory": "packages/grid-core"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest"
+  }
+}
