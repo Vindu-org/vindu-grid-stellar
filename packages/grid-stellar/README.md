@@ -20,13 +20,20 @@ No environment reads, no keys, no signing. Your signer signs; the network passph
 
 | Module | Contents |
 |---|---|
-| Horizon gateway | `HorizonGateway`: its network passphrase, the latest ingested ledger (with the oldest one the instance keeps), payments for an account, transaction by hash (with the answering instance's ingested ledger), submit, account. `createHorizonGateway({ horizonUrl, networkPassphrase })` reads with `fetch` (pass `fetch` to replace it) and submits through `@stellar/stellar-sdk` (pass `server` for any object with a `submitTransaction` like the SDK's `Horizon.Server`). Every read times out after `requestTimeoutMs` (default 10 s) and takes an `AbortSignal`. Tests pass a fake. |
+| Horizon gateway | `HorizonGateway`: its network passphrase, the latest ingested ledger, payments for an account, transaction by hash and account (each with the answering instance's ingested ledger), submit. `createHorizonGateway({ horizonUrl, networkPassphrase })` reads with `fetch` (pass `fetch` to replace it) and submits through `@stellar/stellar-sdk` (pass `server` for any object with a `submitTransaction` like the SDK's `Horizon.Server`). Every read times out after `requestTimeoutMs` (default 10 s), takes an `AbortSignal`, and reads its body as a stream capped at `maxResponseBytes` (below). Tests pass a fake. |
 | Read layer | `createReadLayer({ gateway, cursorStore, onEvent, onMalformed? })`: `pollAccount` resumes from the stored cursor; `reconcile` re-reads a window without moving it. |
 | Payments | `ChainPayment`: payments, path payments and account creation, with core assets and canonical 7-decimal amounts. |
 | Matching | `matchPaymentToLeg` by destination, asset and issuer, exact amount, and source, hash or reference when known. `{ requireSource: true }` refuses legs without a source. `partnerAndChainAgree` for the funded check. |
 | Accounts | `assessReceiveReadiness`: account exists, trustline for the asset and issuer, optional XLM reserve (1 XLM plus 0.5 per trustline). |
 | Submit | `submitSignedTransaction`: hashes computed locally first (outer and inner for a fee bump), hashes checked before any retry, expiry proven by the source account's sequence number as of a ledger past maxTime, typed result codes, a fixed time budget. `inspectSignedTransaction` gives the hashes, maxTime, source account and sequence number of an envelope. `createStellarSubmitter` adapts it to core's `StellarSubmitter` and reports `maxDurationMs`. |
 | Payout check | `assertPayoutXdrMatches(unsignedXdr, context, { networkPassphrase, maxFeeStroops? })`: a key-free check, for signers, that the partner's unsigned transaction is exactly the expected payment. |
+
+## Horizon gateway: what it refuses
+
+- **URL.** `horizonUrl` must be https (or http with `allowHttp`, for a local Horizon) and carry no credentials, query or fragment. The raw string may not contain `?` or `#` at all: `https://h/?` parses to an empty query, and the paths the gateway appends would land after it.
+- **Body size.** Each GET reads its response body as a stream and gives up once it grows past `maxResponseBytes` (default 1 MiB, `DEFAULT_HORIZON_MAX_RESPONSE_BYTES`), or at once when `Content-Length` says it will. A body over the cap is an error, never "not found". A custom `fetch` must return the body as a `ReadableStream` (the standard `Response.body`). The cap covers the reads; the submission's answer goes through the SDK server.
+- **Accounts.** `account()` checks Horizon's answer before returning it: the `id` is the account asked for, the `sequence` a decimal string, the counts whole numbers, and each balance line well formed (decimal amounts, code and issuer for issued assets). Anything else throws. Only known fields are copied, plus `latestLedger` from the `Latest-Ledger` header.
+- **Redirects** are refused, and a non-2xx status other than 404 throws with the status only, never the body.
 
 ## Read layer: at least once
 
