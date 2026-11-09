@@ -3,7 +3,7 @@
  * callers can branch on `code`. None of them ever carries the API key.
  * Config, input and quote-expiry errors are core's own.
  */
-import { PartnerHttpError, type PartnerHttpErrorInit } from '@vindu/grid-core';
+import { GridError, PartnerHttpError, type PartnerHttpErrorInit } from '@vindu/grid-core';
 
 /**
  * A BlindPay call failed. The Idempotency-Key that was sent is core's
@@ -21,5 +21,23 @@ export class BlindPayHttpError extends PartnerHttpError {
   constructor(init: Omit<PartnerHttpErrorInit, 'cause'> & { readonly causeCode?: string }) {
     super(init);
     this.causeCode = init.causeCode;
+  }
+}
+
+/** The quote field BlindPay answered with an unusable value. */
+export type BlindPayQuoteField = 'expires_at' | 'sender_amount' | 'receiver_amount';
+
+/**
+ * BlindPay answered with a quote this adapter will not use: an `expires_at`
+ * that is not epoch milliseconds, an amount that is not a positive integer
+ * in minor units, or (for a `sender` quote) a `sender_amount` other than the
+ * `request_amount` sent. Nothing was created at BlindPay; ask for a new quote.
+ */
+export class BlindPayQuoteError extends GridError {
+  constructor(
+    readonly field: BlindPayQuoteField,
+    message: string,
+  ) {
+    super('unexpected_partner_quote', message);
   }
 }

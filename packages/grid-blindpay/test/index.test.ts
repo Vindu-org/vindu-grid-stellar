@@ -9,6 +9,7 @@ describe('package index', () => {
         'BLINDPAY_PARTNER_ID',
         'BLINDPAY_TERMINAL_STATUSES',
         'BlindPayHttpError',
+        'BlindPayQuoteError',
         'DEFAULT_WEBHOOK_TOLERANCE_SEC',
         'DEV_SENTINEL_AMOUNTS',
         'WebhookVerificationError',

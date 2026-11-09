@@ -21,7 +21,7 @@ export { BLINDPAY_CAPABILITIES } from './capabilities';
 export { type BlindPayClient, createBlindPayClient } from './client';
 export { BLINDPAY_PARTNER_ID, type BlindPayConfig, type FetchLike, type ResolvedConfig } from './config';
 export type { CustomersApi } from './customers';
-export { BlindPayHttpError } from './errors';
+export { BlindPayHttpError, BlindPayQuoteError, type BlindPayQuoteField } from './errors';
 export type { BlindPayHttp, Created, HttpMethod, HttpResult, IdempotencyOptions, RequestOptions } from './http';
 export type { PartnerFeesApi } from './partner-fees';
 export type { PayinQuotesApi } from './payin-quotes';

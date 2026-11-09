@@ -22,6 +22,7 @@ import {
 } from '@vindu/grid-core';
 
 import { floorToBlindPayAmount, fromBlindPayAmount, toBlindPayAmount } from './amounts';
+import { BlindPayQuoteError } from './errors';
 import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
@@ -152,18 +153,20 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
       if (!offersPayout(input.targetAsset.code, input.rail)) {
         throw new InvalidInputError(`Payout of ${input.targetAsset.code} by ${input.rail} is not supported`);
       }
+      // A funded balance can have sub-cent digits; BlindPay takes cents. Round
+      // down: the rest stays in the account. The quote's source is what moves.
+      const requested = floorToBlindPayAmount(input.source);
       const res = await client.payoutQuotes.create({
         bank_account_id: input.beneficiaryId,
         currency_type: 'sender',
         cover_fees: coverFees,
-        // A funded balance can have sub-cent digits; BlindPay takes cents. Round
-        // down: the rest stays in the account. The quote's source is what moves.
-        request_amount: floorToBlindPayAmount(input.source),
+        request_amount: requested,
         network: options.network,
         token: coins.tokenFor(input.source.asset),
         ...feeId('payout', undefined),
       });
-      return legQuote(partnerId, 'payout', res.data, input.source.asset, input.targetAsset);
+      // A sender quote moves exactly what was asked: never an amount BlindPay picked.
+      return legQuote(partnerId, 'payout', res.data, input.source.asset, input.targetAsset, requested);
     },
 
     async preparePayout(input) {
@@ -240,14 +243,38 @@ function offersPayout(currency: string, rail: string): boolean {
   return Array.isArray(rails) && rails.includes(rail);
 }
 
+/** Below this, an `expires_at` is not epoch milliseconds (1e12 ms is September 2001). */
+const MIN_EPOCH_MS = 1e12;
+
+/**
+ * Core's quote from BlindPay's answer. Refuses, with {@link BlindPayQuoteError},
+ * an `expires_at` that is not epoch milliseconds (e.g. epoch seconds), an
+ * amount that is not a positive integer, and, when `requestedSender` is
+ * given, a `sender_amount` that differs from it.
+ */
 function legQuote(
   partner: string,
   kind: LegKind,
   q: { id: string; expires_at: number; sender_amount: number; receiver_amount: number },
   sourceAsset: Asset,
   targetAsset: Asset,
+  requestedSender?: number,
 ): LegQuote {
-  if (!Number.isSafeInteger(q.expires_at)) throw new InvalidInputError('Quote has no valid expires_at');
+  if (!Number.isSafeInteger(q.expires_at) || q.expires_at <= MIN_EPOCH_MS) {
+    throw new BlindPayQuoteError('expires_at', `Quote ${String(q.id)} has an expires_at that is not epoch milliseconds`);
+  }
+  for (const field of ['sender_amount', 'receiver_amount'] as const) {
+    const minor = q[field];
+    if (!Number.isSafeInteger(minor) || minor <= 0) {
+      throw new BlindPayQuoteError(field, `Quote ${String(q.id)} has a ${field} that is not a positive integer: ${String(minor)}`);
+    }
+  }
+  if (requestedSender !== undefined && q.sender_amount !== requestedSender) {
+    throw new BlindPayQuoteError(
+      'sender_amount',
+      `Quote ${String(q.id)} moves ${q.sender_amount} minor units, not the ${requestedSender} requested`,
+    );
+  }
   return {
     id: q.id,
     partner,

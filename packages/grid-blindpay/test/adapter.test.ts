@@ -4,9 +4,10 @@ import { type AccountRef, InvalidConfigError, InvalidInputError, type LegQuote, 
 
 import { DEV_SENTINEL_AMOUNTS } from '../src/amounts';
 import { type BlindPayAdapterOptions, createBlindPayAdapter } from '../src/adapter';
+import { BlindPayQuoteError } from '../src/errors';
 import { toLegStatus } from '../src/legs';
 import { WebhookVerificationError } from '../src/webhooks';
-import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, USDB_ISSUER, USDC_ISSUER, WALLET_ID, config, mockFetch } from './helpers';
+import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, USDB_ISSUER, USDC_ISSUER, WALLET_ID, caught, config, mockFetch } from './helpers';
 
 const NOW = Date.parse('2030-01-01T00:00:00Z');
 const usdb = stellarAsset('USDB', USDB_ISSUER);
@@ -209,6 +210,49 @@ describe('adapter payout of a funded balance', () => {
     await expect(
       adapter.quoteFunding({ customerId: CUSTOMER_ID, account, source: money('10.005', brl), targetAsset: usdb, rail: 'pix' }),
     ).rejects.toThrow(/sub-cent/);
+  });
+});
+
+describe('adapter quote answers', () => {
+  const payoutInput = {
+    customerId: CUSTOMER_ID, account, source: money('100', usdb), targetAsset: usd, rail: 'wire', beneficiaryId: BANK_ACCOUNT_ID,
+  } as const;
+  const fundingInput = { customerId: CUSTOMER_ID, account, source: money('100', brl), targetAsset: usdb, rail: 'pix' } as const;
+  const answering = (body: Record<string, unknown>) => {
+    const { fetch } = mockFetch([{ body: { id: 'qu_000000000009', expires_at: NOW + 300_000, ...body } }]);
+    return createBlindPayAdapter(config(fetch, { now: () => NOW }), { network: 'stellar_testnet', assetIssuers: ISSUERS });
+  };
+
+  // Review probe: BlindPay answering a 100.00 sender quote with sender_amount 20000
+  // (or -5) gave a quote, and the signer then expected that amount.
+  it.each<[string, Record<string, unknown>, string]>([
+    ['a sender_amount above the request', { sender_amount: 20_000, receiver_amount: 19_900 }, 'sender_amount'],
+    ['a sender_amount below the request', { sender_amount: 9_999, receiver_amount: 9_900 }, 'sender_amount'],
+    ['a negative sender_amount', { sender_amount: -5, receiver_amount: 9_900 }, 'sender_amount'],
+    ['a zero sender_amount', { sender_amount: 0, receiver_amount: 9_900 }, 'sender_amount'],
+    ['a fractional sender_amount', { sender_amount: 10_000.5, receiver_amount: 9_900 }, 'sender_amount'],
+    ['a sender_amount as a string', { sender_amount: '10000', receiver_amount: 9_900 }, 'sender_amount'],
+    ['a zero receiver_amount', { sender_amount: 10_000, receiver_amount: 0 }, 'receiver_amount'],
+    ['a negative receiver_amount', { sender_amount: 10_000, receiver_amount: -1 }, 'receiver_amount'],
+    ['an expires_at in epoch seconds', { sender_amount: 10_000, receiver_amount: 9_900, expires_at: 1_893_456_300 }, 'expires_at'],
+    ['an expires_at as a string', { sender_amount: 10_000, receiver_amount: 9_900, expires_at: '2030-01-01T00:05:00Z' }, 'expires_at'],
+  ])('refuses a payout quote with %s', async (_name, body, field) => {
+    const e = await caught(answering(body).quotePayout(payoutInput));
+    expect(e).toBeInstanceOf(BlindPayQuoteError);
+    expect(e).toMatchObject({ code: 'unexpected_partner_quote', field });
+  });
+
+  it('accepts a payout quote for exactly the requested amount', async () => {
+    const quote = await answering({ sender_amount: 10_000, receiver_amount: 9_900 }).quotePayout(payoutInput);
+    expect(quote).toMatchObject({ source: money('100', usdb), target: money('99', usd), expiresAt: new Date(NOW + 300_000).toISOString() });
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ['a negative receiver_amount', { sender_amount: 10_000, receiver_amount: -2_000 }, 'receiver_amount'],
+    ['a fractional sender_amount', { sender_amount: 10_000.1, receiver_amount: 2_000 }, 'sender_amount'],
+    ['an expires_at in epoch seconds', { sender_amount: 10_000, receiver_amount: 2_000, expires_at: 1_893_456_300 }, 'expires_at'],
+  ])('refuses a funding quote with %s', async (_name, body, field) => {
+    await expect(answering(body).quoteFunding(fundingInput)).rejects.toMatchObject({ code: 'unexpected_partner_quote', field });
   });
 });
 
