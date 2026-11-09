@@ -8,25 +8,39 @@
  *
  * A signer must check what it signs. The partner built the transaction, so a
  * signer that trusts it blindly signs whatever the partner asks. Before
- * signing, every signer must:
+ * signing, every signer must refuse (throw) unless all of these hold:
  *
- * 1. Call {@link assertSigningAllowed}: the transfer is in
+ * 1. State and time: {@link assertSigningAllowed} passes: the transfer is in
  *    `awaiting_signature`, the quote has not expired, and the clock is sane.
- * 2. Decode the XDR for the network it is configured for.
- * 3. Check the source account: the transaction source (and every operation
- *    source, when one is set) is `context.expected.source`, the account it
- *    was asked to sign for.
- * 4. Check the payment: one payment to `expected.destination`, in
- *    `expected.amount.asset` (code and issuer), for exactly
- *    `expected.amount.amount`.
- * 5. Check the time bounds with {@link assertMaxTimeWithinQuote}: the
- *    transaction has a `maxTime`, and it is no later than the quote expiry,
- *    so it can never land after the quote is gone.
- * 6. Check the fee against its own cap, and refuse envelopes it does not
- *    expect (e.g. a fee bump).
+ * 2. Network: the XDR decodes for the network passphrase the signer is
+ *    configured for, and no other.
+ * 3. Envelope: a plain transaction, not a fee bump (whose inner transaction
+ *    and fee payer the signer did not choose).
+ * 4. Operations: exactly one operation, and it is a payment.
+ * 5. Source: the transaction source is `context.expected.source`, the
+ *    account it was asked to sign for.
+ * 6. Operation source: the payment has no source of its own, or exactly
+ *    `expected.source`. A muxed source (M...) counts by its underlying G
+ *    account, and must still be that account.
+ * 7. Destination: the payment pays `expected.destination`.
+ * 8. Asset: `expected.amount.asset`, code and issuer both.
+ * 9. Amount: exactly `expected.amount.amount`.
+ * 10. Fee: no more than the signer's own cap, in stroops.
+ * 11. Time bounds: {@link assertMaxTimeWithinQuote} passes: the transaction
+ *     has a `maxTime`, no later than the quote expiry, so it can never land
+ *     after the quote is gone.
+ * 12. No v2 preconditions: no minimum account sequence, no minimum sequence
+ *     age or ledger gap, no extra signers and no ledger bounds. Each lets
+ *     the transaction wait or land in ways the time bounds do not limit.
  *
  * This package has no Stellar SDK, so decoding is the signer's job; steps 1
- * and 5 are helpers here.
+ * and 11 are helpers here. `@vindu/grid-stellar` exports
+ * `assertPayoutXdrMatches`, a key-free check that implements this whole list
+ * with the Stellar SDK; a signer can call it before it signs.
+ *
+ * Whatever a signer throws, the payout run turns into `SignerRefusedError`
+ * (keeping only a code-shaped `code`), so a refusal message may be specific:
+ * it never reaches the run's error.
  */
 import { SigningNotAllowedError } from './errors';
 import { parseInstantMs } from './instant';
