@@ -32,7 +32,7 @@ const ctx: SigningContext = {
   state: 'awaiting_signature',
   quoteId: QUOTE_ID,
   expiresAt: new Date(NOW + 5 * 60_000).toISOString(),
-  expected: { amount: money('100', fiat('USDC')), destination: `G${'B'.repeat(55)}` },
+  expected: { source: STELLAR_ADDRESS, destination: `G${'B'.repeat(55)}`, amount: money('100', fiat('USDC')) },
 };
 
 const AUTHORIZED: MockReply = { body: { transaction_hash: UNSIGNED } };

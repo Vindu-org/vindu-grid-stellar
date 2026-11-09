@@ -120,7 +120,7 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
       state: 'awaiting_signature',
       quoteId: payoutQuote.id,
       expiresAt: payoutQuote.expiresAt,
-      expected: { amount: payoutQuote.source, destination: world.partner.treasuryAddress },
+      expected: { source: world.clientAddress, destination: world.partner.treasuryAddress, amount: payoutQuote.source },
     },
     submitter: {
       async submit(signedXdr) {

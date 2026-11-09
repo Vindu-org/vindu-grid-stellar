@@ -72,7 +72,7 @@ export async function runPayoutLeg(
     state,
     quoteId: quote.id,
     expiresAt: quote.expiresAt,
-    expected: { amount: quote.source, destination: partner.treasuryAddress },
+    expected: { source: ctx.account.address, destination: partner.treasuryAddress, amount: quote.source },
   });
 
   await expectRefusal(log, 'asked to sign before awaiting_signature', () =>
