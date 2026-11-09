@@ -64,6 +64,13 @@ export {
   TESTNET_HORIZON_URL,
   TESTNET_NETWORK_PASSPHRASE,
 } from './networks';
+export {
+  assertPayoutXdrMatches,
+  DEFAULT_MAX_FEE_STROOPS,
+  type PayoutXdrCheck,
+  PayoutXdrMismatchError,
+  type PayoutXdrOptions,
+} from './payout-xdr';
 export { CHAIN_PAYMENT_TYPES, type ChainPayment, type ChainPaymentType, NATIVE_ASSET_CODE } from './payments';
 export {
   createReadLayer,
