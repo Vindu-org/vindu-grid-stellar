@@ -9,10 +9,13 @@
  * `payment.id`.**
  *
  * A record that cannot be normalised (for example an amount that is not a
- * valid decimal) never blocks the cursor: `onMalformed` is called with it
- * and the error, then the layer moves on. By default that logs a warning
- * with the operation id and transaction hash only. Throw from `onMalformed`
- * to stop instead; the cursor then stays before that record.
+ * valid decimal, or no string `id`, `paging_token` or `transaction_hash`)
+ * never blocks the cursor: `onMalformed` is called with it and the error,
+ * then the layer moves on. By default that logs a warning with the
+ * operation id and transaction hash only. Throw from `onMalformed` to stop
+ * instead; the cursor then stays before that record. The stored cursor
+ * only ever moves to a record's own paging token: a record without one
+ * never resets it or clears it.
  *
  * Positions past skipped and malformed records are stored once per page
  * (or before stopping), not once per record.
@@ -133,8 +136,8 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
     options.onMalformed ??
     ((record, error) => {
       logger.warn('payment record could not be read; skipped', {
-        paymentId: record.id,
-        txHash: record.transaction_hash,
+        paymentId: stringField(record, 'id'),
+        txHash: stringField(record, 'transaction_hash'),
         error: error instanceof Error ? error.name : typeof error,
       });
     });
@@ -177,7 +180,7 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
       });
       for (const record of records) {
         await visit(read(record, account), record);
-        position = record.paging_token;
+        position = pagingToken(record) ?? position;
       }
       await pageDone();
       if (records.length < pageSize) return { cursor: position, hasMore: false };
@@ -217,7 +220,7 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
           async (item, record) => {
             if (item.kind === 'skipped') {
               skipped += 1;
-              unsaved = record.paging_token;
+              unsaved = pagingToken(record) ?? unsaved;
               return;
             }
             if (item.kind === 'malformed') {
@@ -228,7 +231,7 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
                 throw e;
               }
               malformed += 1;
-              unsaved = record.paging_token;
+              unsaved = pagingToken(record) ?? unsaved;
               return;
             }
             const { payment } = item;
@@ -245,7 +248,7 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
             }
             delivered += 1;
             logger.debug('payment delivered', { paymentId: payment.id, txHash: payment.txHash });
-            await save(record.paging_token);
+            await save(payment.pagingToken);
           },
           async () => {
             if (unsaved !== undefined) await save(unsaved);
@@ -279,4 +282,14 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
       return { payments, skipped, malformed, lastCursor: end.cursor, hasMore: end.hasMore };
     },
   };
+}
+
+/** The record's paging token, or `undefined` when it has none: the position then stays where it was. */
+function pagingToken(record: HorizonPaymentRecord): string | undefined {
+  return stringField(record, 'paging_token');
+}
+
+function stringField(record: unknown, key: 'id' | 'paging_token' | 'transaction_hash'): string | undefined {
+  const value = typeof record === 'object' && record !== null ? (record as Record<string, unknown>)[key] : undefined;
+  return typeof value === 'string' ? value : undefined;
 }
