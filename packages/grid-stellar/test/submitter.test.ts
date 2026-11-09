@@ -177,13 +177,14 @@ describe('createStellarSubmitter in the signed payout flow', () => {
         submission: 'client_submits',
         context: {
           transferId: 't1',
-          state: 'awaiting_signature',
+          state: 'payout_quoted',
           quote,
           account: { chain: 'stellar', address: client.publicKey() },
           destination,
         },
         now: () => T0,
         idempotencyKey: 'k1',
+        onAuthorized: () => 'awaiting_signature',
       });
     return { run, executePayout };
   }
