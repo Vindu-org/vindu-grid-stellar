@@ -147,6 +147,23 @@ describe('client config', () => {
     expect(() => resolveConfig({ apiKey: API_KEY, instanceId: INSTANCE_ID, ...override })).toThrow(msg);
   });
 
+  it.each([
+    'http://attacker.example',
+    'http://127.0.0.1.attacker.example',
+    'http://localhost.attacker.example',
+    'http://10.0.0.1',
+    'http://[::ffff:7f00:1]',
+  ])('refuses plain http to the non-loopback host %s', (baseUrl) => {
+    expect(() => resolveConfig({ apiKey: API_KEY, instanceId: INSTANCE_ID, baseUrl })).toThrow(InvalidConfigError);
+  });
+
+  it.each(['http://localhost:4010', 'http://LOCALHOST', 'http://127.0.0.1:8080', 'http://127.9.8.7', 'http://[::1]:4010', 'https://api.example.org'])(
+    'accepts %s',
+    (baseUrl) => {
+      expect(resolveConfig({ apiKey: API_KEY, instanceId: INSTANCE_ID, baseUrl }).resolved.baseUrl).toBe(baseUrl.toLowerCase());
+    },
+  );
+
   it('uses a custom base URL without a trailing slash', async () => {
     const { fetch, calls } = mockFetch([{ body: [] }]);
     await createBlindPayHttp(config(fetch, { baseUrl: 'http://localhost:4010/' })).request({ method: 'GET', path: '/x' });

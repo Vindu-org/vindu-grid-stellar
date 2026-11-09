@@ -84,11 +84,20 @@ function parseBaseUrl(raw: string): string {
   } catch {
     throw new InvalidConfigError('baseUrl is not a valid URL');
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new InvalidConfigError('baseUrl must use https (or http for a local mock)');
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+    // Plain http would send the API key in clear text; only a local mock may use it.
+    throw new InvalidConfigError('baseUrl must use https; http is allowed only for localhost, 127.0.0.0/8 or ::1');
   }
   if (url.search !== '' || url.hash !== '' || url.username !== '' || url.password !== '') {
     throw new InvalidConfigError('baseUrl must not carry a query, fragment or credentials');
   }
   return url.toString().replace(/\/+$/, '');
+}
+
+/** `localhost`, `127.0.0.0/8` or `::1`: the only hosts plain http may reach. */
+function isLoopback(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host === '[::1]') return true;
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return m !== null && m.slice(1).every((part) => Number(part) <= 255);
 }
