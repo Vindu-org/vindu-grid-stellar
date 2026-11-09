@@ -60,10 +60,16 @@ export function legChangedAt(resource: Payin | Payout): string | undefined {
   );
 }
 
-/** The Stellar transaction hash BlindPay reports for the leg. */
+const TX_HASH_RE = /^[0-9a-f]{64}$/i;
+
+/**
+ * The Stellar transaction hash BlindPay reports for the leg: 64 hex
+ * characters, or `undefined`. Anything else (free text, markup, a hash of
+ * another length) is dropped rather than passed on as a hash.
+ */
 export function legTxHash(resource: Payin | Payout): string | undefined {
   const h = resource.tracking_transaction?.transaction_hash;
-  return typeof h === 'string' && h !== '' ? h : undefined;
+  return typeof h === 'string' && TX_HASH_RE.test(h) ? h : undefined;
 }
 
 /** ISO-8601 date and time with an explicit offset. Anything looser is dropped rather than guessed. */

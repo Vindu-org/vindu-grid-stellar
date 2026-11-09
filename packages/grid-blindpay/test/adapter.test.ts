@@ -365,6 +365,20 @@ describe('adapter webhook', () => {
     });
   });
 
+  // Review probe: a webhook with transaction_hash "<script>" passed it on as txHash.
+  it.each(['<script>', 'ab'.repeat(31), `${'ab'.repeat(32)}00`, 'zz'.repeat(32), '', 42])(
+    'leaves txHash unset for a transaction_hash of %p',
+    async (hash) => {
+      const { adapter } = setup();
+      const body = JSON.stringify({
+        webhook_event: 'payout.update', id: 'po_000000000001', status: 'processing', tracking_transaction: { transaction_hash: hash },
+      });
+      const event = await adapter.parseWebhook(body, sign(body, ts));
+      expect(event).not.toBeNull();
+      expect(event).not.toHaveProperty('txHash');
+    },
+  );
+
   it.each([
     ['an upper-case status', '{"webhook_event":"payout.complete","id":"po_000000000001","status":"COMPLETED"}', { status: 'unknown' }],
     ['an event name in another case', '{"webhook_event":"Payout.Complete","id":"po_000000000001","status":"completed"}', null],
