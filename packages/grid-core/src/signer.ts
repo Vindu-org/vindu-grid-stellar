@@ -29,6 +29,7 @@
  * and 5 are helpers here.
  */
 import { SigningNotAllowedError } from './errors';
+import { parseInstantMs } from './instant';
 import type { Money } from './money';
 import type { AccountRef } from './ports';
 import type { TransferState } from './transfer-states';
@@ -122,13 +123,9 @@ export function assertMaxTimeWithinQuote(maxTime: number | undefined, context: S
   }
 }
 
-/** ISO-8601 date and time with an explicit offset. Anything looser is refused rather than guessed. */
-const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-
 function quoteExpiryMs(context: SigningContext): number {
-  const raw = context.expiresAt;
-  const expiresAt = typeof raw === 'string' && ISO_INSTANT_RE.test(raw) ? Date.parse(raw) : Number.NaN;
-  if (!Number.isFinite(expiresAt)) {
+  const expiresAt = parseInstantMs(context.expiresAt);
+  if (expiresAt === undefined) {
     throw new SigningNotAllowedError(`Quote ${context.quoteId} has an invalid expiry`);
   }
   return expiresAt;
