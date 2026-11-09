@@ -17,8 +17,9 @@ import {
   type SignedPayoutSigning,
   retryPayoutExecute,
   runSignedPayout,
+  signingContextFor,
 } from '../src/signed-payout';
-import type { Signer } from '../src/signer';
+import { type Signer, assertSigningAllowed } from '../src/signer';
 import type { StellarSubmitter, SubmitOutcome } from '../src/submission';
 import { type TransferState, type TransitionReason, transition } from '../src/transfer-states';
 
@@ -531,12 +532,19 @@ describe('signed payout', () => {
       expect(executePayout).not.toHaveBeenCalled();
     });
 
-    it('refuses an unparseable quote expiry', async () => {
-      const { input, preparePayout } = setup();
-      const bad = { ...input, context: { ...input.context, quote: { ...quote, expiresAt: 'soon' } } };
-      await expect(runSignedPayout(bad)).rejects.toMatchObject({ code: 'quote_expired', stage: 'authorization' });
-      expect(preparePayout).not.toHaveBeenCalled();
-    });
+    // Review probe: the flow read expiries with Date.parse, so an HTTP date passed
+    // the flow and was refused only by a signer that used the strict guard.
+    it.each(['soon', 'Tue, 01 Jan 2030 00:05:00 GMT', '2030-01-01T00:05:00', '2030-01-01'])(
+      'refuses the quote expiry %p, as the signer guard does',
+      async (expiresAt) => {
+        const { input, preparePayout } = setup();
+        const bad = { ...input, context: { ...input.context, quote: { ...quote, expiresAt } } };
+        await expect(runSignedPayout(bad)).rejects.toMatchObject({ code: 'quote_expired', stage: 'authorization' });
+        expect(preparePayout).not.toHaveBeenCalled();
+        const guard = signingContextFor({ ...bad.context, destination: DESTINATION }, 'awaiting_signature');
+        expect(() => assertSigningAllowed(guard, new Date(NOW))).toThrow(/invalid expiry/);
+      },
+    );
   });
 
   describe('the submit budget', () => {

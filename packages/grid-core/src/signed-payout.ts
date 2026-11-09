@@ -41,6 +41,7 @@ import {
   SignerRefusedError,
   SigningNotAllowedError,
 } from './errors';
+import { parseInstantMs } from './instant';
 import { type Money, compare, isPositive, isValidAmount } from './money';
 import { type Logger, noopLogger } from './observability';
 import type {
@@ -414,8 +415,9 @@ function assertQuoteFresh(quote: LegQuote, now: number, marginMs: number, stage:
   if (typeof now !== 'number' || !Number.isFinite(now)) {
     throw new InvalidInputError('The clock gave an invalid time: refusing to continue the payout');
   }
-  const expiresAt = Date.parse(quote.expiresAt);
-  if (!Number.isFinite(expiresAt) || expiresAt - now <= marginMs) {
+  // The same strict parser as the signer guard: they never disagree on a quote.
+  const expiresAt = parseInstantMs(quote.expiresAt);
+  if (expiresAt === undefined || expiresAt - now <= marginMs) {
     throw new QuoteExpiredError(quote.id, quote.expiresAt, stage);
   }
   return now;
