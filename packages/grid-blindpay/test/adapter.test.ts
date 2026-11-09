@@ -365,6 +365,26 @@ describe('adapter webhook', () => {
     });
   });
 
+  it.each([
+    ['an upper-case status', '{"webhook_event":"payout.complete","id":"po_000000000001","status":"COMPLETED"}', { status: 'unknown' }],
+    ['an event name in another case', '{"webhook_event":"Payout.Complete","id":"po_000000000001","status":"completed"}', null],
+    ['a duplicated status key (the signed bytes decide; JSON keeps the last)', '{"webhook_event":"payout.complete","id":"po_000000000001","status":"failed","status":"completed"}', { status: 'completed' }],
+  ])('reads %s conservatively', async (_name, body, expected) => {
+    const { adapter } = setup();
+    const event = await adapter.parseWebhook(body, sign(body, ts));
+    if (expected === null) expect(event).toBeNull();
+    else expect(event).toMatchObject(expected);
+  });
+
+  it('rejects a numeric resource id and a header given as an array', async () => {
+    const { adapter } = setup();
+    const numeric = '{"webhook_event":"payin.new","id":5,"status":"processing"}';
+    await expect(adapter.parseWebhook(numeric, sign(numeric, ts))).rejects.toMatchObject({ reason: 'malformed_body' });
+    const body = '{"webhook_event":"payout.update","id":"po_000000000001","status":"failed"}';
+    const headers = { ...sign(body, ts), 'svix-id': ['msg_000000000001', 'x'] } as unknown as Record<string, string>;
+    await expect(adapter.parseWebhook(body, headers)).rejects.toMatchObject({ reason: 'missing_headers' });
+  });
+
   it('returns null for events that are not legs', async () => {
     const { adapter } = setup();
     const body = '{"webhook_event":"customer.update","id":"re_000000000000","kyc_status":"approved"}';
