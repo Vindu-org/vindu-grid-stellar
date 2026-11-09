@@ -39,6 +39,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The gitleaks CLI image needs no license key (the GitHub Action does for organisations).
+      - name: Scan full history for secrets
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/repo" -w /repo
+          ghcr.io/gitleaks/gitleaks:v8.21.2
+          detect --source /repo --redact --verbose --exit-code 1
