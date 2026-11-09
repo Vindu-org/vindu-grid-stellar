@@ -586,6 +586,11 @@ export type StellarSubmitOutcome =
 
 /** A core `StellarSubmitter` whose outcomes also carry the full detail. */
 export interface DetailedStellarSubmitter extends StellarSubmitter {
+  /**
+   * Longest time one `submit` can take, in ms: `timeoutMs + maxWaitMs`.
+   * Keep at least this much quote time (plus a margin) before signing.
+   */
+  readonly maxDurationMs: number;
   submit(signedXdr: string): Promise<StellarSubmitOutcome>;
 }
 
@@ -615,10 +620,11 @@ export function toSubmitOutcome(result: SubmitResult): StellarSubmitOutcome {
  */
 export function createStellarSubmitter(options: StellarSubmitterOptions): DetailedStellarSubmitter {
   assertSameNetwork(options.gateway, options.networkPassphrase);
-  durations(options);
-  return {
-    async submit(signedXdr) {
+  const { timeoutMs, maxWaitMs } = durations(options);
+  return Object.freeze({
+    maxDurationMs: timeoutMs + maxWaitMs,
+    async submit(signedXdr: string) {
       return toSubmitOutcome(await submitSignedTransaction({ ...options, signedXdr }));
     },
-  };
+  });
 }

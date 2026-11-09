@@ -145,6 +145,46 @@ describe('createStellarSubmitter', () => {
     });
   });
 
+  it('reports maxDurationMs = timeoutMs + maxWaitMs, read-only', () => {
+    const gateway = new FakeGateway();
+    const submitter = createStellarSubmitter({
+      gateway,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      timeoutMs: 7_000,
+      maxWaitMs: 45_000,
+    });
+    expect(submitter.maxDurationMs).toBe(52_000);
+    expect(() => {
+      (submitter as { maxDurationMs: number }).maxDurationMs = 1;
+    }).toThrow(TypeError);
+    expect(submitter.maxDurationMs).toBe(52_000);
+    // The defaults: 30 s to submit plus 2 min of waiting.
+    expect(createStellarSubmitter({ gateway, networkPassphrase: TESTNET_NETWORK_PASSPHRASE }).maxDurationMs).toBe(150_000);
+  });
+
+  it('one submit never runs longer than maxDurationMs, even when every Horizon call hangs', async () => {
+    const { xdr } = signed();
+    const gateway = new FakeGateway();
+    gateway.submitResponses = ['hang'];
+    const hang = () => new Promise<never>(() => undefined);
+    gateway.latestLedger = hang;
+    gateway.transaction = hang;
+    const submitter = createStellarSubmitter({
+      gateway,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      timeoutMs: 40,
+      maxWaitMs: 80,
+      pollIntervalMs: 20,
+      requestTimeoutMs: 1_000,
+    });
+    const started = Date.now();
+    const outcome = await submitter.submit(xdr);
+    const elapsed = Date.now() - started;
+    expect(outcome.status).toBe('unknown');
+    // Timers may fire a few ms late; nothing waits for the 1 s request timeout.
+    expect(elapsed).toBeLessThan(submitter.maxDurationMs + 50);
+  });
+
   it('checks the passphrase and durations when it is created', () => {
     const gateway = new FakeGateway();
     expect(() => createStellarSubmitter({ gateway, networkPassphrase: Networks.PUBLIC })).toThrow(InvalidConfigError);
