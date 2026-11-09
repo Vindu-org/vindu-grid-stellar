@@ -116,8 +116,18 @@ describe('client http', () => {
       throw new TypeError('fetch failed', { cause: Object.assign(new Error('connect refused'), { code: 'ECONNREFUSED' }) });
     };
     const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
-    expect(e).toMatchObject({ status: null, partnerCode: 'network', retryable: true, causeCode: 'ECONNREFUSED' });
+    expect(e).toMatchObject({ status: null, partnerCode: 'network', retryable: true, causeCode: 'econnrefused' });
     expect(e.cause).toBeUndefined();
+  });
+
+  // Review probe: a secret-shaped code on the network error reached causeCode.
+  it.each(['sk_live_SECRET123', 'Bearer abc', 'x'.repeat(49)])('drops a cause code of %p', async (code) => {
+    const fetch = async () => {
+      throw new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code }) });
+    };
+    const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e).toMatchObject({ status: null, partnerCode: 'network', causeCode: undefined });
+    expect(JSON.stringify({ ...e, message: e.message })).not.toMatch(/SECRET|Bearer/);
   });
 
   it('marks a 2xx body that is not JSON retryable with the same key', async () => {

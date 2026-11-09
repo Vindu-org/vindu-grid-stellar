@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto';
 
-import { reportPartnerCall } from '@vindu/grid-core';
+import { causeCodeOf, reportPartnerCall } from '@vindu/grid-core';
 
 import { type BlindPayConfig, type ResolvedConfig, resolveConfig } from './config';
 import { BlindPayHttpError } from './errors';
@@ -223,13 +223,15 @@ export function readErrorBody(text: string): { code?: string; message?: string }
   return { ...(code === undefined ? {} : { code }), ...(message === undefined ? {} : { message }) };
 }
 
-const SYSTEM_CODE_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
-
-/** `ECONNREFUSED`-style code from an error or its cause, never a message. */
+/**
+ * The network failure's code from an error or its cause, never a message,
+ * through core's `causeCodeOf`: `ECONNREFUSED` is kept as `econnrefused`,
+ * and anything that is not a plain code (a secret, free text) is dropped.
+ */
 function systemCodeOf(error: unknown): string | undefined {
   for (let cur = error, depth = 0; typeof cur === 'object' && cur !== null && depth < 3; depth++) {
-    const code = (cur as { code?: unknown }).code;
-    if (typeof code === 'string' && SYSTEM_CODE_RE.test(code)) return code;
+    const code = causeCodeOf(cur);
+    if (code !== undefined) return code;
     cur = (cur as { cause?: unknown }).cause;
   }
   return undefined;

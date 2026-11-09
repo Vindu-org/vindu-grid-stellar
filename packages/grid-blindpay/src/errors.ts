@@ -12,10 +12,11 @@ import { GridError, PartnerHttpError, type PartnerHttpErrorInit } from '@vindu/g
  * It carries no free text from BlindPay or from the network layer: no response
  * body (unless the client was built with `includeErrorBodies: true`), and no
  * `cause`, because a fetch error message can quote request headers or bodies.
- * `causeCode` keeps the system error code (e.g. `ECONNREFUSED`) when there is one.
+ * `causeCode` keeps the system error code, lowercased (`econnrefused`), when
+ * core's `causeCodeOf` accepts it; anything else is dropped.
  */
 export class BlindPayHttpError extends PartnerHttpError {
-  /** Code of the underlying network failure, such as `ECONNREFUSED` or `UND_ERR_CONNECT_TIMEOUT`. */
+  /** Code of the underlying network failure, lowercased: `econnrefused`, `und_err_connect_timeout`. */
   readonly causeCode: string | undefined;
 
   constructor(init: Omit<PartnerHttpErrorInit, 'cause'> & { readonly causeCode?: string }) {
