@@ -122,6 +122,7 @@ export {
   selectRoute,
 } from './routing';
 export {
+  type ConfirmedSubmitOutcome,
   DEFAULT_EXPIRY_MARGIN_MS,
   type PayoutSubmission,
   retryPayoutExecute,

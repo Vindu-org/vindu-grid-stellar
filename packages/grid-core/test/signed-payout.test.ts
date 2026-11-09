@@ -11,6 +11,7 @@ import { money } from '../src/money';
 import type { ExecutePayoutInput, LegQuote, LegRef, PayoutAuthorization } from '../src/ports';
 import {
   DEFAULT_EXPIRY_MARGIN_MS,
+  type ConfirmedSubmitOutcome,
   type RunSignedPayoutInput,
   type SignedPayoutSigning,
   retryPayoutExecute,
@@ -67,16 +68,27 @@ function setup(options: { auth?: PayoutAuthorization; outcome?: SubmitOutcome; c
     order.push('submit');
     return options.outcome ?? { status: 'success', hash: HASH };
   });
+  const onSubmitted = jest.fn(async (_outcome: ConfirmedSubmitOutcome) => {
+    order.push('recorded');
+    store.state = transition(store.state, 'payout_submitted', 'signed_and_on_chain').to;
+  });
   const signer: Signer = { custody: 'test_key', signStellar };
   const input: RunSignedPayoutInput = {
     adapter: { id: 'p', preparePayout, executePayout },
     context: { transferId: 'tr_1', state: 'payout_quoted', quote, account },
     funded: money('100', USDC),
-    signing: { signer, submitter: { submit }, submission: 'client_submits', destination: DESTINATION, onAuthorized },
+    signing: {
+      signer,
+      submitter: { submit },
+      submission: 'client_submits',
+      destination: DESTINATION,
+      onAuthorized,
+      onSubmitted,
+    },
     now: options.clock ?? (() => NOW),
     idempotencyKey: KEY,
   };
-  return { input, order, store, preparePayout, onAuthorized, executePayout, signStellar, submit };
+  return { input, order, store, preparePayout, onAuthorized, onSubmitted, executePayout, signStellar, submit };
 }
 
 /** The input with some signing fields changed. */
@@ -101,7 +113,7 @@ describe('signed payout', () => {
     const { input, order, onAuthorized, executePayout, signStellar, submit } = setup();
     const res = await runSignedPayout(input);
 
-    expect(order).toEqual(['prepare', 'authorized', 'sign', 'submit', 'execute']);
+    expect(order).toEqual(['prepare', 'authorized', 'sign', 'submit', 'recorded', 'execute']);
     expect(onAuthorized).toHaveBeenCalledTimes(1);
     expect(onAuthorized).toHaveBeenCalledWith({ kind: 'stellar_xdr', unsignedXdr: UNSIGNED });
     expect(signStellar).toHaveBeenCalledTimes(1);
@@ -296,10 +308,6 @@ describe('signed payout', () => {
       [
         'a failed create after a confirmed submit',
         (s) => {
-          s.submit.mockImplementationOnce(async () => {
-            s.store.state = transition(s.store.state, 'payout_submitted', 'signed_and_on_chain').to;
-            return { status: 'success', hash: HASH };
-          });
           s.executePayout.mockRejectedValueOnce(new Error('503'));
           return s.input;
         },
@@ -351,9 +359,60 @@ describe('signed payout', () => {
     });
 
     it('may return the state synchronously', async () => {
-      const { input, signStellar } = setup();
-      await runSignedPayout(withSigning(input, { onAuthorized: () => 'awaiting_signature' }));
+      const { input, store, signStellar } = setup();
+      const onAuthorized = () => (store.state = transition(store.state, 'awaiting_signature', 'signed_payout_flow').to);
+      await runSignedPayout(withSigning(input, { onAuthorized }));
       expect(signStellar).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('onSubmitted', () => {
+    // Review probe: nothing was stored between a confirmed submit and the create,
+    // so a crash there left the transfer in awaiting_signature after the money moved.
+    it('stores payout_submitted after a confirmed success and before the partner is called', async () => {
+      const { input, store, onSubmitted, executePayout } = setup();
+      executePayout.mockImplementationOnce(async () => {
+        expect(store.state).toBe('payout_submitted');
+        return LEG;
+      });
+      await runSignedPayout(input);
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+      expect(onSubmitted).toHaveBeenCalledWith({ status: 'success', hash: HASH });
+      expect(executePayout).toHaveBeenCalledTimes(1);
+    });
+
+    it('is not called with partner_submits', async () => {
+      const { input, onSubmitted } = setup();
+      await runSignedPayout(withSigning(input, { submission: 'partner_submits', submitter: undefined }));
+      expect(onSubmitted).not.toHaveBeenCalled();
+    });
+
+    it('is not called on a submit that is not a success', async () => {
+      const { input, onSubmitted } = setup({ outcome: { status: 'unknown', hash: HASH } });
+      await expect(runSignedPayout(input)).rejects.toMatchObject({ stage: 'submit' });
+      expect(onSubmitted).not.toHaveBeenCalled();
+    });
+
+    it('stops with stage record when it throws, never calling the partner, and the retry creates the payout', async () => {
+      const { input, store, onSubmitted, executePayout, signStellar, submit } = setup();
+      const cause = new Error('db down');
+      onSubmitted.mockRejectedValueOnce(cause);
+      const e = (await caught(runSignedPayout(input))) as PayoutIncompleteError<ExecutePayoutInput>;
+      expect(e).toBeInstanceOf(PayoutIncompleteError);
+      expect(e).toMatchObject({ code: 'payout_not_recorded', stage: 'record', txHash: HASH, signedXdr: SIGNED });
+      expect(e.cause).toBe(cause);
+      expect(e.message).toMatch(/money has moved/);
+      expect(executePayout).not.toHaveBeenCalled();
+      const body = { quote, account, transferId: 'tr_1', idempotencyKey: KEY, signedXdr: SIGNED, txHash: HASH };
+      expect(e.pending).toEqual({ body, idempotencyKey: KEY });
+
+      // The caller stores the move, then creates the payout. Nothing is signed or submitted again.
+      expect(store.state).toBe('awaiting_signature');
+      store.state = transition(store.state, 'payout_submitted', 'signed_and_on_chain').to;
+      await expect(retryPayoutExecute(input.adapter, e.pending!)).resolves.toMatchObject({ leg: LEG, txHash: HASH });
+      expect(executePayout).toHaveBeenCalledWith(body);
+      expect(signStellar).toHaveBeenCalledTimes(1);
+      expect(submit).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -512,7 +571,7 @@ describe('signed payout', () => {
       ok.order.push(`stored ${xdr}`);
     });
     await runSignedPayout(withSigning(ok.input, { onSigned }));
-    expect(ok.order).toEqual(['prepare', 'authorized', 'sign', `stored ${SIGNED}`, 'submit', 'execute']);
+    expect(ok.order).toEqual(['prepare', 'authorized', 'sign', `stored ${SIGNED}`, 'submit', 'recorded', 'execute']);
 
     const failing = setup();
     await expect(
@@ -598,6 +657,7 @@ describe('signed payout', () => {
 
   it.each<[string, (i: RunSignedPayoutInput) => RunSignedPayoutInput]>([
     ['client_submits without a submitter', (i) => withSigning(i, { submitter: undefined })],
+    ['client_submits without onSubmitted', (i) => withSigning(i, { onSubmitted: undefined })],
     ['an empty idempotency key', (i) => ({ ...i, idempotencyKey: '' })],
     ['an unknown submission mode', (i) => withSigning(i, { submission: 'nobody' as SignedPayoutSigning['submission'] })],
     ['a funding quote', (i) => ({ ...i, context: { ...i.context, quote: { ...quote, kind: 'funding' } } })],

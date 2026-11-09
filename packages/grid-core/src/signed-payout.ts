@@ -115,7 +115,23 @@ export interface SignedPayoutSigning {
    * submitted and the error propagates.
    */
   readonly onSigned?: (signedXdr: string) => void | Promise<void>;
+  /**
+   * Required for `client_submits`. Called once, after the submitter reported
+   * a confirmed `success` and before `executePayout`. Store
+   * `awaiting_signature -> payout_submitted` (reason `signed_and_on_chain`)
+   * and the hash here: the money has moved, so the stored state must say so
+   * before the partner is called.
+   *
+   * If it throws, the run stops with {@link PayoutIncompleteError}
+   * (`stage: 'record'`) carrying `txHash` and `pending`. The money has
+   * moved: store `payout_submitted`, then call {@link retryPayoutExecute}
+   * with `pending`. Never re-quote and never sign again.
+   */
+  readonly onSubmitted?: (outcome: ConfirmedSubmitOutcome) => void | Promise<void>;
 }
+
+/** A submit outcome that is a confirmed success on the ledger. */
+export type ConfirmedSubmitOutcome = Extract<SubmitOutcome, { status: 'success' }>;
 
 export interface RunSignedPayoutInput {
   /** The partner adapter. Its `id` must be the quote's `partner`. */
@@ -227,7 +243,6 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   // Still unsubmitted: an expired quote here is safe to abandon, and the signed XDR is dropped.
   assertFresh('signing');
 
-  let txHash: string | undefined;
   if (signing.submission === 'client_submits') {
     const submitter = signing.submitter as StellarSubmitter;
     let outcome: SubmitOutcome;
@@ -246,12 +261,21 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
         ...(isOutcome(outcome) ? { outcome } : {}),
       });
     }
-    txHash = outcome.hash;
+    const txHash = outcome.hash;
     logger.info('payout submitted', { transferId, quoteId: quote.id, txHash });
+    const pending = { body: { ...base, signedXdr, txHash }, idempotencyKey: input.idempotencyKey };
+    // The money has moved: record it before the partner hears about it.
+    const onSubmitted = signing.onSubmitted as NonNullable<SignedPayoutSigning['onSubmitted']>;
+    try {
+      await onSubmitted(outcome);
+    } catch (cause) {
+      logger.error('payout on chain but not recorded', { transferId, quoteId: quote.id, txHash });
+      throw new PayoutIncompleteError<ExecutePayoutInput>({ stage: 'record', signedXdr, txHash, pending, cause });
+    }
+    return execute(adapter, pending, logger);
   }
 
-  const body: ExecutePayoutInput = { ...base, signedXdr, ...(txHash === undefined ? {} : { txHash }) };
-  return execute(adapter, { body, idempotencyKey: input.idempotencyKey }, logger);
+  return execute(adapter, { body: { ...base, signedXdr }, idempotencyKey: input.idempotencyKey }, logger);
 }
 
 /**
@@ -452,5 +476,8 @@ function checkSigning(signing: SignedPayoutSigning): void {
   }
   if (signing.submission === 'client_submits' && typeof signing.submitter?.submit !== 'function') {
     throw new InvalidInputError('client_submits needs a submitter');
+  }
+  if (signing.submission === 'client_submits' && typeof signing.onSubmitted !== 'function') {
+    throw new InvalidInputError('client_submits needs onSubmitted: store payout_submitted there before the payout is created');
   }
 }
