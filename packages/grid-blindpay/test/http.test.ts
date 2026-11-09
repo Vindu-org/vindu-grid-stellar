@@ -76,6 +76,8 @@ describe('client http', () => {
     const e = (await caught(http.request({ method: 'POST', path: '/payouts/stellar', body: {}, idempotencyKey: 'k' }))) as BlindPayHttpError;
     expect(e).toBeInstanceOf(PartnerHttpError);
     expect(e).toMatchObject({ partner: 'blindpay', status, partnerCode: code, retryable, retryAfterMs: 3000, idempotencyKey: 'k' });
+    // The key is core's field, so code that only knows PartnerHttpError can retry with it.
+    expect((e as PartnerHttpError).idempotencyKey).toBe('k');
     expect(e.path).toBe('/v1/instances/{in_id}/payouts/stellar');
   });
 
