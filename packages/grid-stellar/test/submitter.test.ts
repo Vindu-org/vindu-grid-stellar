@@ -1,4 +1,5 @@
 import {
+  type ConfirmedSubmitOutcome,
   InvalidConfigError,
   InvalidInputError,
   type LegQuote,
@@ -209,26 +210,37 @@ describe('createStellarSubmitter in the signed payout flow', () => {
   };
 
   function flow(gateway: FakeGateway, signedXdr: string) {
-    const executePayout = jest.fn(async () => ({ partner: 'test', kind: 'payout' as const, id: 'po_1' }));
+    const order: string[] = [];
+    const executePayout = jest.fn(async () => {
+      order.push('execute');
+      return { partner: 'test', kind: 'payout' as const, id: 'po_1' };
+    });
+    const onSubmitted = jest.fn(async (_outcome: ConfirmedSubmitOutcome) => {
+      order.push('recorded');
+    });
     const signer: Signer = { custody: 'test_key', signStellar: async () => signedXdr };
     const run = () =>
       runSignedPayout({
-        adapter: { preparePayout: async () => ({ kind: 'stellar_xdr', unsignedXdr: 'AAAA' }), executePayout },
-        signer,
-        submitter: submitterFor(gateway),
-        submission: 'client_submits',
+        adapter: { id: 'test', preparePayout: async () => ({ kind: 'stellar_xdr', unsignedXdr: 'AAAA' }), executePayout },
         context: {
           transferId: 't1',
           state: 'payout_quoted',
           quote,
           account: { chain: 'stellar', address: client.publicKey() },
+        },
+        funded: money('25.5', fiat('USDC')),
+        signing: {
+          signer,
+          submitter: submitterFor(gateway),
+          submission: 'client_submits',
           destination,
+          onAuthorized: () => 'awaiting_signature',
+          onSubmitted,
         },
         now: () => T0,
         idempotencyKey: 'k1',
-        onAuthorized: () => 'awaiting_signature',
       });
-    return { run, executePayout };
+    return { run, executePayout, onSubmitted, order };
   }
 
   it('a rejected submit stops the flow before the payout is created', async () => {
@@ -239,11 +251,12 @@ describe('createStellarSubmitter in the signed payout flow', () => {
     gateway.submitResponses = [
       { kind: 'rejected', status: 400, transactionCode: 'tx_insufficient_balance', operationCodes: [] },
     ];
-    const { run, executePayout } = flow(gateway, xdr);
+    const { run, executePayout, onSubmitted } = flow(gateway, xdr);
     const error = await run().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(PayoutIncompleteError);
     expect(error).toMatchObject({ stage: 'submit', txHash: hash });
     expect((error as { outcome?: SubmitOutcome }).outcome?.status).toBe('rejected');
+    expect(onSubmitted).not.toHaveBeenCalled();
     expect(executePayout).not.toHaveBeenCalled();
   });
 
@@ -251,19 +264,22 @@ describe('createStellarSubmitter in the signed payout flow', () => {
     const { xdr } = signed();
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'accepted', hash: 'ef'.repeat(32), successful: true }];
-    const { run, executePayout } = flow(gateway, xdr);
+    const { run, executePayout, onSubmitted } = flow(gateway, xdr);
     await expect(run()).rejects.toBeInstanceOf(PayoutIncompleteError);
+    expect(onSubmitted).not.toHaveBeenCalled();
     expect(executePayout).not.toHaveBeenCalled();
   });
 
-  it('a landed transaction creates the payout with its hash', async () => {
+  it('a landed transaction is recorded, then creates the payout with its hash', async () => {
     const { xdr, hash } = signed();
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.transactions.set(hash, { found: true, hash, successful: true, ledger: 5 });
-    const { run, executePayout } = flow(gateway, xdr);
+    const { run, executePayout, onSubmitted, order } = flow(gateway, xdr);
     const result = await run();
     expect(result.txHash).toBe(hash);
+    expect(onSubmitted).toHaveBeenCalledWith(expect.objectContaining({ status: 'success', hash }));
+    expect(order).toEqual(['recorded', 'execute']);
     expect(executePayout).toHaveBeenCalledWith(expect.objectContaining({ txHash: hash, signedXdr: xdr }));
   });
 });
