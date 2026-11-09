@@ -92,6 +92,13 @@ function setup(options: { auth?: PayoutAuthorization; outcome?: SubmitOutcome; c
   return { input, order, store, preparePayout, onAuthorized, onSubmitted, executePayout, signStellar, submit };
 }
 
+/** The input for a partner that needs no signature: no signing group at all. */
+function withoutSigning(input: RunSignedPayoutInput): RunSignedPayoutInput {
+  const copy: { -readonly [K in keyof RunSignedPayoutInput]?: RunSignedPayoutInput[K] } = { ...input };
+  delete copy.signing;
+  return copy as RunSignedPayoutInput;
+}
+
 /** The input with some signing fields changed. */
 function withSigning(
   input: RunSignedPayoutInput,
@@ -157,8 +164,7 @@ describe('signed payout', () => {
 
   it('needs no signing inputs when the partner needs no signature', async () => {
     const { input, order, executePayout } = setup({ auth: { kind: 'none' } });
-    const { signing: _s, ...noSigning } = input;
-    const res = await runSignedPayout(noSigning);
+    const res = await runSignedPayout(withoutSigning(input));
     expect(order).toEqual(['prepare', 'execute']);
     expect(executePayout).toHaveBeenCalledWith({ quote, account, transferId: 'tr_1', idempotencyKey: KEY });
     expect(res).toMatchObject({ leg: LEG, authorization: 'none' });
@@ -167,8 +173,7 @@ describe('signed payout', () => {
   describe('authorization failures', () => {
     it('refuses a transaction to sign when the run has no signing inputs, still in payout_quoted', async () => {
       const { input, store, executePayout } = setup();
-      const { signing: _s, ...noSigning } = input;
-      const e = await caught(runSignedPayout(noSigning));
+      const e = await caught(runSignedPayout(withoutSigning(input)));
       expect(e).toBeInstanceOf(PayoutAuthorizationError);
       expect(e).toMatchObject({ failure: 'invalid_authorization' });
       expect(store.state).toBe('payout_quoted');
