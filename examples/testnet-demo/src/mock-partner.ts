@@ -11,7 +11,8 @@
  *
  * The `simulate*` methods stand in for things that happen outside the
  * application: the client paying the PIX, the partner settling, the fiat
- * reaching the beneficiary.
+ * reaching the beneficiary. `refuseNextAuthorization` makes the partner's
+ * authorize step fail once, to show that failure edge.
  */
 import {
   type AccountRef,
@@ -99,6 +100,7 @@ export class MockPartner implements PartnerAdapter {
   private readonly legs = new Map<string, Leg>();
   private readonly quotes = new Map<string, LegQuote>();
   private readonly counters = new Map<string, number>();
+  private refuseAuthorization = false;
 
   constructor(private readonly options: MockPartnerOptions) {
     this.id = options.id;
@@ -146,6 +148,10 @@ export class MockPartner implements PartnerAdapter {
   }
 
   async preparePayout(input: PreparePayoutInput): Promise<PayoutAuthorization> {
+    if (this.refuseAuthorization) {
+      this.refuseAuthorization = false;
+      throw new GridError('authorization_refused', `${this.id} refused to authorize payout of quote ${input.quote.id}`);
+    }
     const quote = this.liveQuote(input.quote.id);
     if (this.options.chain !== 'stellar') return { kind: 'none' };
     const { ledger, networkPassphrase } = this.stellar();
@@ -187,6 +193,11 @@ export class MockPartner implements PartnerAdapter {
 
   async parseWebhook(): Promise<never> {
     throw new GridError('webhook_rejected', `${this.id} sends no webhooks; read legs with readLeg`);
+  }
+
+  /** The next `preparePayout` throws, as a partner that refuses to authorize would. */
+  refuseNextAuthorization(): void {
+    this.refuseAuthorization = true;
   }
 
   /** The client paid the PIX: the partner starts processing the funding leg. */
