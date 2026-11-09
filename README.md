@@ -61,7 +61,7 @@ For a payout that needs a signature, the partner builds the unsigned transaction
 - **Bring your own credentials.** Partner keys and URLs are passed as arguments. The library never reads environment variables.
 - **Typed in, typed out.** Every call takes a typed input and returns a typed result or a typed error.
 - **Nothing sensitive in logs.** An optional `onCall` hook reports the method, path, status and timing of each partner call. It never includes keys or request and response bodies.
-- **Unsigned in, checked, signed once.** Payouts that need a signature come from the partner as unsigned Stellar transactions. Your signer must check the transfer state, the source, the destination, the asset, the exact amount, the fee and the time bound before it signs. The test signer in `examples/testnet-demo` shows every check.
+- **Unsigned in, checked, signed once.** Payouts that need a signature come from the partner as unsigned Stellar transactions. Your signer must check the transfer state, the network, the source, the destination, the asset, the exact amount, the fee, the time bound and the absence of other preconditions before it signs. `assertPayoutXdrMatches` in `@vindu/grid-stellar` makes the transaction checks without a key; the test signer in `examples/testnet-demo` calls it.
 - **One adapter interface.** Every partner client implements the same core interface. A shared conformance suite that every adapter must pass is **planned** for tranche 3, as part of the integration kit for Stellar-ready VASPs. It does not exist yet.
 
 ## Safety rules
