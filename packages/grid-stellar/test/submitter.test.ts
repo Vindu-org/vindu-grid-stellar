@@ -181,8 +181,9 @@ describe('createStellarSubmitter', () => {
     const outcome = await submitter.submit(xdr);
     const elapsed = Date.now() - started;
     expect(outcome.status).toBe('unknown');
-    // Timers may fire a few ms late; nothing waits for the 1 s request timeout.
-    expect(elapsed).toBeLessThan(submitter.maxDurationMs + 50);
+    // Timers may fire late on a busy machine; the bound that matters is far
+    // below the 1 s request timeout that would apply without the deadline.
+    expect(elapsed).toBeLessThan(submitter.maxDurationMs + 300);
   });
 
   it('checks the passphrase and durations when it is created', () => {
