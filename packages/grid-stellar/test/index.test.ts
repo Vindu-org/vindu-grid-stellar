@@ -6,14 +6,12 @@ describe('index exports', () => {
     'createHorizonGateway',
     'createReadLayer',
     'InMemoryCursorStore',
-    'normalisePayment',
     'matchPaymentToLeg',
     'partnerAndChainAgree',
     'submitSignedTransaction',
     'inspectSignedTransaction',
     'createStellarSubmitter',
     'toSubmitOutcome',
-    'mapResultCodes',
     'assessReceiveReadiness',
     'checkReceiveReadiness',
     'minimumBalance',
@@ -25,8 +23,8 @@ describe('index exports', () => {
     expect(stellar).toHaveProperty(name);
   });
 
-  it('does not expose the raw SDK', () => {
-    expect(stellar).not.toHaveProperty('stellarSdk');
+  it.each(['stellarSdk', 'normalisePayment', 'assetFromHorizon', 'mapResultCodes'])('keeps %s internal', (name) => {
+    expect(stellar).not.toHaveProperty(name);
   });
 
   it('matches the SDK network passphrases', () => {
