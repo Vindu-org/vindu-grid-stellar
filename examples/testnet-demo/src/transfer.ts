@@ -36,4 +36,32 @@ export class Transfer {
     this.current = to;
     this.path.push(to);
   }
+
+  /**
+   * Compare-and-set: moves from `expected` to `to` only if the transfer is
+   * still in `expected`, in one step, and returns the state now stored. A
+   * database does the same with
+   * `UPDATE transfers SET state = :to WHERE id = :id AND state = :expected`
+   * and a check that one row changed. When the transfer is elsewhere, another
+   * run moved it first: this throws {@link StateConflictError} and moves
+   * nothing. The payout flow's `onAuthorized` must work this way, so two
+   * runs for one transfer cannot both sign.
+   */
+  compareAndMove(expected: TransferState, to: TransferState, detail?: string, reason?: TransitionReason): TransferState {
+    if (this.current !== expected) throw new StateConflictError(this.id, expected, this.current);
+    this.move(to, detail, reason);
+    return this.current;
+  }
+}
+
+/** A compare-and-set found the transfer in another state than it expected. */
+export class StateConflictError extends Error {
+  constructor(
+    readonly transferId: string,
+    readonly expected: TransferState,
+    readonly found: TransferState,
+  ) {
+    super(`Transfer ${transferId} is in ${found}, not ${expected}: another run moved it first; nothing changed`);
+    this.name = 'StateConflictError';
+  }
 }
