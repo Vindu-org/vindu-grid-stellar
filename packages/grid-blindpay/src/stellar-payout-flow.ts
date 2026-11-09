@@ -1,26 +1,37 @@
 /**
  * The signed Stellar payout through BlindPay, end to end, from `payout_quoted`:
  *
- *   authorize -> onAuthorized (store `awaiting_signature`) -> check the quote
- *     and transfer state -> sign once -> [client_submits: submit, success only]
- *     -> create
+ *   check the funds -> authorize -> onAuthorized (store `awaiting_signature`)
+ *     -> check the stored state and the quote -> sign once
+ *     -> [client_submits: submit, success only -> onSubmitted (store
+ *        `payout_submitted`)] -> create
  *
  * A thin wrapper over core's `runSignedPayout` with the BlindPay adapter, so
  * the safety rules, and the error to transition table in its doc, are core's:
+ * - Core checks before any call that the quote is from this adapter's id and
+ *   that `quote.source` is a positive amount of the funded asset, no more
+ *   than `funded`. The adapter already refuses a quote whose `sender_amount`
+ *   is not the amount requested.
  * - The signer is called at most once, after `onAuthorized` stored
- *   `awaiting_signature`. A quote with no more than `expiryMarginMs`
- *   (default one minute) left throws `QuoteExpiredError` before authorizing
- *   (`stage: 'authorization'`), and before signing and before the signed
- *   transaction leaves (`stage: 'signing'`).
+ *   `awaiting_signature` with a compare-and-set. A quote with no more than
+ *   `expiryMarginMs` (default one minute) left throws `QuoteExpiredError`
+ *   before authorizing (`stage: 'authorization'`); with `client_submits`,
+ *   one with no more than `expiryMarginMs` plus the submitter's
+ *   `maxDurationMs` left throws it before signing and before the signed
+ *   transaction leaves.
  * - A failed authorize call, or an answer without the XDR, throws
  *   `PayoutAuthorizationError` while the transfer is still in `payout_quoted`.
+ * - Anything the signer throws becomes `SignerRefusedError`.
  * - With `client_submits`, only a submitter outcome `{ status: 'success' }`
- *   with a valid hash creates the payout. `rejected`, `unknown`,
- *   `expired_not_landed`, `failed`, a malformed outcome or a throw stop with
- *   `PayoutIncompleteError` (`stage: 'submit'`), and BlindPay is never told.
+ *   with a valid hash creates the payout, and only after `onSubmitted`
+ *   stored it. `rejected`, `unknown`, `expired_not_landed`, `failed`, a
+ *   malformed outcome or a throw stop with `PayoutIncompleteError`
+ *   (`stage: 'submit'`), and BlindPay is never told. If `onSubmitted`
+ *   throws, `PayoutIncompleteError` (`stage: 'record'`): the money moved;
+ *   store it, then call {@link retryStellarPayoutCreate}. Never re-quote.
  * - A failed create throws `PayoutIncompleteError` (`stage: 'create'`) with
  *   the exact input and key. Retry with {@link retryStellarPayoutCreate}.
- * - A clock or margin that is not a finite number fails closed.
+ * - A clock, margin or submit budget that is not a finite number fails closed.
  *
  * Two BlindPay answers are still open, so both are options:
  * - `submission`: we submit to Stellar first (`client_submits`, the docs'
@@ -33,14 +44,12 @@ import {
   type ExecutePayoutInput,
   InvalidInputError,
   type Logger,
+  type Money,
   type PayoutSubmission,
   type PendingPayout,
   type SignedPayoutContext,
   type SignedPayoutResult,
-  type Signer,
-  type StellarSubmitter,
-  type StellarXdrAuthorization,
-  type TransferState,
+  type SignedPayoutSigning,
   retryPayoutExecute,
   runSignedPayout,
 } from '@vindu/grid-core';
@@ -50,72 +59,71 @@ import type { BlindPayAdapter } from './adapter';
 /** The parts of the BlindPay adapter the flow uses. */
 export type StellarPayoutAdapter = Pick<BlindPayAdapter, 'id' | 'signedTransactionField' | 'preparePayout' | 'executePayout'>;
 
-export interface RunStellarPayoutInput {
-  readonly adapter: StellarPayoutAdapter;
-  readonly signer: Signer;
-  /** Core's submitter port. Required for `client_submits`. */
-  readonly submitter?: StellarSubmitter;
+/**
+ * Core's signing group, with `submission` defaulting to `client_submits`.
+ * BlindPay always returns a transaction to sign, so it is required here.
+ * With `client_submits`, `submitter` and `onSubmitted` are required.
+ */
+export interface StellarPayoutSigning extends Omit<SignedPayoutSigning, 'submission'> {
   /** Default `client_submits`. */
   readonly submission?: PayoutSubmission;
+}
+
+export interface RunStellarPayoutInput {
+  readonly adapter: StellarPayoutAdapter;
   /**
-   * The transfer (stored in `payout_quoted`), the fresh payout quote from this adapter,
-   * the client's Stellar account (`partnerAccountId` = `bw_...`) and the
-   * BlindPay account the transaction must pay. The signer receives the
-   * expected source, destination and amount from it.
+   * The transfer (stored in `payout_quoted`), the fresh payout quote from
+   * this adapter, and the client's Stellar account (`partnerAccountId` =
+   * `bw_...`). The signer receives the expected source and amount from it.
    */
   readonly context: SignedPayoutContext;
+  /** The amount confirmed in the account. The quote may not move more. */
+  readonly funded: Money;
+  /** Signer, submission, submitter, BlindPay's account to pay (`destination`) and the hooks. */
+  readonly signing: StellarPayoutSigning;
   /** Key for BlindPay's create. Store it before calling, and reuse it on every retry. */
   readonly idempotencyKey: string;
   /** Clock in epoch milliseconds. Defaults to `Date.now`. */
   readonly now?: () => number;
   /** Refuse to sign or submit with this little left on the quote. Default core's `DEFAULT_EXPIRY_MARGIN_MS`. */
   readonly expiryMarginMs?: number;
-  /**
-   * Store `payout_quoted -> awaiting_signature` here and return the stored
-   * state. Called once, after BlindPay authorized and before the signer; see
-   * core's `RunSignedPayoutInput.onAuthorized`.
-   */
-  readonly onAuthorized: (authorization: StellarXdrAuthorization) => TransferState | Promise<TransferState>;
-  /** Store the signed XDR (and its hash) here before it is submitted or sent. */
-  readonly onSigned?: (signedXdr: string) => void | Promise<void>;
   readonly logger?: Logger;
 }
 
 /**
  * Runs the payout once. See the module notes.
  *
- * @throws {InvalidInputError} before any call for `partner_submits` with a
- *   `tx_hash` adapter, a quote from another partner, or a non-Stellar account.
- * @throws core's `QuoteExpiredError`, `PayoutAuthorizationError`, `SigningNotAllowedError`
- *   and `PayoutIncompleteError`; see core's `runSignedPayout` for the edge each one takes.
+ * @throws {InvalidInputError} before any call for missing signing inputs,
+ *   `partner_submits` with a `tx_hash` adapter, a non-Stellar account, and
+ *   everything core refuses up front (a quote from another partner, a quote
+ *   above `funded`, `client_submits` without a submitter or `onSubmitted`).
+ * @throws core's `QuoteExpiredError`, `PayoutAuthorizationError`,
+ *   `SigningNotAllowedError`, `SignerRefusedError` and `PayoutIncompleteError`;
+ *   see core's `runSignedPayout` for the edge each one takes.
  */
 export async function runStellarPayout(input: RunStellarPayoutInput): Promise<SignedPayoutResult> {
-  const submission = input.submission ?? 'client_submits';
   const { adapter, context } = input;
+  if (typeof input.signing !== 'object' || input.signing === null) {
+    throw new InvalidInputError('BlindPay payouts are always signed: signing is required');
+  }
+  const submission = input.signing.submission ?? 'client_submits';
   if (submission === 'partner_submits' && adapter.signedTransactionField === 'tx_hash') {
     throw new InvalidInputError('partner_submits cannot send a tx_hash: nothing was submitted, so there is no hash');
-  }
-  if (context.quote.partner !== adapter.id) {
-    throw new InvalidInputError(`Quote ${context.quote.id} is from ${context.quote.partner}, not ${adapter.id}`);
   }
   if (context.account.chain !== 'stellar') {
     throw new InvalidInputError('BlindPay pays out from Stellar accounts only');
   }
   return runSignedPayout({
     adapter,
-    signer: input.signer,
-    ...(input.submitter === undefined ? {} : { submitter: input.submitter }),
-    submission,
     context,
+    funded: input.funded,
+    signing: { ...input.signing, submission },
     now: input.now ?? Date.now,
     ...(input.expiryMarginMs === undefined ? {} : { expiryMarginMs: input.expiryMarginMs }),
     idempotencyKey: input.idempotencyKey,
-    onAuthorized: input.onAuthorized,
-    ...(input.onSigned === undefined ? {} : { onSigned: input.onSigned }),
     ...(input.logger === undefined ? {} : { logger: input.logger }),
   });
 }
-
 /**
  * Sends BlindPay's create again with exactly the pending input and key, after
  * `PayoutIncompleteError` with `stage: 'create'`. Use the same adapter

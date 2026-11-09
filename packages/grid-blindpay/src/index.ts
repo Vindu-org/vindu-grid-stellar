@@ -30,6 +30,7 @@ export type { PayoutQuotesApi } from './payout-quotes';
 export {
   type RunStellarPayoutInput,
   type StellarPayoutAdapter,
+  type StellarPayoutSigning,
   retryStellarPayoutCreate,
   runStellarPayout,
 } from './stellar-payout-flow';
