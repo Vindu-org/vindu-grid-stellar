@@ -26,9 +26,12 @@ describe('testnet demo', () => {
 
     const output = lines.join('\n');
     expect(output).toContain('signer refused (asked to sign before awaiting_signature)');
-    expect(output).toContain('signer refused (XDR that pays another account)');
+    expect(output).toMatch(/signer refused \(XDR that pays another account\): Destination .* is not the expected/);
+    expect(output).toContain('then signed once');
     expect(output).toContain('checking the hash (timeout)');
-    expect(output).toContain('1 submission(s), 1 hash lookup(s)');
+    expect(output).toContain('submit: success');
+    expect(output).toContain('1 submission(s), 1 hash lookup(s), no second signature');
+    expect(output).toContain('awaiting_signature -> payout_submitted (signed and on chain)');
     expect(output).toMatch(/matched demo-transfer-1\/payout on .*tx_hash, reference/);
   });
 
@@ -38,6 +41,24 @@ describe('testnet demo', () => {
 
     expect(result.finalState).toBe('completed');
     expect(lines.join('\n')).toContain('1 submission(s), 0 hash lookup(s)');
+  });
+
+  it('stops in needs_attention, without creating the payout, when Horizon refuses the submission', async () => {
+    const lines: string[] = [];
+    const result = await runDemo({
+      log: (line) => lines.push(line),
+      simulateHorizonTimeout: false,
+      simulateSubmitRejection: true,
+    });
+
+    expect(result.finalState).toBe('needs_attention');
+    expect(result.history).toEqual([...FULL_PATH.slice(0, FULL_PATH.indexOf('awaiting_signature') + 1), 'needs_attention']);
+    expect(result.payoutTxHash).toBeUndefined();
+    const output = lines.join('\n');
+    expect(output).toContain('submit: rejected');
+    expect(output).toContain('awaiting_signature -> needs_attention (submission rejected or outcome unknown)');
+    expect(output).toContain('do not sign again');
+    expect(output).not.toContain('accepted payout');
   });
 });
 
@@ -55,6 +76,8 @@ describe('BlindPay dry run', () => {
     ]);
     expect(result.payoutId).toBe('po_demo1');
     expect(result.txHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(lines.join('\n')).not.toContain('dry-run-placeholder');
+    const output = lines.join('\n');
+    expect(output).toContain('payout po_demo1 created after a confirmed submit');
+    expect(output).not.toContain('dry-run-placeholder');
   });
 });
