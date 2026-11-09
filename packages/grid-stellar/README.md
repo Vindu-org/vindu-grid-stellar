@@ -67,12 +67,25 @@ const result = await submitSignedTransaction({ gateway, signedXdr, networkPassph
 | `failed` | In a ledger, failed: fee and sequence spent, nothing moved | Yes, after fixing the cause |
 | `rejected`, reason `refused` | Refused by Horizon, not found on the ledger; may still land until maxTime | No |
 | `rejected`, reason `hash_mismatch` | Horizon accepted it but answered with another hash. Never a success: the payment may have moved | No: settle it by hand |
-| `unknown` | Not found yet and could still land | No: check again later |
-| `expired_not_landed` | Horizon's ingested ledger closed after maxTime and a later lookup found nothing | Yes |
+| `unknown` | Not found yet and could still land, or expiry could not be proven. With reason `unexpected_lookup_hash`, a lookup returned a transaction that is not ours | No: check again later |
+| `expired_not_landed` | Horizon proved it can never land (below) | Yes |
 
 Only `failed` and `expired_not_landed` allow a replacement (core's `canSignReplacement`).
 
-**Expiry is decided by the ingested ledger, not the local clock.** `expired_not_landed` needs all three: the transaction has a maxTime; Horizon's latest ingested ledger (`gateway.latestLedger()`) closed after that maxTime; and a successful lookup made after reading that ledger finds nothing by any hash. Horizon ingests ledgers in order, so every ledger that could hold the transaction is already searchable. A failed ledger read or lookup never counts as expired. Point the gateway at a single Horizon instance: behind a load balancer the ledger read and the lookup may reach instances at different ledgers. The local clock only bounds how long to wait (`maxWaitMs`).
+**Expiry is proven by Horizon, never by the local clock.** Before the first submission the submitter reads Horizon's latest ingested ledger once. `expired_not_landed` then needs every one of these, and anything missing or doubtful gives `unknown`:
+
+1. the transaction has a maxTime (greater than 0);
+2. the latest ledger Horizon had ingested, read before the lookups, closed after that maxTime;
+3. every lookup that found nothing reports, in Horizon's `Latest-Ledger` response header, an ingested ledger at least as recent as that checked ledger;
+4. the checked instance keeps history from a ledger no later than the one read before the first submission (`history_elder_ledger`).
+
+A failed or timed-out ledger read or lookup never counts. The local clock only bounds how long to wait. The default gateway reads the root resource for (2) and (4) and the response header for (3); a custom gateway that leaves `latestLedger` or `elderLedger` out never proves expiry. With `maxWaitMs: 0` nothing is read before submitting, so the result is never `expired_not_landed`.
+
+**A lookup must return our transaction.** A record is accepted only when its hash is the hash looked up, our envelope hash or our inner hash, or its inner transaction's hash is our inner (or plain) hash. Anything else ends the run as `unknown` with reason `unexpected_lookup_hash` and the returned hashes, never as a success.
+
+**A landed failure keeps its own codes.** When the transaction is found in a ledger as failed, `error` holds that transaction's own result codes (read from its result), never the refusal a resubmission got (for example `tx_bad_seq`, which a resubmission of a landed transaction always gets).
+
+**Time budget.** One run takes at most `timeoutMs + maxWaitMs` (defaults 30 s + 2 min). The first submission always gets its full `timeoutMs`; the ledger read before it comes out of `maxWaitMs`. Every Horizon read is aborted at `requestTimeoutMs` (default 10 s) or at the deadline, whichever comes first, and a timed-out lookup is an error, never "not found". The deadline is fixed once from the clock; a later clock reading that is not finite ends the run with `unknown`, and the number of polls is capped at `maxWaitMs / pollIntervalMs` plus one, so a broken or stuck clock cannot keep it looping.
 
 **Fee bumps.** Anyone can wrap a signed transaction in a fee bump of their own. For a fee bump both the outer hash and the inner transaction hash are looked up; either found means landed. The result says which (`foundBy`), carries `innerHash`, and `submittedHash` when what landed is another envelope.
 
