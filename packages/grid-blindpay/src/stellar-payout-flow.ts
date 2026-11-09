@@ -1,5 +1,5 @@
 /**
- * The signed Stellar payout, end to end (ADR 0002):
+ * The signed Stellar payout, end to end:
  *
  *   authorize -> check the quote and transfer state -> sign once
  *     -> [client_submits: put the transaction on Stellar] -> create

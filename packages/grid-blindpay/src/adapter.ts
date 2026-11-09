@@ -44,7 +44,7 @@ export interface BlindPayAdapterOptions {
    * the quote is refused rather than silently priced without the spread.
    */
   readonly partnerFeeIdFor?: (leg: LegKind, spreadBps: number | undefined) => string | undefined;
-  /** UNCONFIRMED which one BlindPay expects. Default `signed_xdr`. See ADR 0002. */
+  /** What goes in `signed_transaction`; UNCONFIRMED which one BlindPay expects. Default `signed_xdr`. */
   readonly signedTransactionField?: SignedTransactionField;
   /** Reuse an existing client instead of building one from the config. */
   readonly client?: BlindPayClient;
