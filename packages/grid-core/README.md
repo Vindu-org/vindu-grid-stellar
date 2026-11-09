@@ -60,11 +60,13 @@ Store `decision.route` on the transfer. It never changes after the funding leg i
 Payouts that need a signature come back from `preparePayout` as an unsigned Stellar transaction. Your signer holds the key, and it must check what it signs, because the partner built the transaction. Before signing, it:
 
 1. calls `assertSigningAllowed(context, now)`: the transfer is in `awaiting_signature`, the quote has not expired, and the clock is sane;
-2. decodes the XDR for its network;
-3. checks the source account against `context.expected.source`;
-4. checks for one payment to `expected.destination`, in `expected.amount.asset` (code and issuer), for exactly `expected.amount.amount`;
-5. calls `assertMaxTimeWithinQuote(maxTime, context)`: the transaction has a `maxTime`, no later than the quote expiry;
-6. checks the fee against its own cap.
+2. decodes the XDR for its network, and refuses anything but a plain transaction (no fee bump) with exactly one payment operation;
+3. checks the transaction source against `context.expected.source`, and that the operation has no source of its own or the same one;
+4. checks the payment: to `expected.destination`, in `expected.amount.asset` (code and issuer), for exactly `expected.amount.amount`;
+5. checks the total fee against its own cap;
+6. calls `assertMaxTimeWithinQuote(maxTime, context)`: the transaction has a `maxTime`, no later than the quote expiry.
+
+`TestKeySigner` in `examples/testnet-demo` makes every one of these checks, and its tests cover each refusal. It holds a throwaway key and is for tests and demos only.
 
 ## Payout flow
 
