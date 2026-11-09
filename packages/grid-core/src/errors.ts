@@ -3,8 +3,10 @@
  * and carries a stable `code`, so callers can branch on it without parsing
  * messages.
  */
+import type { SubmitOutcome } from './submission';
 
-export type GridErrorCode =
+/** Codes raised by this package. Adapters add their own through the open string. */
+export type CoreErrorCode =
   | 'invalid_money'
   | 'asset_mismatch'
   | 'invalid_transition'
@@ -18,6 +20,13 @@ export type GridErrorCode =
   | 'webhook_rejected'
   | 'quote_expired'
   | 'payout_not_recorded';
+
+/**
+ * Every code a {@link GridError} may carry: core's own, plus any code an
+ * adapter defines (e.g. a partner-specific refusal). Branch on the core codes;
+ * treat any other as adapter-specific.
+ */
+export type GridErrorCode = CoreErrorCode | (string & {});
 
 export class GridError extends Error {
   readonly code: GridErrorCode;
@@ -102,6 +111,37 @@ export class ToleranceExceededError extends GridError {
   }
 }
 
+/** The configuration passed to a client or adapter is unusable. The message never echoes a secret. */
+export class InvalidConfigError extends GridError {
+  constructor(message: string) {
+    super('invalid_config', message);
+  }
+}
+
+/** An argument is malformed, e.g. an id with the wrong prefix or an amount with too much precision. */
+export class InvalidInputError extends GridError {
+  constructor(message: string) {
+    super('invalid_input', message);
+  }
+}
+
+/**
+ * The quote expired, or is too close to expiry, before the transaction was
+ * signed or submitted. Get a fresh quote and a new transaction; never reuse
+ * the old one.
+ */
+export class QuoteExpiredError extends GridError {
+  constructor(
+    readonly quoteId: string,
+    readonly expiresAt: string,
+  ) {
+    super(
+      'quote_expired',
+      `Quote ${quoteId} expired at ${expiresAt}: get a fresh quote and authorize again; do not reuse the old transaction`,
+    );
+  }
+}
+
 /** A signer refused to sign, or was asked to sign in a state where signing is not allowed. */
 export class SigningNotAllowedError extends GridError {
   constructor(message: string) {
@@ -179,4 +219,57 @@ function capSnippet(text: string): string {
   return text.length <= PARTNER_ERROR_SNIPPET_MAX
     ? text
     : `${text.slice(0, PARTNER_ERROR_SNIPPET_MAX)}...`;
+}
+
+/** Everything needed to repeat the partner's payout call unchanged. */
+export interface PendingPayout<TBody = unknown> {
+  /** The exact request that was sent. Send it again as is. */
+  readonly body: TBody;
+  /** Same key on every retry, so the partner never creates a second payout. */
+  readonly idempotencyKey: string;
+}
+
+export interface PayoutIncompleteInit<TBody = unknown> {
+  readonly stage: 'submit' | 'create';
+  readonly signedXdr?: string;
+  readonly txHash?: string;
+  /** What the submitter reported, for `stage: 'submit'`. Absent when it threw. */
+  readonly outcome?: SubmitOutcome;
+  /** Undefined only when the partner body needs something not known yet (e.g. a hash). */
+  readonly pending?: PendingPayout<TBody>;
+  readonly cause?: unknown;
+}
+
+/**
+ * A payout stopped part way, after something may have moved.
+ *
+ * - `stage: 'submit'`: the signed transaction did not reach a confirmed
+ *   success. `outcome` says what is known. Never sign a replacement unless
+ *   `canSignReplacement(outcome)` is true; with `unknown` or `rejected` the
+ *   first transaction could still land. The partner payout was not created.
+ * - `stage: 'create'`: the partner call failed after the transaction was
+ *   signed (and submitted, when we submit). Retry it with `pending`: the same
+ *   body and the same idempotency key.
+ */
+export class PayoutIncompleteError<TBody = unknown> extends GridError {
+  readonly stage: 'submit' | 'create';
+  readonly signedXdr: string | undefined;
+  readonly txHash: string | undefined;
+  readonly outcome: SubmitOutcome | undefined;
+  readonly pending: PendingPayout<TBody> | undefined;
+
+  constructor(init: PayoutIncompleteInit<TBody>) {
+    super(
+      'payout_not_recorded',
+      init.stage === 'submit'
+        ? `Stellar submit ended ${init.outcome?.status ?? 'without an outcome'}: check the transaction on Stellar before anything else; do not sign again`
+        : 'Payout create failed: retry it with the same body and idempotency key',
+      { cause: init.cause },
+    );
+    this.stage = init.stage;
+    this.signedXdr = init.signedXdr;
+    this.txHash = init.txHash;
+    this.outcome = init.outcome;
+    this.pending = init.pending;
+  }
 }
