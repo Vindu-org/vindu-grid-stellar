@@ -105,14 +105,15 @@ describe('createStellarSubmitter', () => {
     const { xdr, hash } = signed();
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
-    gateway.ledger = { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000) };
+    gateway.ledger = { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000), elderLedger: 2 };
     const outcome = await submitterFor(gateway).submit(xdr);
     expect(outcome).toEqual({
       status: 'expired_not_landed',
       hash,
       detail: {
         maxTime: MAX_TIME,
-        checkedLedger: { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000).toISOString() },
+        checkedLedger: { sequence: 9, closedAt: new Date((MAX_TIME + 1) * 1000).toISOString(), elderLedger: 2 },
+        ledgerBeforeSubmission: 9,
       },
     });
     expect(canSignReplacement(outcome)).toBe(true);
