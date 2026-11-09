@@ -167,6 +167,25 @@ describe('adapter', () => {
   });
 });
 
+describe('adapter payout corridor', () => {
+  it.each([
+    ['USD', 'wire', true],
+    ['USD', 'ach', true],
+    ['EUR', 'sepa', true],
+    ['MXN', 'spei', true],
+    ['USD', 'sepa', false],
+    ['BRL', 'pix', false],
+    ['constructor', 'wire', false],
+  ])('takes the corridor from the input: %s by %s supported %p', async (currency, rail, ok) => {
+    const { adapter, calls } = setup();
+    const input = { customerId: CUSTOMER_ID, account, source: money('100', usdb), targetAsset: fiat(currency), rail, beneficiaryId: BANK_ACCOUNT_ID };
+    const res = adapter.quotePayout(input);
+    if (ok) await expect(res).resolves.toMatchObject({ target: { asset: { code: currency } } });
+    else await expect(res).rejects.toThrow(/not supported/);
+    expect(calls).toHaveLength(ok ? 1 : 0);
+  });
+});
+
 describe('adapter stablecoins', () => {
   const fundingInput = { customerId: CUSTOMER_ID, account, source: money('100', brl), rail: 'pix' } as const;
   const payoutInput = { customerId: CUSTOMER_ID, account, targetAsset: usd, rail: 'wire', beneficiaryId: BANK_ACCOUNT_ID } as const;

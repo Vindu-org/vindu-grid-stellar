@@ -20,7 +20,6 @@ import {
   type LegRef,
   type LegStatusValue,
   type PartnerAdapter,
-  supportsCorridor,
 } from '@vindu/grid-core';
 
 import { fromBlindPayAmount, toBlindPayAmount } from './amounts';
@@ -133,8 +132,8 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
 
     async quotePayout(input) {
       if (input.account.chain !== 'stellar') throw new InvalidInputError('BlindPay pays out from Stellar accounts only');
-      const corridor = { sourceCurrency: 'BRL', fundingRail: 'pix', targetCurrency: input.targetAsset.code, payoutRail: input.rail };
-      if (!supportsCorridor(BLINDPAY_CAPABILITIES, 'stellar', corridor)) {
+      // The payout leg's own corridor: the funding side is not part of this quote.
+      if (!offersPayout(input.targetAsset.code, input.rail)) {
         throw new InvalidInputError(`Payout of ${input.targetAsset.code} by ${input.rail} is not supported`);
       }
       const res = await client.payoutQuotes.create({
@@ -216,6 +215,13 @@ export function toLegStatus(status: unknown): LegStatusValue {
     default:
       return 'unknown';
   }
+}
+
+/** True when BlindPay pays out `currency` by `rail`. Reads own keys only. */
+function offersPayout(currency: string, rail: string): boolean {
+  const { offRamp } = BLINDPAY_CAPABILITIES;
+  const rails = Object.hasOwn(offRamp, currency) ? offRamp[currency] : undefined;
+  return Array.isArray(rails) && rails.includes(rail);
 }
 
 function hashOf(tracking: Tracking | undefined): string | undefined {
