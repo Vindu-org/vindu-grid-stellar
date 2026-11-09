@@ -1,8 +1,8 @@
-import { createHorizonGateway } from '../src/horizon';
+import { type HorizonServer, createHorizonGateway } from '../src/horizon';
 import { TESTNET_HORIZON_URL, TESTNET_NETWORK_PASSPHRASE } from '../src/networks';
-import { type StellarSdk, stellarSdk } from '../src/sdk';
+import { stellarSdk } from '../src/sdk';
 
-const { Account, Keypair, Networks, NotFoundError, Operation, TransactionBuilder } = stellarSdk;
+const { Account, Horizon, Keypair, Networks, NotFoundError, Operation, TransactionBuilder } = stellarSdk;
 
 function signedXdr(): string {
   const source = Keypair.random();
@@ -31,7 +31,7 @@ function fakeServer(overrides: { submit?: () => Promise<unknown>; tx?: () => Pro
     submitTransaction: overrides.submit ?? (async () => ({})),
     accounts: () => ({ accountId: () => ({ call: async () => Promise.reject(new NotFoundError('nf', { status: 404 })) }) }),
   };
-  return { server: server as unknown as StellarSdk.Horizon.Server, cursor };
+  return { server: server as unknown as HorizonServer, cursor };
 }
 
 function gatewayWith(overrides: Parameters<typeof fakeServer>[0]) {
@@ -42,6 +42,22 @@ function gatewayWith(overrides: Parameters<typeof fakeServer>[0]) {
 const httpError = (status: number, data?: unknown) => Object.assign(new Error('http'), { response: { status, data } });
 
 describe('horizon gateway', () => {
+  it("accepts the SDK's Horizon.Server as a HorizonServer", () => {
+    // Compile-time check: the structural type fits the SDK's server.
+    const server: HorizonServer = new Horizon.Server(TESTNET_HORIZON_URL);
+    expect(typeof server.payments).toBe('function');
+  });
+
+  it('treats a submit answer without a hash or result as unavailable', async () => {
+    const { gateway } = gatewayWith({ submit: async () => ({ ledger: 4 }) });
+    expect(await gateway.submitTransaction(signedXdr())).toEqual({ kind: 'unavailable', status: null });
+  });
+
+  it('fails a lookup whose answer has no hash or result', async () => {
+    const { gateway } = gatewayWith({ tx: async () => ({ ledger_attr: 3 }) });
+    await expect(gateway.transaction('ab')).rejects.toThrow('without a hash');
+  });
+
   it('maps a 400 with result codes to a rejection with codes only', async () => {
     const { gateway } = gatewayWith({
       submit: async () => {
