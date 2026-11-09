@@ -50,14 +50,21 @@
  * - When `executePayout` fails, {@link PayoutIncompleteError}
  *   (`stage: 'create'`) carries the exact input and idempotency key. Retry
  *   with {@link retryPayoutExecute}; it never signs or submits anything.
- * - A clock that returns a non-finite time, a non-finite margin or submit
- *   budget, or a quote expiry that is not a strict ISO-8601 instant fails closed.
+ * - Once `onAuthorized` stored `awaiting_signature`, every stop has an edge:
+ *   an error with no edge of its own (`onSigned` throws, the clock breaks,
+ *   anything unexpected) becomes {@link PayoutInterruptedError}, and the
+ *   caller takes `awaiting_signature -> needs_attention` (`run_interrupted`).
+ * - A clock that throws or returns a non-finite time, a non-finite margin or
+ *   submit budget, or a quote expiry that is not a strict ISO-8601 instant
+ *   fails closed. A logger that throws never stops the run.
  */
 import { assetKey, isStellarAccountId, sameAsset } from './assets';
 import {
   InvalidInputError,
   PayoutAuthorizationError,
   PayoutIncompleteError,
+  PayoutInterruptedError,
+  type PayoutInterruptedStage,
   type PendingPayout,
   QuoteExpiredError,
   type QuoteExpiredStage,
@@ -66,7 +73,7 @@ import {
 } from './errors';
 import { parseInstantMs } from './instant';
 import { type Money, compare, isPositive, isValidAmount } from './money';
-import { type Logger, noopLogger } from './observability';
+import { type LogFields, type Logger, noopLogger } from './observability';
 import type {
   AccountRef,
   ExecutePayoutInput,
@@ -140,14 +147,19 @@ export interface SignedPayoutSigning {
    *
    * Not called when the partner needs no signature, when the authorization
    * fails, or when the quote expires first. If it throws, nothing is signed
-   * and the error propagates.
+   * and its error propagates unchanged. Look at the stored state: still
+   * `payout_quoted` means nothing moved; `awaiting_signature` means it
+   * committed and then threw, so take `awaiting_signature -> needs_attention`
+   * (`run_interrupted`).
    */
   readonly onAuthorized: (authorization: StellarXdrAuthorization) => TransferState | Promise<TransferState>;
   /**
    * Called once with the signed XDR, before it is submitted or sent to the
    * partner. Store it here (and its hash), so a crash after submission still
    * leaves a way to look the transaction up. If this throws, nothing is
-   * submitted and the error propagates.
+   * submitted, and the run stops with {@link PayoutInterruptedError}
+   * (`stage: 'on_signed'`, with `signedXdr`): take
+   * `awaiting_signature -> needs_attention` (`run_interrupted`).
    */
   readonly onSigned?: (signedXdr: string) => void | Promise<void>;
   /**
@@ -248,9 +260,10 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   const submitBudget = checkInput(input, margin);
   const { adapter, context, signing } = input;
   const { quote, account, transferId } = context;
-  const logger = input.logger ?? noopLogger;
+  const logger = safeLogger(input.logger ?? noopLogger);
+  const clock = input.now;
   const assertFresh = (stage: QuoteExpiredStage, extraMs = 0): number =>
-    assertQuoteFresh(quote, input.now(), margin + extraMs, stage);
+    assertQuoteFresh(quote, readClock(clock), margin + extraMs, stage);
 
   assertFresh('authorization');
   const auth = await authorize(adapter, context, logger);
@@ -273,10 +286,13 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
     throw new PayoutAuthorizationError('invalid_authorization');
   }
   const { signer } = signing;
+  // Read before the hook runs: what is signed is what the partner returned.
+  const { unsignedXdr } = auth;
 
   // Authorized but not yet handed over: the transfer is still in payout_quoted.
   // A quote that cannot outlive the submit is dropped here, before anything moves.
   assertFresh('authorization', submitBudget);
+  // Its own errors propagate unchanged: the caller's store knows whether it committed.
   const state = await signing.onAuthorized(auth);
   // The stored state first: a wrong state is an operator's question, whatever the clock says.
   if (state !== 'awaiting_signature') {
@@ -284,48 +300,107 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
       `Transfer ${transferId} is in ${String(state)}, not awaiting_signature: nothing was signed`,
     );
   }
-  assertFresh('signing', submitBudget);
-  const signingContext = signingContextFor({ ...context, destination: signing.destination }, state);
-  const signedXdr = await sign(signer, account, auth.unsignedXdr, signingContext, logger);
-  logger.info('payout signed', { transferId, quoteId: quote.id, custody: signer.custody });
-  await signing.onSigned?.(signedXdr);
 
-  // Still unsubmitted: an expired quote here is safe to abandon, and the signed XDR is dropped.
-  assertFresh('signing', submitBudget);
+  // From here the transfer is in awaiting_signature. Every stop has an edge:
+  // the ones below name theirs, and anything else is run_interrupted.
+  let signedXdr: string | undefined;
+  const interrupted = (stage: PayoutInterruptedStage, cause: unknown): PayoutInterruptedError => {
+    const error = new PayoutInterruptedError({ stage, cause, ...(signedXdr === undefined ? {} : { signedXdr }) });
+    logger.error('payout run interrupted after authorization', {
+      transferId,
+      quoteId: quote.id,
+      stage,
+      causeCode: error.causeCode ?? 'none',
+    });
+    return error;
+  };
+  // A clock that breaks now leaves the transfer in awaiting_signature: run_interrupted, not invalid input.
+  const assertStillFresh = (): void => {
+    let nowMs: number;
+    try {
+      nowMs = readClock(clock);
+    } catch (cause) {
+      throw interrupted('clock', cause);
+    }
+    assertQuoteFresh(quote, nowMs, margin + submitBudget, 'signing');
+  };
 
-  if (signing.submission === 'client_submits') {
-    const submitter = signing.submitter as StellarSubmitter;
-    let outcome: SubmitOutcome;
-    try {
-      outcome = await submitter.submit(signedXdr);
-    } catch (cause) {
-      throw new PayoutIncompleteError({ stage: 'submit', signedXdr, cause });
+  try {
+    assertStillFresh();
+    const signingContext = signingContextFor({ ...context, destination: signing.destination }, state);
+    signedXdr = await sign(signer, account, unsignedXdr, signingContext, logger);
+    logger.info('payout signed', { transferId, quoteId: quote.id, custody: signer.custody });
+    if (signing.onSigned !== undefined) {
+      try {
+        await signing.onSigned(signedXdr);
+      } catch (cause) {
+        throw interrupted('on_signed', cause);
+      }
     }
-    if (!isConfirmedSuccess(outcome)) {
-      const hash = hashOf(outcome);
-      logger.warn('payout submit did not succeed', { transferId, quoteId: quote.id, status: statusOf(outcome) });
-      throw new PayoutIncompleteError({
-        stage: 'submit',
-        signedXdr,
-        ...(hash === undefined ? {} : { txHash: hash }),
-        ...(isOutcome(outcome) ? { outcome } : {}),
-      });
+
+    // Still unsubmitted: an expired quote here is safe to abandon, and the signed XDR is dropped.
+    assertStillFresh();
+
+    if (signing.submission === 'client_submits') {
+      return await submitAndRecord(input, signing, base, signedXdr, logger);
     }
-    const txHash = outcome.hash;
-    logger.info('payout submitted', { transferId, quoteId: quote.id, txHash });
-    const pending = { body: { ...base, signedXdr, txHash }, idempotencyKey: input.idempotencyKey };
-    // The money has moved: record it before the partner hears about it.
-    const onSubmitted = signing.onSubmitted as NonNullable<SignedPayoutSigning['onSubmitted']>;
-    try {
-      await onSubmitted(outcome);
-    } catch (cause) {
-      logger.error('payout on chain but not recorded', { transferId, quoteId: quote.id, txHash });
-      throw new PayoutIncompleteError<ExecutePayoutInput>({ stage: 'record', signedXdr, txHash, pending, cause });
+    return await execute(adapter, { body: { ...base, signedXdr }, idempotencyKey: input.idempotencyKey }, logger);
+  } catch (e) {
+    if (
+      e instanceof QuoteExpiredError ||
+      e instanceof SignerRefusedError ||
+      e instanceof PayoutIncompleteError ||
+      e instanceof PayoutInterruptedError
+    ) {
+      throw e;
     }
-    return execute(adapter, pending, logger);
+    throw interrupted('run', e);
   }
+}
 
-  return execute(adapter, { body: { ...base, signedXdr }, idempotencyKey: input.idempotencyKey }, logger);
+/**
+ * `client_submits`: submits once, and only a confirmed success is recorded
+ * (`onSubmitted`) and then created. Every stop here is a
+ * {@link PayoutIncompleteError}: `submit` before a confirmed success,
+ * `record` after one.
+ */
+async function submitAndRecord(
+  input: RunSignedPayoutInput,
+  signing: SignedPayoutSigning,
+  base: ExecutePayoutInput,
+  signedXdr: string,
+  logger: Logger,
+): Promise<SignedPayoutResult> {
+  const { transferId, quote } = input.context;
+  const submitter = signing.submitter as StellarSubmitter;
+  let outcome: unknown;
+  try {
+    outcome = await submitter.submit(signedXdr);
+  } catch (cause) {
+    throw new PayoutIncompleteError({ stage: 'submit', signedXdr, cause });
+  }
+  if (!isConfirmedSuccess(outcome)) {
+    const hash = hashOf(outcome);
+    logger.warn('payout submit did not succeed', { transferId, quoteId: quote.id, status: statusOf(outcome) });
+    throw new PayoutIncompleteError({
+      stage: 'submit',
+      signedXdr,
+      ...(hash === undefined ? {} : { txHash: hash }),
+      ...(isOutcome(outcome) ? { outcome } : {}),
+    });
+  }
+  const txHash = outcome.hash;
+  logger.info('payout submitted', { transferId, quoteId: quote.id, txHash });
+  const pending = { body: { ...base, signedXdr, txHash }, idempotencyKey: input.idempotencyKey };
+  // The money has moved: record it before the partner hears about it.
+  const onSubmitted = signing.onSubmitted as NonNullable<SignedPayoutSigning['onSubmitted']>;
+  try {
+    await onSubmitted(outcome);
+  } catch (cause) {
+    logger.error('payout on chain but not recorded', { transferId, quoteId: quote.id, txHash });
+    throw new PayoutIncompleteError<ExecutePayoutInput>({ stage: 'record', signedXdr, txHash, pending, cause });
+  }
+  return execute(input.adapter, pending, logger);
 }
 
 /**
@@ -480,11 +555,39 @@ async function execute(
   };
 }
 
-/** Returns `now` when the quote has more than `marginMs` left; throws otherwise. */
-function assertQuoteFresh(quote: LegQuote, now: number, marginMs: number, stage: QuoteExpiredStage): number {
-  if (typeof now !== 'number' || !Number.isFinite(now)) {
+/**
+ * Reads the clock once. A clock that throws, or gives anything but a finite
+ * number, is {@link InvalidInputError}: the run fails closed.
+ */
+function readClock(clock: () => number): number {
+  let reading: unknown;
+  try {
+    reading = clock();
+  } catch {
+    throw new InvalidInputError('The clock threw: refusing to continue the payout');
+  }
+  if (typeof reading !== 'number' || !Number.isFinite(reading)) {
     throw new InvalidInputError('The clock gave an invalid time: refusing to continue the payout');
   }
+  return reading;
+}
+
+/** A logger whose calls never throw: a broken logger never stops a payout half way. */
+function safeLogger(logger: Logger): Logger {
+  const guard =
+    (level: keyof Logger) =>
+    (msg: string, fields?: LogFields): void => {
+      try {
+        logger[level](msg, fields);
+      } catch {
+        // Logging is best effort.
+      }
+    };
+  return { debug: guard('debug'), info: guard('info'), warn: guard('warn'), error: guard('error') };
+}
+
+/** Returns `now` when the quote has more than `marginMs` left; throws otherwise. */
+function assertQuoteFresh(quote: LegQuote, now: number, marginMs: number, stage: QuoteExpiredStage): number {
   // The same strict parser as the signer guard: they never disagree on a quote.
   const expiresAt = parseInstantMs(quote.expiresAt);
   if (expiresAt === undefined || expiresAt - now <= marginMs) {

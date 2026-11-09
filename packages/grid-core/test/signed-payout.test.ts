@@ -10,6 +10,7 @@ import {
   PartnerHttpError,
   PayoutAuthorizationError,
   PayoutIncompleteError,
+  PayoutInterruptedError,
   QuoteExpiredError,
   SignerRefusedError,
   SigningNotAllowedError,
@@ -848,11 +849,147 @@ describe('signed payout', () => {
     expect(ok.order).toEqual(['prepare', 'authorized', 'sign', `stored ${SIGNED}`, 'submit', 'recorded', 'execute']);
 
     const failing = setup();
-    await expect(
+    const e = await caught(
       runSignedPayout(withSigning(failing.input, { onSigned: () => Promise.reject(new Error('db down')) })),
-    ).rejects.toThrow('db down');
+    );
+    expect(e).toBeInstanceOf(PayoutInterruptedError);
     expect(failing.submit).not.toHaveBeenCalled();
     expect(failing.executePayout).not.toHaveBeenCalled();
+  });
+
+  describe('a run interrupted after onAuthorized', () => {
+    const atRunInterrupted = (s: ReturnType<typeof setup>) => {
+      expect(s.store.state).toBe('awaiting_signature');
+      expect(transition(s.store.state, 'needs_attention', 'run_interrupted')).toMatchObject({ reason: 'run_interrupted' });
+      expect(s.submit).not.toHaveBeenCalled();
+      expect(s.executePayout).not.toHaveBeenCalled();
+    };
+
+    // Review probe: onSigned's own error came out unchanged, with the transfer
+    // in awaiting_signature and no edge for the caller to take.
+    it('wraps an onSigned that throws, keeping the signed XDR and the cause code only', async () => {
+      const s = setup();
+      const cause = Object.assign(new Error('db down for Jane Doe'), { code: 'store_unavailable' });
+      const e = (await caught(
+        runSignedPayout(withSigning(s.input, { onSigned: () => { throw cause; } })),
+      )) as PayoutInterruptedError;
+      expect(e).toBeInstanceOf(PayoutInterruptedError);
+      expect(e).toMatchObject({ code: 'payout_interrupted', stage: 'on_signed', signedXdr: SIGNED, causeCode: 'store_unavailable' });
+      expect(e.cause).toBeUndefined();
+      expect(e.message).not.toMatch(/Jane/);
+      expect(s.signStellar).toHaveBeenCalledTimes(1);
+      atRunInterrupted(s);
+    });
+
+    // Review probe: a clock that threw after onAuthorized escaped as a raw Error.
+    it.each<[string, () => number]>([
+      ['throws', () => { throw new Error('clock'); }],
+      ['reads NaN', () => Number.NaN],
+      ['reads Infinity', () => Number.POSITIVE_INFINITY],
+    ])('wraps a clock that %s before signing', async (_name, broken) => {
+      let clock: () => number = () => NOW;
+      const s = setup({ clock: () => clock() });
+      s.onAuthorized.mockImplementationOnce(async () => {
+        s.store.state = transition(s.store.state, 'awaiting_signature', 'signed_payout_flow').to;
+        clock = broken;
+        return s.store.state;
+      });
+      const e = (await caught(runSignedPayout(s.input))) as PayoutInterruptedError;
+      expect(e).toBeInstanceOf(PayoutInterruptedError);
+      expect(e).toMatchObject({ stage: 'clock', causeCode: 'invalid_input', signedXdr: undefined });
+      expect(s.signStellar).not.toHaveBeenCalled();
+      atRunInterrupted(s);
+    });
+
+    it('wraps a clock that breaks after signing, keeping the signed XDR', async () => {
+      let clock: () => number = () => NOW;
+      const s = setup({ clock: () => clock() });
+      s.signStellar.mockImplementationOnce(async () => {
+        clock = () => {
+          throw new Error('clock');
+        };
+        return SIGNED;
+      });
+      const e = (await caught(runSignedPayout(s.input))) as PayoutInterruptedError;
+      expect(e).toMatchObject({ code: 'payout_interrupted', stage: 'clock', signedXdr: SIGNED });
+      atRunInterrupted(s);
+    });
+
+    it('wraps anything else the run did not expect', async () => {
+      const s = setup();
+      let reads = 0;
+      const signer = {
+        get custody(): 'custodian' {
+          reads += 1;
+          if (reads > 1) throw Object.assign(new Error('getter'), { code: 'custody_getter' });
+          return 'custodian';
+        },
+        signStellar: s.signStellar,
+      };
+      const e = (await caught(runSignedPayout(withSigning(s.input, { signer })))) as PayoutInterruptedError;
+      expect(e).toBeInstanceOf(PayoutInterruptedError);
+      expect(e).toMatchObject({ stage: 'run', causeCode: 'custody_getter', signedXdr: SIGNED });
+      atRunInterrupted(s);
+    });
+
+    it('lets an onAuthorized error through unchanged: the caller knows whether it committed', async () => {
+      const s = setup();
+      const cause = new Error('committed, then the ack was lost');
+      s.onAuthorized.mockImplementationOnce(async () => {
+        s.store.state = transition(s.store.state, 'awaiting_signature', 'signed_payout_flow').to;
+        throw cause;
+      });
+      await expect(runSignedPayout(s.input)).rejects.toBe(cause);
+      // The hook committed: the caller finds awaiting_signature and takes run_interrupted.
+      atRunInterrupted(s);
+      expect(s.signStellar).not.toHaveBeenCalled();
+    });
+
+    it('keeps onSubmitted errors at stage record: the money moved', async () => {
+      const s = setup();
+      s.onSubmitted.mockImplementationOnce(() => {
+        throw new Error('sync throw');
+      });
+      await expect(runSignedPayout(s.input)).rejects.toMatchObject({ code: 'payout_incomplete', stage: 'record', txHash: HASH });
+    });
+  });
+
+  describe('the clock', () => {
+    // Review probe: a now() that threw escaped as a raw Error.
+    it('is invalid input when it throws before anything was called', async () => {
+      const { input, preparePayout } = setup({
+        clock: () => {
+          throw new Error('clock');
+        },
+      });
+      const e = await caught(runSignedPayout(input));
+      expect(e).toBeInstanceOf(InvalidInputError);
+      expect((e as Error).message).toMatch(/clock threw/);
+      expect(preparePayout).not.toHaveBeenCalled();
+    });
+
+    it('is invalid input when it throws after preparing, still in payout_quoted', async () => {
+      let reads = 0;
+      const { input, store, onAuthorized } = setup({
+        clock: () => {
+          if (reads++ > 0) throw new Error('clock');
+          return NOW;
+        },
+      });
+      await expect(runSignedPayout(input)).rejects.toThrow(InvalidInputError);
+      expect(store.state).toBe('payout_quoted');
+      expect(onAuthorized).not.toHaveBeenCalled();
+    });
+  });
+
+  it('never lets a logger that throws stop a payout', async () => {
+    const { input, executePayout } = setup();
+    const boom = () => {
+      throw new Error('logger down');
+    };
+    const logger = { debug: boom, info: boom, warn: boom, error: boom };
+    await expect(runSignedPayout({ ...input, logger })).resolves.toMatchObject({ txHash: HASH });
+    expect(executePayout).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the execute input when create fails, and a retry reuses it unchanged', async () => {
