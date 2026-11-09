@@ -20,7 +20,7 @@ No environment reads, no keys, no signing. Your signer signs; the network passph
 
 | Module | Contents |
 |---|---|
-| Horizon gateway | `HorizonGateway`: its network passphrase, the latest ingested ledger, payments for an account, transaction by hash, submit, account. `createHorizonGateway({ horizonUrl, networkPassphrase })` wraps `@stellar/stellar-sdk`; pass `server` for any object with the `HorizonServer` calls (the SDK's `Horizon.Server` fits). Tests pass a fake. |
+| Horizon gateway | `HorizonGateway`: its network passphrase, the latest ingested ledger (with the oldest one the instance keeps), payments for an account, transaction by hash (with the answering instance's ingested ledger), submit, account. `createHorizonGateway({ horizonUrl, networkPassphrase })` reads with `fetch` (pass `fetch` to replace it) and submits through `@stellar/stellar-sdk` (pass `server` for any object with a `submitTransaction` like the SDK's `Horizon.Server`). Every read times out after `requestTimeoutMs` (default 10 s) and takes an `AbortSignal`. Tests pass a fake. |
 | Read layer | `createReadLayer({ gateway, cursorStore, onEvent, onMalformed? })`: `pollAccount` resumes from the stored cursor; `reconcile` re-reads a window without moving it. |
 | Payments | `ChainPayment`: payments, path payments and account creation, with core assets and canonical 7-decimal amounts. |
 | Matching | `matchPaymentToLeg` by destination, asset and issuer, exact amount, and source, hash or reference when known. `{ requireSource: true }` refuses legs without a source. `partnerAndChainAgree` for the funded check. |
