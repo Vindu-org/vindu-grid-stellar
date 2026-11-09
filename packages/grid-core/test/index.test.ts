@@ -14,12 +14,22 @@ describe('index exports', () => {
     'supportsCorridor',
     'checkPayoutTolerance',
     'assertSigningAllowed',
+    'assertMaxTimeWithinQuote',
+    'runSignedPayout',
+    'retryPayoutExecute',
+    'signingContextFor',
+    'canSignReplacement',
+    'transitionRules',
     'noopLogger',
     'reportPartnerCall',
     'GridError',
     'InvalidTransitionError',
     'RouteNotFoundError',
     'PartnerHttpError',
+    'InvalidConfigError',
+    'InvalidInputError',
+    'QuoteExpiredError',
+    'PayoutIncompleteError',
   ])('exports %s', (name) => {
     expect(core).toHaveProperty(name);
   });
