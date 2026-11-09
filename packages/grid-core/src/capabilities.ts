@@ -23,7 +23,7 @@ export type AccountModel = 'partner_managed' | 'omnibus' | 'external';
 export interface PartnerCapabilities {
   readonly chains: readonly Chain[];
   /** Account model per chain. A chain listed in `chains` should have an entry here. */
-  readonly accounts: Readonly<Record<Chain, AccountModel>>;
+  readonly accounts: { readonly [chain: string]: AccountModel };
   /** Funding rails per source currency, e.g. `{ BRL: ['pix'] }`. */
   readonly onRamp: Readonly<Record<string, readonly FundingRail[]>>;
   /** Payout rails per target currency, e.g. `{ USD: ['wire', 'ach'] }`. */
