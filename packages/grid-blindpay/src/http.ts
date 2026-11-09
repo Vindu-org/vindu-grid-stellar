@@ -17,6 +17,7 @@ import { reportPartnerCall } from '@vindu/grid-core';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, type ResolvedConfig, resolveConfig } from './config';
 import { BlindPayHttpError } from './errors';
 import { describePath } from './ids';
+import type { ListParams, Page } from './types';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
 
@@ -169,6 +170,13 @@ export async function create<T>(http: BlindPayHttp, path: string, body: unknown,
 
 export async function get<T>(http: BlindPayHttp, path: string, query?: RequestOptions['query']): Promise<T> {
   return (await http.request<T>({ method: 'GET', path, ...(query === undefined ? {} : { query }) })).data;
+}
+
+/** GET a list and normalise it: BlindPay returns a bare array unless a pagination param is sent. */
+export async function list<T>(http: BlindPayHttp, path: string, params?: ListParams): Promise<Page<T>> {
+  const query = params === undefined ? undefined : { ...params };
+  const data = await get<readonly T[] | Page<T>>(http, path, query);
+  return Array.isArray(data) ? { data } : (data as Page<T>);
 }
 
 function queryString(query: RequestOptions['query']): string {
