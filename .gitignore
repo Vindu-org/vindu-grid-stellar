@@ -1,0 +1,30 @@
+# Secrets: never commit credentials, partner keys or signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Node / Yarn
+node_modules/
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+dist/
+coverage/
+*.tsbuildinfo
+
+# Rust / Soroban
+target/
+.soroban/
+.stellar/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
