@@ -174,7 +174,10 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         ref: ref(event.kind === 'payin' ? 'funding' : 'payout', resource.id),
         // The status field decides the outcome, never the event name.
         status: toLegStatus(resource.status),
-        occurredAt: new Date(verified.timestamp * 1000).toISOString(),
+        // The Svix timestamp is when the message was sent, not when the payin
+        // or payout changed, so it is the delivery time. BlindPay's resource
+        // carries no change time of its own, so occurredAt stays empty.
+        deliveredAt: new Date(verified.timestamp * 1000).toISOString(),
         ...(txHash === undefined ? {} : { txHash }),
       };
     },

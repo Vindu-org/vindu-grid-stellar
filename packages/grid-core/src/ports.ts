@@ -158,7 +158,12 @@ export interface LegStatus {
   readonly status: LegStatusValue;
   /** ISO-8601 instant of the partner's last update. */
   readonly updatedAt?: string;
-  /** Amount the partner reports as moved, when it reports one. */
+  /**
+   * Amount the partner reports for the leg, in the asset it moved: the
+   * stablecoin delivered on a funding leg, the stablecoin taken on a payout.
+   * Compare it with what the chain shows before treating a funding leg as
+   * funded. Absent when the partner does not report one.
+   */
   readonly amount?: Money;
   /** On-chain transaction hash, when the leg touched a chain. */
   readonly txHash?: string;
@@ -170,7 +175,19 @@ export interface LegEvent {
   readonly eventId: string;
   readonly ref: LegRef;
   readonly status: LegStatusValue;
+  /** Amount the partner reports for the leg, as in {@link LegStatus.amount}. */
+  readonly amount?: Money;
+  /**
+   * ISO-8601 instant the partner gives for the change on the resource itself.
+   * Absent when the partner sends none. Use it to order events.
+   */
   readonly occurredAt?: string;
+  /**
+   * ISO-8601 instant the webhook was sent or delivered. Retries and
+   * redeliveries change it, so it is for logs and replay windows only:
+   * never order events by it.
+   */
+  readonly deliveredAt?: string;
   readonly txHash?: string;
 }
 

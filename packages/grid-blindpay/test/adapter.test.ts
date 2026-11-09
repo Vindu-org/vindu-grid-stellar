@@ -177,8 +177,9 @@ describe('adapter webhook', () => {
   ])('turns %s for %s with status %s into a LegEvent keyed by svix-id', (event, id, status, kind) => {
     const { adapter } = setup();
     const body = JSON.stringify({ webhook_event: event, id, status, tracking_transaction: { transaction_hash: HASH } });
+    // The Svix timestamp is the delivery time; BlindPay sends no change time of its own.
     expect(adapter.parseWebhook(body, sign(body, ts))).toEqual({
-      eventId: 'msg_000000000001', ref: { partner: 'blindpay', kind, id }, status, occurredAt: '2030-01-01T00:00:00.000Z', txHash: HASH,
+      eventId: 'msg_000000000001', ref: { partner: 'blindpay', kind, id }, status, deliveredAt: '2030-01-01T00:00:00.000Z', txHash: HASH,
     });
   });
 
