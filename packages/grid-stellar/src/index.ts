@@ -87,11 +87,13 @@ export {
 } from './read-layer';
 export type { SubmitError, SubmitErrorCode } from './result-codes';
 export {
+  type CheckedLedger,
   createStellarSubmitter,
   type DetailedStellarSubmitter,
   type FoundBy,
   inspectSignedTransaction,
   type SignedTransactionInfo,
+  type SourceAccountProof,
   type StellarSubmitDetail,
   type StellarSubmitOutcome,
   type StellarSubmitterOptions,

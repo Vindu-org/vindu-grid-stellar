@@ -111,7 +111,7 @@ describe('horizon gateway', () => {
     ).toThrow(InvalidConfigError);
   });
 
-  it('reads the latest ingested ledger and the elder ledger from the root resource', async () => {
+  it('reads the latest ingested ledger from the root resource', async () => {
     const { gateway, calls } = gatewayWith({
       '/': {
         body: {
@@ -122,22 +122,10 @@ describe('horizon gateway', () => {
         },
       },
     });
-    expect(await gateway.latestLedger()).toEqual({
-      sequence: 51,
-      closedAt: new Date('2026-11-09T12:00:05Z'),
-      elderLedger: 2,
-    });
+    expect(await gateway.latestLedger()).toEqual({ sequence: 51, closedAt: new Date('2026-11-09T12:00:05Z') });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe(`${TESTNET_HORIZON_URL}/`);
     expect(calls[0]?.init).toMatchObject({ method: 'GET', redirect: 'error' });
-  });
-
-  it('leaves elderLedger out when Horizon does not report a usable one', async () => {
-    const body = { history_latest_ledger: 51, history_latest_ledger_closed_at: '2026-11-09T12:00:05Z', history_elder_ledger: '2' };
-    expect(await gatewayWith({ '/': { body } }).gateway.latestLedger()).toEqual({
-      sequence: 51,
-      closedAt: new Date('2026-11-09T12:00:05Z'),
-    });
   });
 
   it('fails latestLedger when Horizon returns no usable ledger', async () => {

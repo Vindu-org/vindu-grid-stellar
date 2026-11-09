@@ -23,13 +23,20 @@ export const USDC_ISSUER = `G${'D'.repeat(55)}`;
 export class FakeGateway implements HorizonGateway {
   networkPassphrase: string = Networks.TESTNET;
   /** The latest ingested ledger; set it to move Horizon's view of time. An `Error` makes the call fail. */
-  ledger: HorizonLedger | Error = { sequence: 1, closedAt: new Date(Date.UTC(2026, 10, 9, 12, 0, 0)), elderLedger: 1 };
+  ledger: HorizonLedger | Error = { sequence: 1, closedAt: new Date(Date.UTC(2026, 10, 9, 12, 0, 0)) };
   /**
    * Latest ingested ledger a lookup reports, as Horizon's `Latest-Ledger`
    * header does. Default: the current `ledger`'s sequence. `null`: no header.
    */
   lookupLedger: number | null | undefined;
+  /**
+   * Latest ingested ledger an account read reports, as Horizon's
+   * `Latest-Ledger` header does. Default: the current `ledger`'s sequence.
+   * `null`: no header.
+   */
+  accountLedger: number | null | undefined;
   readonly ledgerReads: number[] = [];
+  readonly accountReads: string[] = [];
   /** Payment history per account, oldest first. */
   readonly payments = new Map<string, HorizonPaymentRecord[]>();
   readonly paymentQueries: Array<{ account: string; query: PaymentsQuery }> = [];
@@ -77,7 +84,16 @@ export class FakeGateway implements HorizonGateway {
   }
 
   async account(address: string, _options?: HorizonRequestOptions): Promise<HorizonAccount | null> {
-    return this.accounts.get(address) ?? null;
+    this.accountReads.push(address);
+    const account = this.accounts.get(address);
+    if (account === undefined) return null;
+    const latest = this.accountLedger === undefined ? (this.ledger instanceof Error ? null : this.ledger.sequence) : this.accountLedger;
+    return { ...account, ...(latest === null ? {} : { latestLedger: latest }) };
+  }
+
+  /** Registers `address` with sequence number `sequence` and no balances. */
+  setAccount(address: string, sequence: string): void {
+    this.accounts.set(address, { id: address, sequence, subentry_count: 0, balances: [] });
   }
 }
 

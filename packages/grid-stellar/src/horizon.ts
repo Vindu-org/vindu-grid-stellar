@@ -80,14 +80,14 @@ export interface HorizonTransactionFound {
   readonly latestLedger?: number;
 }
 
-/** Not on the ledger, as far as the answering instance knows. */
+/**
+ * Not on the ledger, as far as the answering instance knows. An instance
+ * that no longer keeps old history answers this for a transaction that did
+ * land, so a "not found" alone never proves anything.
+ */
 export interface HorizonTransactionNotFound {
   readonly found: false;
-  /**
-   * Latest ledger the answering Horizon instance had ingested (its
-   * `Latest-Ledger` header). Without it a "not found" proves nothing about
-   * any ledger, so it never counts towards `expired_not_landed`.
-   */
+  /** Latest ledger the answering Horizon instance had ingested (its `Latest-Ledger` header). */
   readonly latestLedger?: number;
 }
 
@@ -145,13 +145,6 @@ export interface HorizonLedger {
   readonly sequence: number;
   /** Close time of the ledger, as the network recorded it (whole seconds). */
   readonly closedAt: Date;
-  /**
-   * Oldest ledger the instance keeps history for (`history_elder_ledger`).
-   * A transaction in an older ledger is not found there. Without it the
-   * instance's history cannot be shown to cover a submission, so it never
-   * counts towards `expired_not_landed`.
-   */
-  readonly elderLedger?: number;
 }
 
 export interface HorizonGateway {
@@ -160,11 +153,7 @@ export interface HorizonGateway {
    * run when it differs from the passphrase the envelope was signed for.
    */
   readonly networkPassphrase: string;
-  /**
-   * The latest ledger Horizon has ingested, and the oldest it keeps. Horizon
-   * ingests ledgers in order, so every transaction from the elder ledger up
-   * to this one can be looked up on the same instance. Network errors throw.
-   */
+  /** The latest ledger Horizon has ingested, with its close time. Network errors throw. */
   latestLedger(options?: HorizonRequestOptions): Promise<HorizonLedger>;
   /** Payments (payment, path payment, create account, merge) that touch `account`. Successful transactions only. */
   paymentsForAccount(
@@ -328,8 +317,7 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
     networkPassphrase: options.networkPassphrase,
 
     async latestLedger(request) {
-      // The root resource describes one instance: what it has ingested and
-      // the oldest ledger it keeps, in one answer.
+      // The root resource describes what one instance has ingested.
       const { body } = await get('/', request?.signal);
       const root = asObject(body);
       const sequence = root['history_latest_ledger'];
@@ -338,8 +326,7 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       if (!isLedgerNumber(sequence) || closedAt === null || Number.isNaN(closedAt.getTime())) {
         throw new Error('Horizon returned no usable latest ledger');
       }
-      const elder = root['history_elder_ledger'];
-      return { sequence, closedAt, ...(isLedgerNumber(elder) ? { elderLedger: elder } : {}) };
+      return { sequence, closedAt };
     },
 
     async paymentsForAccount(account, query, request) {
