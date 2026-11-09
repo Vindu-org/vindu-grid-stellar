@@ -400,6 +400,13 @@ describe('adapter webhook', () => {
     await expect(bare.parseWebhook(body, sign(body, ts))).rejects.toThrow(InvalidConfigError);
   });
 
+  it.each(['', 'whsec_', 'not-a-secret', `whsec_${Buffer.from([1, 2, 3]).toString('base64')}`])(
+    'refuses webhookSecret %p when built',
+    (webhookSecret) => {
+      expect(() => setup({ webhookSecret })).toThrow(InvalidConfigError);
+    },
+  );
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1])('refuses webhookToleranceSec %p when built', (webhookToleranceSec) => {
     expect(() => setup({ webhookToleranceSec })).toThrow(InvalidConfigError);
   });

@@ -28,7 +28,7 @@ import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './con
 import { type StablecoinIssuers, stablecoins } from './tokens';
 import type { BlindPayNetwork, SignedTransactionField } from './types';
 import { legAmount, legChangedAt, legTxHash, toLegStatus } from './legs';
-import { assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
+import { assertWebhookSecret, assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
 export interface BlindPayAdapterOptions {
   /**
@@ -47,7 +47,10 @@ export interface BlindPayAdapterOptions {
    * only. Leg amounts are reported only for tokens listed here.
    */
   readonly assetIssuers?: StablecoinIssuers;
-  /** `whsec_...`. Required for `parseWebhook`. */
+  /**
+   * `whsec_...`. Required for `parseWebhook`. Checked when the adapter is
+   * built: a malformed or short secret throws `InvalidConfigError`.
+   */
   readonly webhookSecret?: string;
   readonly webhookToleranceSec?: number;
   /** Whether quotes ask BlindPay to cover fees from the amount. Default false. */
@@ -80,6 +83,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   }
   const coins = stablecoins(options.network, options.assetIssuers);
   if (options.webhookToleranceSec !== undefined) assertWebhookTolerance(options.webhookToleranceSec);
+  if (options.webhookSecret !== undefined) assertWebhookSecret(options.webhookSecret);
   const partnerId = assertPartnerId(options.partnerId ?? config.partnerId ?? BLINDPAY_PARTNER_ID);
   const client = options.client ?? createBlindPayClient({ ...config, partnerId });
   if (client.http.config.partnerId !== partnerId) {

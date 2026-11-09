@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
-import { GridError, InvalidConfigError, InvalidInputError } from '@vindu/grid-core';
+import { GridError, InvalidConfigError, InvalidInputError, WebhookRejectedError } from '@vindu/grid-core';
 
 import { WebhookVerificationError, parseWebhookEvent, verifyWebhook } from '../src/webhooks';
 
@@ -22,6 +22,15 @@ function headers(sig = `v1,${sign(BODY)}`, extra: Record<string, string> = {}): 
 
 const verify = (over: Partial<Parameters<typeof verifyWebhook>[0]> = {}) =>
   verifyWebhook({ rawBody: BODY, headers: headers(), secret: SECRET, now: () => NOW_MS, ...over });
+
+function caughtSync(fn: () => unknown): unknown {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  throw new Error('expected a throw');
+}
 
 function reason(fn: () => unknown): string {
   try {
@@ -58,8 +67,21 @@ describe('webhook verification', () => {
     expect(reason(() => verify({ secret: `whsec_${randomBytes(24).toString('base64')}` }))).toBe('signature_mismatch');
   });
 
-  it.each(['', 'whsec_', 'not-a-secret', 'whsec_***'])('rejects a malformed secret %p', (secret) => {
-    expect(reason(() => verify({ secret }))).toBe('bad_secret');
+  // Review probe: a malformed secret was reported as a refused delivery.
+  it.each(['', 'whsec_', 'not-a-secret', 'whsec_***', `whsec_${KEY.toString('base64')}!!`])(
+    'throws InvalidConfigError for a malformed secret %p, without echoing it',
+    (secret) => {
+      const e = caughtSync(() => verify({ secret }));
+      expect(e).toBeInstanceOf(InvalidConfigError);
+      expect(e).not.toBeInstanceOf(WebhookVerificationError);
+      if (secret.length > 8) expect((e as Error).message).not.toContain(secret);
+    },
+  );
+
+  it('is core\'s WebhookRejectedError, with a BlindPay reason', () => {
+    const e = caughtSync(() => verify({ secret: `whsec_${randomBytes(24).toString('base64')}` }));
+    expect(e).toBeInstanceOf(WebhookRejectedError);
+    expect(e).toMatchObject({ code: 'webhook_rejected', reason: 'signature_mismatch', name: 'WebhookVerificationError' });
   });
 
   it.each(['svix-id', 'svix-timestamp', 'svix-signature'])('rejects missing header %s', (name) => {
@@ -117,14 +139,14 @@ describe('webhook verification', () => {
     expect(reason(() => verify({ headers: headers(`v1,${sign(BODY)}#`) }))).toBe('signature_mismatch');
   });
 
-  it('rejects a secret shorter than 16 bytes', () => {
+  it('refuses a secret shorter than 16 bytes as a setup error', () => {
     const tiny = Buffer.from([7]);
     const h = headers(`v1,${sign(BODY, tiny)}`);
-    expect(reason(() => verify({ headers: h, secret: `whsec_${tiny.toString('base64')}` }))).toBe('bad_secret');
+    expect(() => verify({ headers: h, secret: `whsec_${tiny.toString('base64')}` })).toThrow(InvalidConfigError);
   });
 
-  it('rejects a secret without the whsec_ prefix', () => {
-    expect(reason(() => verify({ secret: KEY.toString('base64') }))).toBe('bad_secret');
+  it('refuses a secret without the whsec_ prefix as a setup error', () => {
+    expect(() => verify({ secret: KEY.toString('base64') })).toThrow(InvalidConfigError);
   });
 
   it('rejects an svix-id and svix-timestamp split at another boundary', () => {

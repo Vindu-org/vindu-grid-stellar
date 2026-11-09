@@ -7,21 +7,28 @@
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { GridError, InvalidConfigError, InvalidInputError, type WebhookHeaders } from '@vindu/grid-core';
+import { InvalidConfigError, InvalidInputError, type WebhookHeaders, WebhookRejectedError } from '@vindu/grid-core';
 
 import type { BlockchainWallet, Customer, Payin, Payout } from './types';
 
+/** Why a delivery was refused. A broken setup (a bad secret) is `InvalidConfigError` instead. */
 export type WebhookFailureReason =
   | 'missing_headers'
   | 'bad_timestamp'
   | 'stale'
-  | 'bad_secret'
   | 'signature_mismatch'
   | 'malformed_body';
 
-export class WebhookVerificationError extends GridError {
-  constructor(readonly reason: WebhookFailureReason, message: string) {
-    super('webhook_rejected', message);
+/**
+ * A BlindPay webhook delivery was refused. It is core's
+ * `WebhookRejectedError` (code `webhook_rejected`), so code that handles any
+ * partner's webhooks can catch that, with a BlindPay-specific `reason`.
+ */
+export class WebhookVerificationError extends WebhookRejectedError {
+  declare readonly reason: WebhookFailureReason;
+
+  constructor(reason: WebhookFailureReason, message: string) {
+    super(reason, message);
   }
 }
 
@@ -31,7 +38,10 @@ export type HeaderSource = WebhookHeaders | { get(name: string): string | null }
 export interface VerifyWebhookInput {
   readonly rawBody: Uint8Array | string;
   readonly headers: HeaderSource;
-  /** Endpoint signing secret, `whsec_<base64>`. */
+  /**
+   * Endpoint signing secret, `whsec_<base64>` of at least 16 bytes. Anything
+   * else throws {@link InvalidConfigError}: it is a setup mistake, not a bad delivery.
+   */
   readonly secret: string;
   /**
    * Largest accepted gap between `svix-timestamp` and now, both directions.
@@ -64,14 +74,23 @@ export function assertWebhookTolerance(toleranceSec: number): void {
 }
 
 /**
+ * Throws {@link InvalidConfigError} unless `secret` is `whsec_` followed by
+ * strict base64 of at least 16 bytes. The message never echoes the secret.
+ */
+export function assertWebhookSecret(secret: string): void {
+  decodeSecret(secret);
+}
+
+/**
  * Verifies the Svix signature and timestamp. Throws {@link WebhookVerificationError}
- * on any failure of the delivery, and fails closed on a broken setup: an
- * invalid tolerance throws {@link InvalidConfigError}, a clock that gives a
- * non-finite time throws {@link InvalidInputError}.
+ * on any failure of the delivery, and fails closed on a broken setup: a
+ * malformed secret or an invalid tolerance throws {@link InvalidConfigError},
+ * a clock that gives a non-finite time throws {@link InvalidInputError}.
  */
 export function verifyWebhook(input: VerifyWebhookInput): VerifiedWebhook {
   const tolerance = input.toleranceSec ?? DEFAULT_WEBHOOK_TOLERANCE_SEC;
   assertWebhookTolerance(tolerance);
+  const key = decodeSecret(input.secret);
   const nowMs = (input.now ?? Date.now)();
   if (typeof nowMs !== 'number' || !Number.isFinite(nowMs)) {
     throw new InvalidInputError('The clock gave an invalid time: refusing to verify the webhook');
@@ -82,7 +101,6 @@ export function verifyWebhook(input: VerifyWebhookInput): VerifiedWebhook {
   if (id === undefined || ts === undefined || sig === undefined) {
     throw new WebhookVerificationError('missing_headers', 'Missing svix-id, svix-timestamp or svix-signature');
   }
-  const key = decodeSecret(input.secret);
   if (!/^\d{1,12}$/.test(ts)) throw new WebhookVerificationError('bad_timestamp', 'svix-timestamp is not epoch seconds');
   const timestamp = Number(ts);
   const nowSec = Math.floor(nowMs / 1000);
@@ -114,7 +132,7 @@ function decodeSecret(secret: string): Buffer {
   const key = BASE64_RE.test(b64) ? Buffer.from(b64, 'base64') : Buffer.alloc(0);
   // Never echo the secret.
   if (key.length < MIN_SECRET_BYTES) {
-    throw new WebhookVerificationError('bad_secret', `Webhook secret must be whsec_ followed by base64 of at least ${MIN_SECRET_BYTES} bytes`);
+    throw new InvalidConfigError(`Webhook secret must be whsec_ followed by base64 of at least ${MIN_SECRET_BYTES} bytes`);
   }
   return key;
 }
