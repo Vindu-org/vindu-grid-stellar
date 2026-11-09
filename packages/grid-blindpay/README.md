@@ -24,7 +24,7 @@ Stellar only (`stellar`, `stellar_testnet`; tokens `USDC`, and `USDB` on testnet
 | Pay-ins | PIX payin quote with `pix_allowed_tax_ids`, payin on `/payins/evm` (BlindPay's path for every network), get. |
 | Payouts | Payout quote on `/quotes`, Stellar `authorize` (unsigned XDR) and `create`. |
 | Partner fees | Create (with your own idempotency key), list, get, delete. |
-| Payout flow | `runStellarPayout`: core's `runSignedPayout` with this adapter. Authorize, check expiry and state, sign once, submit, create only after a confirmed success. |
+| Payout flow | `runStellarPayout`: core's `runSignedPayout` with this adapter. From `payout_quoted`, authorize, let you store `awaiting_signature`, check expiry and state, sign once, submit, create only after a confirmed success. |
 | Webhooks | `verifyWebhook` (Svix, raw bytes, timestamp window both ways, fails closed) and `parseWebhookEvent`. |
 | Adapter | `createBlindPayAdapter(config, options)` implements the core port. `BLINDPAY_CAPABILITIES` for routing. |
 | Amounts | `toBlindPayAmount` / `fromBlindPayAmount`: exact conversion to 2-decimal minor units. `floorToBlindPayAmount` for paying out a funded balance. |
@@ -80,15 +80,17 @@ const result = await runStellarPayout({
   adapter: blindpay,
   signer,                                // your key holder; checks the XDR
   submitter: createStellarSubmitter(...), // core's StellarSubmitter
-  context: { transferId, state: 'awaiting_signature', quote, account, destination: blindpayAccount },
+  context: { transferId, state: 'payout_quoted', quote, account, destination: blindpayAccount },
   idempotencyKey,                         // stored before the call, reused on retries
+  onAuthorized: async () => (await moveTransfer('awaiting_signature', 'signed_payout_flow')).state,
   onSigned: (xdr) => store(xdr),
 });
 ```
 
-It is core's `runSignedPayout`, so core's rules apply:
+It is core's `runSignedPayout`, so core's rules, and its table of which transition each error takes, apply:
 
-- The signer is called once. A quote with a minute or less left (`expiryMarginMs`, core's `DEFAULT_EXPIRY_MARGIN_MS`) throws `QuoteExpiredError` before signing and again before submitting: get a fresh quote and authorize again.
+- The transfer moves to `awaiting_signature` only in `onAuthorized`, after BlindPay's `authorize` answered with the XDR. A failed `authorize`, or an answer without the XDR, throws `PayoutAuthorizationError` while the transfer is still in `payout_quoted` (take `payout_quoted -> needs_attention`).
+- The signer is called once, after `onAuthorized` returned `awaiting_signature`. A quote with a minute or less left (`expiryMarginMs`, core's `DEFAULT_EXPIRY_MARGIN_MS`) throws `QuoteExpiredError`: with `stage: 'authorization'` before authorizing (take `payout_quoted -> funded`), with `stage: 'signing'` before signing or submitting (take `awaiting_signature -> funded`). Get a fresh quote and authorize again.
 - Only `{ status: 'success' }` from the submitter, with a valid hash, creates the payout. `rejected`, `unknown`, `expired_not_landed`, `failed`, a malformed outcome or a throw stop with `PayoutIncompleteError` (`stage: 'submit'`) carrying the outcome, and BlindPay is never told. Check the transaction on Stellar before anything else; never sign a replacement unless `canSignReplacement(outcome)` is true.
 - A failed create throws `PayoutIncompleteError` (`stage: 'create'`) with `pending`: the exact input and key. Retry with `retryStellarPayoutCreate(adapter, pending)` (core's `retryPayoutExecute`); with the same adapter options, BlindPay receives the same body and key. It never signs or submits again.
 - A clock or margin that is not a finite number throws.
