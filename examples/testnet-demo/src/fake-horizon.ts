@@ -15,6 +15,7 @@ import type {
   HorizonAccount,
   HorizonPaymentRecord,
   HorizonGateway,
+  HorizonLedger,
   HorizonSubmitResponse,
   HorizonTransactionFound,
   HorizonTransactionLookup,
@@ -40,7 +41,7 @@ export class FakeHorizon implements HorizonGateway {
   readonly lookups: string[] = [];
 
   constructor(
-    private readonly networkPassphrase: string,
+    readonly networkPassphrase: string,
     private readonly now: () => number,
   ) {}
 
@@ -52,6 +53,11 @@ export class FakeHorizon implements HorizonGateway {
   /** The next submission lands on the ledger, but Horizon answers 504. */
   timeOutNextSubmission(): void {
     this.timeoutNext = true;
+  }
+
+  /** The newest ledger, closed at the demo clock's current second. */
+  async latestLedger(): Promise<HorizonLedger> {
+    return { sequence: this.ledger, closedAt: new Date(Math.floor(this.now() / 1000) * 1000) };
   }
 
   async paymentsForAccount(account: string, query: PaymentsQuery): Promise<readonly HorizonPaymentRecord[]> {
