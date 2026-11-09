@@ -287,7 +287,7 @@ describe('stellar payout flow', () => {
         const { paths, signStellar, base } = setup([AUTHORIZED, CREATED], { field });
         const e = (await caught(runStellarPayout(withSigning(base, { submitter: { submit } })))) as PayoutIncompleteError;
         expect(e).toBeInstanceOf(PayoutIncompleteError);
-        expect(e).toMatchObject({ stage: 'submit', code: 'payout_not_recorded', signedXdr: SIGNED, pending: undefined });
+        expect(e).toMatchObject({ stage: 'submit', code: 'payout_incomplete', signedXdr: SIGNED, pending: undefined });
         expect(e.message).toMatch(/check the transaction on Stellar/);
         expect(paths()).toEqual(['/payouts/stellar/authorize']);
         expect(signStellar).toHaveBeenCalledTimes(1);
