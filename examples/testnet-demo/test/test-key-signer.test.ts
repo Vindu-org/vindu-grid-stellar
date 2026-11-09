@@ -1,8 +1,19 @@
-import { type AccountRef, type SigningContext, SigningNotAllowedError, money, stellarAsset } from '@vindu/grid-core';
-import { TESTNET_NETWORK_PASSPHRASE } from '@vindu/grid-stellar';
+import {
+  type AccountRef,
+  type SigningContext,
+  SigningNotAllowedError,
+  money,
+  stellarAsset,
+} from '@vindu/grid-core';
+import {
+  DEFAULT_MAX_FEE_STROOPS,
+  type PayoutXdrCheck,
+  PayoutXdrMismatchError,
+  TESTNET_NETWORK_PASSPHRASE,
+} from '@vindu/grid-stellar';
 
 import { Account, Asset, Keypair, Operation, type StellarSdk, TransactionBuilder } from '../src/sdk';
-import { DEFAULT_MAX_FEE_STROOPS, TestKeySigner } from '../src/test-key-signer';
+import { TestKeySigner } from '../src/test-key-signer';
 
 const PASSPHRASE = TESTNET_NETWORK_PASSPHRASE;
 const NOW = Date.parse('2026-11-09T12:00:00Z');
@@ -29,6 +40,8 @@ interface TxOptions {
   readonly fee?: string;
   readonly maxTime?: number;
   readonly operations?: readonly ReturnType<typeof Operation.payment>[];
+  /** Changes the builder before the transaction is built, e.g. to set a precondition. */
+  readonly tweak?: (builder: StellarSdk.TransactionBuilder) => void;
 }
 
 const payment = (opts: { source?: string; destination?: string; amount?: string; issuer?: string } = {}) =>
@@ -46,6 +59,7 @@ function build(opts: TxOptions = {}): StellarSdk.Transaction {
     timebounds: { minTime: 0, maxTime: opts.maxTime ?? MAX_TIME },
   });
   for (const op of opts.operations ?? [payment()]) builder.addOperation(op);
+  opts.tweak?.(builder);
   return builder.build();
 }
 
@@ -53,12 +67,24 @@ const xdr = (opts: TxOptions = {}) => build(opts).toXDR();
 const signer = (maxFeeStroops?: number) =>
   new TestKeySigner(client, PASSPHRASE, { now: () => NOW, ...(maxFeeStroops === undefined ? {} : { maxFeeStroops }) });
 
+/** The signer's refusal of a transfer state, a quote or an account: the message. */
 async function refusal(sign: Promise<string>): Promise<string> {
   try {
     await sign;
   } catch (e) {
     expect(e).toBeInstanceOf(SigningNotAllowedError);
     return (e as Error).message;
+  }
+  throw new Error('expected the signer to refuse');
+}
+
+/** The signer's refusal of the transaction itself: which check failed, and the message. */
+async function mismatch(sign: Promise<string>): Promise<{ check: PayoutXdrCheck; message: string }> {
+  try {
+    await sign;
+  } catch (e) {
+    expect(e).toBeInstanceOf(PayoutXdrMismatchError);
+    return { check: (e as PayoutXdrMismatchError).check, message: (e as Error).message };
   }
   throw new Error('expected the signer to refuse');
 }
@@ -95,60 +121,76 @@ describe('TestKeySigner', () => {
 
     it('a payment operation that spends from another account', async () => {
       const unsigned = xdr({ operations: [payment({ source: stranger.publicKey() })] });
-      expect(await refusal(signer().signStellar(account, unsigned, context()))).toMatch(/not the expected source/);
+      expect(await mismatch(signer().signStellar(account, unsigned, context()))).toMatchObject({
+        check: 'operation_source',
+        message: expect.stringMatching(/other than the expected source/),
+      });
     });
 
     it('two payment operations', async () => {
       const unsigned = xdr({ operations: [payment(), payment()] });
-      expect(await refusal(signer().signStellar(account, unsigned, context()))).toMatch(
-        /Not exactly one payment operation: Expected one operation, got 2/,
-      );
+      expect(await mismatch(signer().signStellar(account, unsigned, context()))).toMatchObject({
+        check: 'operations',
+        message: 'Expected exactly one operation, got 2',
+      });
     });
 
     it('an operation that is not a payment', async () => {
       const trust = Operation.changeTrust({ asset: new Asset('USDC', stranger.publicKey()) });
       const unsigned = xdr({ operations: [trust as unknown as ReturnType<typeof Operation.payment>] });
-      expect(await refusal(signer().signStellar(account, unsigned, context()))).toMatch(/Expected a payment operation/);
+      expect(await mismatch(signer().signStellar(account, unsigned, context()))).toMatchObject({
+        check: 'operation_type',
+        message: expect.stringMatching(/Expected a payment operation/),
+      });
     });
 
     it('a fee bump envelope', async () => {
       const inner = build();
       inner.sign(client);
       const bump = TransactionBuilder.buildFeeBumpTransaction(stranger, '200', inner, PASSPHRASE).toXDR();
-      expect(await refusal(signer().signStellar(account, bump, context()))).toMatch(/Fee bump/);
+      expect(await mismatch(signer().signStellar(account, bump, context()))).toMatchObject({ check: 'fee_bump' });
     });
 
     it('a fee above the default cap', async () => {
       const unsigned = xdr({ fee: String(DEFAULT_MAX_FEE_STROOPS + 1) });
-      expect(await refusal(signer().signStellar(account, unsigned, context()))).toMatch(
-        /Fee 1000001 stroops is above the cap of 1000000/,
-      );
+      expect(await mismatch(signer().signStellar(account, unsigned, context()))).toMatchObject({
+        check: 'fee',
+        message: 'The fee of 1000001 stroops is above the cap of 1000000',
+      });
       await expect(signer().signStellar(account, xdr({ fee: String(DEFAULT_MAX_FEE_STROOPS) }), context())).resolves.toEqual(
         expect.any(String),
       );
     });
 
     it('a fee above a configured cap', async () => {
-      expect(await refusal(signer(200).signStellar(account, xdr({ fee: '201' }), context()))).toMatch(/above the cap of 200/);
+      expect(await mismatch(signer(200).signStellar(account, xdr({ fee: '201' }), context()))).toMatchObject({
+        check: 'fee',
+        message: expect.stringMatching(/above the cap of 200/),
+      });
     });
 
     it('another destination, asset issuer or amount', async () => {
       const cases = [
-        [xdr({ operations: [payment({ destination: stranger.publicKey() })] }), /Destination/],
-        [xdr({ operations: [payment({ issuer: stranger.publicKey() })] }), /not the expected asset/],
-        [xdr({ operations: [payment({ amount: '100.0000001' })] }), /Amount 100.0000001/],
+        [xdr({ operations: [payment({ destination: stranger.publicKey() })] }), 'destination'],
+        [xdr({ operations: [payment({ issuer: stranger.publicKey() })] }), 'asset'],
+        [xdr({ operations: [payment({ amount: '100.0000001' })] }), 'amount'],
       ] as const;
-      for (const [unsigned, reason] of cases) {
-        expect(await refusal(signer().signStellar(account, unsigned, context()))).toMatch(reason);
+      for (const [unsigned, check] of cases) {
+        expect(await mismatch(signer().signStellar(account, unsigned, context()))).toMatchObject({ check });
       }
     });
 
     it('a transaction with no maxTime, or one later than the quote expiry', async () => {
-      expect(await refusal(signer().signStellar(account, xdr({ maxTime: 0 }), context()))).toMatch(/no maxTime/);
-      expect(await refusal(signer().signStellar(account, xdr({ maxTime: MAX_TIME + 1 }), context()))).toMatch(
-        /may land after quote pq-1 expires/,
-      );
+      expect(await mismatch(signer().signStellar(account, xdr({ maxTime: 0 }), context()))).toMatchObject({
+        check: 'max_time',
+        message: expect.stringMatching(/no maxTime/),
+      });
+      expect(await mismatch(signer().signStellar(account, xdr({ maxTime: MAX_TIME + 1 }), context()))).toMatchObject({
+        check: 'max_time',
+        message: expect.stringMatching(/may land after quote pq-1 expires/),
+      });
     });
+
   });
 
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects a fee cap of %p', (cap) => {

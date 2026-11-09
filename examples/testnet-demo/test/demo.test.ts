@@ -26,7 +26,7 @@ describe('testnet demo', () => {
 
     const output = lines.join('\n');
     expect(output).toContain('signer refused (asked to sign before awaiting_signature)');
-    expect(output).toMatch(/signer refused \(XDR that pays another account\): Destination .* is not the expected/);
+    expect(output).toContain('signer refused (XDR that pays another account): The payment destination is not the expected destination');
     expect(output).toContain('then signed once');
     expect(output).toContain('checking the hash (timeout)');
     expect(output).toContain('submit: success');

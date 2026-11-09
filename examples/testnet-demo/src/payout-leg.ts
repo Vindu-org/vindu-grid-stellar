@@ -48,7 +48,7 @@ import {
   runSignedPayout,
   signingContextFor,
 } from '@vindu/grid-core';
-import { createStellarSubmitter } from '@vindu/grid-stellar';
+import { PayoutXdrMismatchError, createStellarSubmitter } from '@vindu/grid-stellar';
 
 import { describeMatch } from './chain-watch';
 import { fmt, short } from './format';
@@ -181,8 +181,9 @@ export async function runPayoutLeg(
         },
         onSigned: () =>
           log(
-            `    signer (${signer.custody}) checked state, expiry, source and operation source, destination, ` +
-              'asset, amount, fee and maxTime, then signed once; the signed XDR is stored before it leaves',
+            `    signer (${signer.custody}) checked state and expiry, then the XDR with assertPayoutXdrMatches ` +
+              '(network, one payment, source, destination, asset, amount, fee, maxTime, no extra preconditions), ' +
+              'then signed once; the signed XDR is stored before it leaves',
           ),
         // The money moved: the transfer is payout_submitted before the partner hears about it.
         onSubmitted: (outcome) => {
@@ -304,7 +305,7 @@ async function expectRefusal(log: (line: string) => void, what: string, sign: ()
   try {
     await sign();
   } catch (e) {
-    if (e instanceof SigningNotAllowedError) {
+    if (e instanceof SigningNotAllowedError || e instanceof PayoutXdrMismatchError) {
       log(`    signer refused (${what}): ${e.message}`);
       return;
     }
