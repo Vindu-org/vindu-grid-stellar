@@ -1,21 +1,26 @@
 /**
- * The payout leg, end to end, for any partner adapter:
+ * The payout leg, end to end, for any partner adapter. The transfer starts
+ * in `payout_quoted`:
  *
- *   preparePayout
+ *   check the quote -> preparePayout (the partner's authorize step)
  *     -> none: executePayout (the partner moves the funds itself)
- *     -> stellar_xdr: check the quote -> check the signing context -> sign once
- *          -> check the quote again -> [client_submits: submit, success only]
- *          -> executePayout
+ *     -> stellar_xdr: check the quote -> onAuthorized (the caller stores
+ *          `awaiting_signature`) -> check the quote and the signing context
+ *          -> sign once -> check the quote again
+ *          -> [client_submits: submit, success only] -> executePayout
  *
  * Pure orchestration: no network of its own, no state storage. The caller
- * stores the transfer state, and moves the transfer to `awaiting_signature`
- * before calling when the account uses the signed payout flow.
+ * stores the transfer state: it moves `payout_quoted -> awaiting_signature`
+ * in `onAuthorized`, only once the partner's authorization exists, so a
+ * failed authorization still finds the transfer in `payout_quoted`.
  *
  * Safety rules:
- * - The signer is called at most once per run. A quote with no more than
+ * - The signer is called at most once per run, and only after `onAuthorized`
+ *   returned `awaiting_signature`. A quote with no more than
  *   `expiryMarginMs` left is refused with {@link QuoteExpiredError} before
- *   signing, and again before the signed transaction leaves this function:
- *   get a fresh quote and a new transaction. An old XDR is never reused.
+ *   authorizing, before signing, and again before the signed transaction
+ *   leaves this function: get a fresh quote and a new transaction. An old
+ *   XDR is never reused.
  * - With `client_submits`, only `{ status: 'success' }` lets the payout be
  *   created. Any other outcome, or a submitter that throws, stops with
  *   {@link PayoutIncompleteError} (`stage: 'submit'`) carrying the outcome,
@@ -27,6 +32,7 @@
  */
 import {
   InvalidInputError,
+  PayoutAuthorizationError,
   PayoutIncompleteError,
   type PendingPayout,
   QuoteExpiredError,
@@ -60,10 +66,11 @@ export const DEFAULT_EXPIRY_MARGIN_MS = 60_000;
 export interface SignedPayoutContext {
   readonly transferId: string;
   /**
-   * The transfer's stored state. Signing is refused unless it is
-   * `awaiting_signature`; it is not checked when the partner needs no signature.
+   * The transfer's stored state when the run starts. It must be
+   * `payout_quoted`: the run moves on to `awaiting_signature` only through
+   * {@link RunSignedPayoutInput.onAuthorized}.
    */
-  readonly state: TransferState;
+  readonly state: 'payout_quoted';
   /** The fresh payout quote, within tolerance. `quote.source` is what the transaction must move. */
   readonly quote: LegQuote;
   /** The client's account the payout leaves from. Also the transaction's expected source. */
@@ -71,6 +78,9 @@ export interface SignedPayoutContext {
   /** The partner's account the transaction must pay (G...). */
   readonly destination: string;
 }
+
+/** The partner's authorization when a key holder must sign. */
+export type StellarXdrAuthorization = Extract<PayoutAuthorization, { kind: 'stellar_xdr' }>;
 
 export interface RunSignedPayoutInput {
   readonly adapter: Pick<PartnerAdapter, 'preparePayout' | 'executePayout'>;
@@ -88,6 +98,19 @@ export interface RunSignedPayoutInput {
   readonly expiryMarginMs?: number;
   /** Key for `executePayout`. Store it before calling, and reuse it on every retry. */
   readonly idempotencyKey: string;
+  /**
+   * Called once, after the partner returned a transaction to sign and the
+   * quote was checked again, and before the signer. Store
+   * `payout_quoted -> awaiting_signature` (reason `signed_payout_flow`) here,
+   * and return the state now stored. The signer receives that state, so
+   * anything but `awaiting_signature` stops the run with
+   * {@link SigningNotAllowedError} before signing.
+   *
+   * Not called when the partner needs no signature, when the authorization
+   * fails, or when the quote expires first. If it throws, nothing is signed
+   * and the error propagates.
+   */
+  readonly onAuthorized: (authorization: StellarXdrAuthorization) => TransferState | Promise<TransferState>;
   /**
    * Called once with the signed XDR, before it is submitted or sent to the
    * partner. Store it here (and its hash), so a crash after submission still
@@ -112,13 +135,30 @@ export interface SignedPayoutResult {
 const TX_HASH_RE = /^[0-9a-f]{64}$/i;
 
 /**
- * Runs the payout leg once. See the module notes for the safety rules.
+ * Runs the payout leg once, from `payout_quoted`. See the module notes for
+ * the safety rules.
  *
- * @throws {QuoteExpiredError} before anything is signed or submitted, when the quote is too close to expiry.
- * @throws {SigningNotAllowedError} when the transfer is not in a signable state, or the signer refuses.
- * @throws {PayoutIncompleteError} with `stage: 'submit'` or `'create'`; its `pending` is
- *   `PendingPayout<ExecutePayoutInput>` for {@link retryPayoutExecute}.
- * @throws {InvalidInputError} for unusable input, including a broken clock.
+ * Where it stops, and the edge of the transition table the caller takes:
+ *
+ * | Error | Stage | Transfer is in | Caller takes |
+ * |---|---|---|---|
+ * | {@link QuoteExpiredError} | `authorization` | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`): get a fresh quote |
+ * | {@link PayoutAuthorizationError} | authorize (`preparePayout` threw or returned an unknown authorization) | `payout_quoted` | `payout_quoted -> needs_attention` (`authorization_failed`) |
+ * | {@link QuoteExpiredError} | `signing` | `awaiting_signature` | `awaiting_signature -> funded` (`quote_expired_before_signing`): any signed XDR was never submitted, drop it |
+ * | {@link PayoutIncompleteError} | `submit` | `awaiting_signature` | `awaiting_signature -> needs_attention` (`submission_rejected_or_unknown`) |
+ * | {@link PayoutIncompleteError} | `create` | `payout_submitted` (`client_submits`, stored on the success), `awaiting_signature` (`partner_submits`) or `payout_quoted` (`none`) | retry with {@link retryPayoutExecute}; if the partner never takes a signed payout, `payout_submitted -> needs_attention` (`partner_refused_or_unknown`) or `awaiting_signature -> needs_attention` |
+ *
+ * On success the caller takes `payout_quoted -> payout_processing` for an
+ * `authorization` of `none`, and `awaiting_signature -> payout_submitted`
+ * (if the submitter did not already) then `payout_submitted -> payout_processing`
+ * for `stellar_xdr`.
+ *
+ * The other errors have no edge of their own: nothing was submitted, and the
+ * transfer stays where it is for an operator. {@link InvalidInputError} for
+ * unusable input (before any call, the transfer in `payout_quoted`) or a
+ * clock that breaks; {@link SigningNotAllowedError} when `onAuthorized`
+ * returned another state or the signer refused; and whatever `onAuthorized`
+ * or `onSigned` throw, unchanged.
  */
 export async function runSignedPayout(input: RunSignedPayoutInput): Promise<SignedPayoutResult> {
   const margin = input.expiryMarginMs ?? DEFAULT_EXPIRY_MARGIN_MS;
@@ -126,23 +166,22 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   const { adapter, signer, context } = input;
   const { quote, account, transferId } = context;
   const logger = input.logger ?? noopLogger;
-  const assertFresh = (stage: QuoteExpiredStage = 'signing'): number =>
-    assertQuoteFresh(quote, input.now(), margin, stage);
+  const assertFresh = (stage: QuoteExpiredStage): number => assertQuoteFresh(quote, input.now(), margin, stage);
 
   assertFresh('authorization');
-  const auth = await adapter.preparePayout({ quote, account, transferId });
+  const auth = await authorize(adapter, context, logger);
   const base: ExecutePayoutInput = { quote, account, transferId, idempotencyKey: input.idempotencyKey };
 
   if (auth.kind === 'none') {
     logger.info('payout needs no signature', { transferId, quoteId: quote.id });
     return execute(adapter, { body: base, idempotencyKey: input.idempotencyKey }, logger);
   }
-  if (auth.kind !== 'stellar_xdr' || typeof auth.unsignedXdr !== 'string' || auth.unsignedXdr === '') {
-    throw new InvalidInputError('preparePayout returned an authorization this flow does not know');
-  }
 
-  const signingContext = signingContextFor(context);
-  const at = assertFresh();
+  // Authorized but not yet handed over: the transfer is still in payout_quoted.
+  assertFresh('authorization');
+  const state = await input.onAuthorized(auth);
+  const signingContext = signingContextFor(context, state);
+  const at = assertFresh('signing');
   assertSigningAllowed(signingContext, new Date(at));
   const signedXdr = await signer.signStellar(account, auth.unsignedXdr, signingContext);
   if (typeof signedXdr !== 'string' || signedXdr === '') {
@@ -152,7 +191,7 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   await input.onSigned?.(signedXdr);
 
   // Still unsubmitted: an expired quote here is safe to abandon, and the signed XDR is dropped.
-  assertFresh();
+  assertFresh('signing');
 
   let txHash: string | undefined;
   if (input.submission === 'client_submits') {
@@ -197,11 +236,15 @@ export async function retryPayoutExecute(
   return execute(adapter, pending, logger);
 }
 
-/** The signing context the signer receives: everything it must compare with the XDR. */
-export function signingContextFor(context: SignedPayoutContext): SigningContext {
+/**
+ * The signing context the signer receives: everything it must compare with
+ * the XDR, and the transfer's stored `state`, which must be
+ * `awaiting_signature` for the signer to go ahead.
+ */
+export function signingContextFor(context: Omit<SignedPayoutContext, 'state'>, state: TransferState): SigningContext {
   return {
     transferId: context.transferId,
-    state: context.state,
+    state,
     quoteId: context.quote.id,
     expiresAt: context.quote.expiresAt,
     expected: {
@@ -210,6 +253,36 @@ export function signingContextFor(context: SignedPayoutContext): SigningContext 
       amount: context.quote.source,
     },
   };
+}
+
+/**
+ * Calls the partner's authorize step. A throw, or an authorization this flow
+ * does not know, becomes {@link PayoutAuthorizationError} (cause code only).
+ */
+async function authorize(
+  adapter: Pick<PartnerAdapter, 'preparePayout'>,
+  context: SignedPayoutContext,
+  logger: Logger,
+): Promise<PayoutAuthorization> {
+  const { quote, account, transferId } = context;
+  let auth: unknown;
+  try {
+    auth = await adapter.preparePayout({ quote, account, transferId });
+  } catch (cause) {
+    const error = new PayoutAuthorizationError('threw', cause);
+    logger.warn('payout authorization failed', { transferId, quoteId: quote.id, causeCode: error.causeCode ?? 'none' });
+    throw error;
+  }
+  if (isKnownAuthorization(auth)) return auth;
+  logger.warn('payout authorization not recognised', { transferId, quoteId: quote.id });
+  throw new PayoutAuthorizationError('invalid_authorization');
+}
+
+function isKnownAuthorization(value: unknown): value is PayoutAuthorization {
+  if (typeof value !== 'object' || value === null) return false;
+  const auth = value as { kind?: unknown; unsignedXdr?: unknown };
+  if (auth.kind === 'none') return true;
+  return auth.kind === 'stellar_xdr' && typeof auth.unsignedXdr === 'string' && auth.unsignedXdr !== '';
 }
 
 async function execute(
@@ -284,6 +357,14 @@ function checkInput(input: RunSignedPayoutInput, margin: number): void {
   }
   if (typeof input.now !== 'function') {
     throw new InvalidInputError('now must be a clock function');
+  }
+  if (typeof input.onAuthorized !== 'function') {
+    throw new InvalidInputError('onAuthorized is required: store awaiting_signature there before signing');
+  }
+  if (input.context.state !== 'payout_quoted') {
+    throw new InvalidInputError(
+      `Transfer ${input.context.transferId} is in ${String(input.context.state)}: the payout runs from payout_quoted`,
+    );
   }
   if (input.context.quote.kind !== 'payout') {
     throw new InvalidInputError(`Quote ${input.context.quote.id} is a ${input.context.quote.kind} quote, not a payout quote`);

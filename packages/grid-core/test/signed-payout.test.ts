@@ -1,6 +1,8 @@
 import { fiat, stellarAsset } from '../src/assets';
 import {
   InvalidInputError,
+  PartnerHttpError,
+  PayoutAuthorizationError,
   PayoutIncompleteError,
   QuoteExpiredError,
   SigningNotAllowedError,
@@ -15,6 +17,7 @@ import {
 } from '../src/signed-payout';
 import type { Signer } from '../src/signer';
 import type { SubmitOutcome } from '../src/submission';
+import { type TransferState, type TransitionReason, transition } from '../src/transfer-states';
 
 const NOW = Date.parse('2030-01-01T00:00:00Z');
 const EXPIRES_AT = new Date(NOW + 5 * 60_000).toISOString();
@@ -40,6 +43,13 @@ const account = { chain: 'stellar', address: SOURCE } as const;
 
 function setup(options: { auth?: PayoutAuthorization; outcome?: SubmitOutcome; clock?: () => number } = {}) {
   const order: string[] = [];
+  // The caller's stored state, moved only through the transition table.
+  const store = { state: 'payout_quoted' as TransferState };
+  const onAuthorized = jest.fn(async (_auth: PayoutAuthorization) => {
+    order.push('authorized');
+    store.state = transition(store.state, 'awaiting_signature', 'signed_payout_flow').to;
+    return store.state;
+  });
   const preparePayout = jest.fn(async () => {
     order.push('prepare');
     return options.auth ?? { kind: 'stellar_xdr' as const, unsignedXdr: UNSIGNED };
@@ -62,11 +72,12 @@ function setup(options: { auth?: PayoutAuthorization; outcome?: SubmitOutcome; c
     signer,
     submitter: { submit },
     submission: 'client_submits',
-    context: { transferId: 'tr_1', state: 'awaiting_signature', quote, account, destination: DESTINATION },
+    context: { transferId: 'tr_1', state: 'payout_quoted', quote, account, destination: DESTINATION },
     now: options.clock ?? (() => NOW),
     idempotencyKey: KEY,
+    onAuthorized,
   };
-  return { input, order, preparePayout, executePayout, signStellar, submit };
+  return { input, order, store, preparePayout, onAuthorized, executePayout, signStellar, submit };
 }
 
 async function caught(p: Promise<unknown>): Promise<unknown> {
@@ -80,10 +91,12 @@ async function caught(p: Promise<unknown>): Promise<unknown> {
 
 describe('signed payout', () => {
   it('signs once, submits, then executes with the hash and the same key', async () => {
-    const { input, order, executePayout, signStellar, submit } = setup();
+    const { input, order, onAuthorized, executePayout, signStellar, submit } = setup();
     const res = await runSignedPayout(input);
 
-    expect(order).toEqual(['prepare', 'sign', 'submit', 'execute']);
+    expect(order).toEqual(['prepare', 'authorized', 'sign', 'submit', 'execute']);
+    expect(onAuthorized).toHaveBeenCalledTimes(1);
+    expect(onAuthorized).toHaveBeenCalledWith({ kind: 'stellar_xdr', unsignedXdr: UNSIGNED });
     expect(signStellar).toHaveBeenCalledTimes(1);
     expect(signStellar).toHaveBeenCalledWith(account, UNSIGNED, {
       transferId: 'tr_1',
@@ -107,24 +120,205 @@ describe('signed payout', () => {
   it('with partner_submits, hands the signed XDR to the partner and never submits', async () => {
     const { input, order, executePayout } = setup();
     const res = await runSignedPayout({ ...input, submission: 'partner_submits' });
-    expect(order).toEqual(['prepare', 'sign', 'execute']);
+    expect(order).toEqual(['prepare', 'authorized', 'sign', 'execute']);
     expect(executePayout).toHaveBeenCalledWith({ quote, account, transferId: 'tr_1', idempotencyKey: KEY, signedXdr: SIGNED });
     expect(res.txHash).toBeUndefined();
   });
 
   it('goes straight to execute when the partner needs no signature', async () => {
-    const { input, order, executePayout, signStellar } = setup({ auth: { kind: 'none' } });
-    const res = await runSignedPayout({ ...input, context: { ...input.context, state: 'payout_quoted' } });
+    const { input, order, onAuthorized, executePayout, signStellar } = setup({ auth: { kind: 'none' } });
+    const res = await runSignedPayout(input);
     expect(order).toEqual(['prepare', 'execute']);
+    expect(onAuthorized).not.toHaveBeenCalled();
     expect(signStellar).not.toHaveBeenCalled();
     expect(executePayout).toHaveBeenCalledWith({ quote, account, transferId: 'tr_1', idempotencyKey: KEY });
     expect(res).toMatchObject({ leg: LEG, authorization: 'none' });
   });
 
-  it('refuses an authorization it does not know, before signing', async () => {
-    const { input, signStellar } = setup({ auth: { kind: 'evm_tx' } as unknown as PayoutAuthorization });
-    await expect(runSignedPayout(input)).rejects.toThrow(InvalidInputError);
-    expect(signStellar).not.toHaveBeenCalled();
+  describe('authorization failures', () => {
+    it.each<[string, unknown]>([
+      ['another kind', { kind: 'evm_tx' }],
+      ['an empty XDR', { kind: 'stellar_xdr', unsignedXdr: '' }],
+      ['an XDR that is not a string', { kind: 'stellar_xdr', unsignedXdr: 42 }],
+      ['null', null],
+      ['nothing', undefined],
+      ['a bare string', 'AAAAUNSIGNED'],
+    ])('refuses %s before onAuthorized and the signer', async (_name, auth) => {
+      const { input, preparePayout, onAuthorized, signStellar, executePayout } = setup();
+      preparePayout.mockResolvedValueOnce(auth as PayoutAuthorization);
+      const e = await caught(runSignedPayout(input));
+      expect(e).toBeInstanceOf(PayoutAuthorizationError);
+      expect(e).toMatchObject({ code: 'payout_authorization_failed', failure: 'invalid_authorization' });
+      expect(onAuthorized).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it('wraps a preparePayout that throws, keeping the code and not the text', async () => {
+      const { input, preparePayout, onAuthorized, signStellar } = setup();
+      const cause = new PartnerHttpError({
+        partner: 'p',
+        method: 'POST',
+        path: '/authorize',
+        status: 400,
+        bodySnippet: 'wallet of Jane Doe is frozen',
+      });
+      preparePayout.mockRejectedValueOnce(cause);
+      const warn = jest.fn();
+      const logger = { debug: jest.fn(), info: jest.fn(), warn, error: jest.fn() };
+      const e = (await caught(runSignedPayout({ ...input, logger }))) as PayoutAuthorizationError;
+      expect(e).toBeInstanceOf(PayoutAuthorizationError);
+      expect(e).toMatchObject({ failure: 'threw', causeCode: 'partner_http' });
+      expect(e.cause).toBeUndefined();
+      expect(e.message).not.toMatch(/Jane/);
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/Jane/);
+      expect(warn).toHaveBeenCalledWith('payout authorization failed', expect.objectContaining({ causeCode: 'partner_http' }));
+      expect(onAuthorized).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('error -> transition table', () => {
+    type Row = [
+      name: string,
+      arrange: (s: ReturnType<typeof setup>) => RunSignedPayoutInput,
+      error: { type: new (...args: never[]) => Error; stage?: string },
+      edge: [from: TransferState, to: TransferState, reason: TransitionReason],
+    ];
+    const expiredAt = Date.parse(EXPIRES_AT);
+    const rows: Row[] = [
+      [
+        'a quote too close to expiry before authorizing',
+        (s) => ({ ...s.input, now: () => expiredAt }),
+        { type: QuoteExpiredError, stage: 'authorization' },
+        ['payout_quoted', 'funded', 'quote_expired_before_authorization'],
+      ],
+      [
+        'a quote that expired while the partner authorized',
+        (s) => {
+          s.preparePayout.mockImplementationOnce(async () => {
+            t = expiredAt;
+            return { kind: 'stellar_xdr', unsignedXdr: UNSIGNED };
+          });
+          return s.input;
+        },
+        { type: QuoteExpiredError, stage: 'authorization' },
+        ['payout_quoted', 'funded', 'quote_expired_before_authorization'],
+      ],
+      [
+        'a preparePayout that throws',
+        (s) => {
+          s.preparePayout.mockRejectedValueOnce(new Error('authorize 500'));
+          return s.input;
+        },
+        { type: PayoutAuthorizationError },
+        ['payout_quoted', 'needs_attention', 'authorization_failed'],
+      ],
+      [
+        'a preparePayout that returns garbage',
+        (s) => {
+          s.preparePayout.mockResolvedValueOnce({ kind: 'nope' } as unknown as PayoutAuthorization);
+          return s.input;
+        },
+        { type: PayoutAuthorizationError },
+        ['payout_quoted', 'needs_attention', 'authorization_failed'],
+      ],
+      [
+        'a quote that expired between authorization and signing',
+        (s) => {
+          s.onAuthorized.mockImplementationOnce(async () => {
+            s.store.state = transition(s.store.state, 'awaiting_signature', 'signed_payout_flow').to;
+            t = expiredAt;
+            return s.store.state;
+          });
+          return s.input;
+        },
+        { type: QuoteExpiredError, stage: 'signing' },
+        ['awaiting_signature', 'funded', 'quote_expired_before_signing'],
+      ],
+      [
+        'a quote that expired while signing',
+        (s) => {
+          s.signStellar.mockImplementationOnce(async () => {
+            t = expiredAt;
+            return SIGNED;
+          });
+          return s.input;
+        },
+        { type: QuoteExpiredError, stage: 'signing' },
+        ['awaiting_signature', 'funded', 'quote_expired_before_signing'],
+      ],
+      [
+        'a submit that is not a success',
+        (s) => {
+          s.submit.mockResolvedValueOnce({ status: 'rejected', hash: HASH });
+          return s.input;
+        },
+        { type: PayoutIncompleteError, stage: 'submit' },
+        ['awaiting_signature', 'needs_attention', 'submission_rejected_or_unknown'],
+      ],
+      [
+        'a failed create after a confirmed submit',
+        (s) => {
+          s.submit.mockImplementationOnce(async () => {
+            s.store.state = transition(s.store.state, 'payout_submitted', 'signed_and_on_chain').to;
+            return { status: 'success', hash: HASH };
+          });
+          s.executePayout.mockRejectedValueOnce(new Error('503'));
+          return s.input;
+        },
+        { type: PayoutIncompleteError, stage: 'create' },
+        ['payout_submitted', 'needs_attention', 'partner_refused_or_unknown'],
+      ],
+      [
+        'a failed create with partner_submits',
+        (s) => {
+          s.executePayout.mockRejectedValueOnce(new Error('503'));
+          return { ...s.input, submission: 'partner_submits' };
+        },
+        { type: PayoutIncompleteError, stage: 'create' },
+        ['awaiting_signature', 'needs_attention', 'submission_rejected_or_unknown'],
+      ],
+    ];
+    let t = NOW;
+    beforeEach(() => {
+      t = NOW;
+    });
+
+    it.each(rows)('%s', async (_name, arrange, error, [from, to, reason]) => {
+      const s = setup({ clock: () => t });
+      const e = await caught(runSignedPayout(arrange(s)));
+      expect(e).toBeInstanceOf(error.type);
+      if (error.stage !== undefined) expect(e).toMatchObject({ stage: error.stage });
+      expect(s.store.state).toBe(from);
+      expect(transition(from, to, reason)).toMatchObject({ from, to, reason });
+      expect(s.signStellar.mock.calls.length).toBeLessThanOrEqual(1);
+      expect(s.onAuthorized).toHaveBeenCalledTimes(from === 'payout_quoted' ? 0 : 1);
+    });
+  });
+
+  describe('onAuthorized', () => {
+    it('stops before signing when it does not return awaiting_signature', async () => {
+      const { input, onAuthorized, signStellar } = setup();
+      onAuthorized.mockResolvedValueOnce('payout_quoted');
+      const e = await caught(runSignedPayout(input));
+      expect(e).toBeInstanceOf(SigningNotAllowedError);
+      expect((e as Error).message).toMatch(/payout_quoted, not awaiting_signature/);
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    it('stops before signing when it throws, with its own error', async () => {
+      const { input, onAuthorized, signStellar } = setup();
+      onAuthorized.mockRejectedValueOnce(new Error('db down'));
+      await expect(runSignedPayout(input)).rejects.toThrow('db down');
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    it('may return the state synchronously', async () => {
+      const { input, signStellar } = setup();
+      await runSignedPayout({ ...input, onAuthorized: () => 'awaiting_signature' });
+      expect(signStellar).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('submit outcomes', () => {
@@ -187,7 +381,7 @@ describe('signed payout', () => {
       const { input, preparePayout } = setup({ clock: () => Date.parse(EXPIRES_AT) - DEFAULT_EXPIRY_MARGIN_MS });
       const e = await caught(runSignedPayout(input));
       expect(e).toBeInstanceOf(QuoteExpiredError);
-      expect(e).toMatchObject({ code: 'quote_expired', quoteId: 'q_1', expiresAt: EXPIRES_AT });
+      expect(e).toMatchObject({ code: 'quote_expired', quoteId: 'q_1', expiresAt: EXPIRES_AT, stage: 'authorization' });
       expect(preparePayout).not.toHaveBeenCalled();
     });
 
@@ -198,8 +392,11 @@ describe('signed payout', () => {
 
     it('does not sign a quote that expired while preparing', async () => {
       let reads = 0;
-      const { input, signStellar } = setup({ clock: () => (reads++ === 0 ? NOW : Date.parse(EXPIRES_AT)) });
-      await expect(runSignedPayout(input)).rejects.toBeInstanceOf(QuoteExpiredError);
+      const { input, onAuthorized, signStellar } = setup({ clock: () => (reads++ === 0 ? NOW : Date.parse(EXPIRES_AT)) });
+      const e = await caught(runSignedPayout(input));
+      expect(e).toBeInstanceOf(QuoteExpiredError);
+      expect(e).toMatchObject({ stage: 'authorization' });
+      expect(onAuthorized).not.toHaveBeenCalled();
       expect(signStellar).not.toHaveBeenCalled();
     });
 
@@ -212,7 +409,7 @@ describe('signed payout', () => {
         t = Date.parse(EXPIRES_AT) - 1;
         return SIGNED;
       });
-      await expect(runSignedPayout(input)).rejects.toBeInstanceOf(QuoteExpiredError);
+      await expect(runSignedPayout(input)).rejects.toMatchObject({ code: 'quote_expired', stage: 'signing' });
       expect(signStellar).toHaveBeenCalledTimes(1);
       expect(submit).not.toHaveBeenCalled();
       expect(executePayout).not.toHaveBeenCalled();
@@ -221,7 +418,7 @@ describe('signed payout', () => {
     it('refuses an unparseable quote expiry', async () => {
       const { input, preparePayout } = setup();
       const bad = { ...input, context: { ...input.context, quote: { ...quote, expiresAt: 'soon' } } };
-      await expect(runSignedPayout(bad)).rejects.toBeInstanceOf(QuoteExpiredError);
+      await expect(runSignedPayout(bad)).rejects.toMatchObject({ code: 'quote_expired', stage: 'authorization' });
       expect(preparePayout).not.toHaveBeenCalled();
     });
   });
@@ -253,10 +450,11 @@ describe('signed payout', () => {
     });
   });
 
-  it('refuses to sign outside awaiting_signature', async () => {
-    const { input, signStellar } = setup();
-    const funded = { ...input, context: { ...input.context, state: 'payout_quoted' as const } };
-    await expect(runSignedPayout(funded)).rejects.toBeInstanceOf(SigningNotAllowedError);
+  it.each(['awaiting_signature', 'funded'] as const)('refuses to start in %s, before any call', async (state) => {
+    const { input, preparePayout, signStellar } = setup();
+    const moved = { ...input, context: { ...input.context, state: state as unknown as 'payout_quoted' } };
+    await expect(runSignedPayout(moved)).rejects.toThrow(/runs from payout_quoted/);
+    expect(preparePayout).not.toHaveBeenCalled();
     expect(signStellar).not.toHaveBeenCalled();
   });
 
@@ -278,7 +476,7 @@ describe('signed payout', () => {
       ok.order.push(`stored ${xdr}`);
     });
     await runSignedPayout({ ...ok.input, onSigned });
-    expect(ok.order).toEqual(['prepare', 'sign', `stored ${SIGNED}`, 'submit', 'execute']);
+    expect(ok.order).toEqual(['prepare', 'authorized', 'sign', `stored ${SIGNED}`, 'submit', 'execute']);
 
     const failing = setup();
     await expect(
@@ -331,6 +529,7 @@ describe('signed payout', () => {
     ['an empty idempotency key', (i) => ({ ...i, idempotencyKey: '' })],
     ['an unknown submission mode', (i) => ({ ...i, submission: 'nobody' as RunSignedPayoutInput['submission'] })],
     ['a funding quote', (i) => ({ ...i, context: { ...i.context, quote: { ...quote, kind: 'funding' } } })],
+    ['no onAuthorized', ({ onAuthorized: _a, ...rest }) => rest as RunSignedPayoutInput],
   ])('refuses %s before any call', async (_name, change) => {
     const { input, preparePayout } = setup();
     await expect(runSignedPayout(change(input))).rejects.toThrow(InvalidInputError);

@@ -126,6 +126,7 @@ export {
   type SignedPayoutContext,
   type SignedPayoutResult,
   signingContextFor,
+  type StellarXdrAuthorization,
 } from './signed-payout';
 export {
   assertMaxTimeWithinQuote,
