@@ -130,7 +130,7 @@ Requirements:
 - Node 22.12 or later for `grid-stellar`: the Stellar SDK it loads needs `require()` of ES modules. `grid-core` and `grid-blindpay` run on Node 22 or later.
 - The packages are CommonJS with type declarations, and each has one entry point (an `exports` map): import from the package name only. Files under `dist/` are internal and cannot be imported directly.
 
-CI checks this path on every change: `scripts/check-consumption.sh` packs the three packages, installs the tarballs into a clean project with the resolution above, loads each one with `require()` and type-checks a file that imports them, with TypeScript `moduleResolution` set to `node` and to `node16`.
+CI checks the packed-tarball path on every change: `scripts/check-consumption.sh` packs the three packages, installs the tarballs into a clean project with the resolution above and with install scripts turned off (`enableScripts: false`), loads each one with `require()` and type-checks a file that imports them, with TypeScript `moduleResolution` set to `node` and to `node16`. CI does not install from the git tag; that path was verified by hand.
 
 ## Roadmap
 
