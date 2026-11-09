@@ -8,12 +8,12 @@
  * amounts in the answers are made up for the demo.
  */
 import { createBlindPayAdapter, runStellarPayout } from '@vindu/grid-blindpay';
-import { type AccountRef, type TransferState, money, transition } from '@vindu/grid-core';
+import { type AccountRef, type TransferState, type TransitionReason, money, transition } from '@vindu/grid-core';
 import { createStellarSubmitter } from '@vindu/grid-stellar';
 
 import { fmt, short } from './format';
 import { buildPaymentXdr } from './stellar-tx';
-import type { Log } from './transfer';
+import { type Log, StateConflictError } from './transfer';
 import { BRL, USD, createWorld } from './world';
 
 const INSTANCE_PREFIX = '/v1/instances/in_demo';
@@ -115,6 +115,15 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
   // -> check state and quote -> sign once -> submit (hash checked)
   // -> store payout_submitted -> create
   let state: TransferState = 'payout_quoted';
+  // A compare-and-set on the stored state, as the payout flow requires: the
+  // move happens only if the transfer is still where this run left it.
+  const store = (expected: TransferState, to: TransferState, reason: TransitionReason, detail: string): TransferState => {
+    if (state !== expected) throw new StateConflictError('demo-transfer-2', expected, state);
+    const rule = transition(state, to, reason);
+    state = rule.to;
+    log(`  ${rule.from} -> ${rule.to} (${rule.label}): ${detail}`);
+    return state;
+  };
   const result = await runStellarPayout({
     adapter,
     context: { transferId: 'demo-transfer-2', state: 'payout_quoted', quote: payoutQuote, account },
@@ -126,16 +135,10 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
       signer: world.signer,
       submitter: createStellarSubmitter({ gateway: world.ledger, networkPassphrase: world.networkPassphrase, now }),
       destination: world.partner.treasuryAddress,
-      onAuthorized: () => {
-        const rule = transition(state, 'awaiting_signature', 'signed_payout_flow');
-        state = rule.to;
-        log(`  ${rule.from} -> ${rule.to} (${rule.label}): BlindPay authorized, stored before signing`);
-        return state;
-      },
+      onAuthorized: () =>
+        store('payout_quoted', 'awaiting_signature', 'signed_payout_flow', 'BlindPay authorized, stored before signing'),
       onSubmitted: () => {
-        const rule = transition(state, 'payout_submitted', 'signed_and_on_chain');
-        state = rule.to;
-        log(`  ${rule.from} -> ${rule.to} (${rule.label}): stored before BlindPay is told`);
+        store('awaiting_signature', 'payout_submitted', 'signed_and_on_chain', 'stored before BlindPay is told');
       },
     },
   });
