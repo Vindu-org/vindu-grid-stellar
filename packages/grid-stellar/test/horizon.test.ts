@@ -385,12 +385,73 @@ describe('horizon gateway', () => {
     expect(await gateway.account(Keypair.random().publicKey())).toBeNull();
   });
 
-  it('reads an account', async () => {
+  it('reads an account, its known fields only, with the Latest-Ledger header', async () => {
+    const id = Keypair.random().publicKey();
+    const issuer = Keypair.random().publicKey();
+    const { gateway } = gatewayWith({
+      [`/accounts/${id}`]: {
+        headers: { 'Latest-Ledger': '812' },
+        body: {
+          id,
+          sequence: '9223372036854775807',
+          subentry_count: 1,
+          num_sponsoring: 0,
+          balances: [
+            { asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: issuer, balance: '5.0000000', limit: '922337203685.4775807', is_authorized: true, sponsor: 'x' },
+            { asset_type: 'native', balance: '2.5000000', buying_liabilities: '0.0000000' },
+          ],
+          _links: {},
+          signers: [],
+        },
+      },
+    });
+    expect(await gateway.account(id)).toEqual({
+      id,
+      sequence: '9223372036854775807',
+      subentry_count: 1,
+      num_sponsoring: 0,
+      balances: [
+        { asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: issuer, balance: '5.0000000', limit: '922337203685.4775807', is_authorized: true },
+        { asset_type: 'native', balance: '2.5000000', buying_liabilities: '0.0000000' },
+      ],
+      latestLedger: 812,
+    });
+  });
+
+  it('leaves latestLedger out of an account read without a usable Latest-Ledger header', async () => {
     const id = Keypair.random().publicKey();
     const { gateway } = gatewayWith({
-      [`/accounts/${id}`]: { body: { id, sequence: '7', subentry_count: 1, balances: [], _links: {}, signers: [] } },
+      [`/accounts/${id}`]: { headers: { 'Latest-Ledger': 'soon' }, body: { id, sequence: '7', subentry_count: 0, balances: [] } },
     });
-    expect(await gateway.account(id)).toEqual({ id, sequence: '7', subentry_count: 1, balances: [] });
+    expect(await gateway.account(id)).toEqual({ id, sequence: '7', subentry_count: 0, balances: [] });
+  });
+
+  it('refuses an account answer for another account or with fields that are not well formed', async () => {
+    const id = Keypair.random().publicKey();
+    const good = { id, sequence: '7', subentry_count: 0, balances: [{ asset_type: 'native', balance: '1.0000000' }] };
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ ...good, id: Keypair.random().publicKey() }, 'id'],
+      [{ ...good, id: undefined }, 'id'],
+      [{ ...good, sequence: 7 }, 'sequence'],
+      [{ ...good, sequence: '' }, 'sequence'],
+      [{ ...good, sequence: '-1' }, 'sequence'],
+      [{ ...good, sequence: '1e3' }, 'sequence'],
+      [{ ...good, sequence: '12345678901234567890' }, 'sequence'],
+      [{ ...good, subentry_count: -1 }, 'subentry_count'],
+      [{ ...good, subentry_count: '1' }, 'subentry_count'],
+      [{ ...good, num_sponsored: 1.5 }, 'num_sponsored'],
+      [{ ...good, balances: {} }, 'balances'],
+      [{ ...good, balances: [null] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: 'lots' }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: '1.00000001' }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'credit_alphanum4', balance: '1', asset_code: 'USDC' }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: '1', limit: 5 }] }, 'balance'],
+      [{ ...good, balances: [{ asset_type: 'native', balance: '1', is_authorized: 'yes' }] }, 'balance'],
+    ];
+    for (const [body, field] of cases) {
+      const { gateway } = gatewayWith({ [`/accounts/${id}`]: { headers: { 'Latest-Ledger': '9' }, body } });
+      await expect(gateway.account(id)).rejects.toThrow(`unusable ${field}`);
+    }
   });
 
   it('keeps known payment fields and the joined memo only, and passes the query', async () => {

@@ -123,12 +123,21 @@ export interface HorizonBalanceLine {
 }
 
 export interface HorizonAccount {
+  /** The account asked for. */
   readonly id: string;
+  /** The account's sequence number, a decimal string (it can exceed 2^53). */
   readonly sequence: string;
   readonly subentry_count: number;
   readonly num_sponsoring?: number;
   readonly num_sponsored?: number;
   readonly balances: readonly HorizonBalanceLine[];
+  /**
+   * Latest ledger the answering Horizon instance had ingested (its
+   * `Latest-Ledger` header): the account is shown as of that ledger. Without
+   * it the read proves nothing about any ledger, so it never counts towards
+   * `expired_not_landed`.
+   */
+  readonly latestLedger?: number;
 }
 
 /** A ledger as Horizon has ingested it. */
@@ -171,7 +180,12 @@ export interface HorizonGateway {
   transaction(hash: string, options?: HorizonRequestOptions): Promise<HorizonTransactionLookup>;
   /** Submits a signed transaction envelope (base64 XDR) and waits for Horizon's answer. Never throws for HTTP errors. */
   submitTransaction(signedXdr: string): Promise<HorizonSubmitResponse>;
-  /** The account, or `null` when it does not exist on the network. */
+  /**
+   * The account, or `null` when it does not exist on the network. Carries
+   * the answering instance's latest ingested ledger when Horizon reports it.
+   * An answer for another account, or with fields that are not well formed,
+   * throws.
+   */
   account(address: string, options?: HorizonRequestOptions): Promise<HorizonAccount | null>;
 }
 
@@ -387,17 +401,9 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
     },
 
     async account(address, request) {
-      const { body } = await get(`/accounts/${encodeURIComponent(address)}`, request?.signal);
+      const { body, latestLedger } = await get(`/accounts/${encodeURIComponent(address)}`, request?.signal);
       if (body === null) return null;
-      const acc = asObject(body);
-      return {
-        id: acc['id'],
-        sequence: acc['sequence'],
-        subentry_count: acc['subentry_count'],
-        num_sponsoring: acc['num_sponsoring'],
-        num_sponsored: acc['num_sponsored'],
-        balances: acc['balances'],
-      } as HorizonAccount;
+      return { ...toAccount(asObject(body), address), ...(latestLedger === undefined ? {} : { latestLedger }) };
     },
   };
 }
@@ -494,6 +500,68 @@ function isLedgerNumber(value: unknown): value is number {
 
 function asObject(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+const SEQUENCE = /^[0-9]{1,19}$/;
+const DECIMAL = /^[0-9]{1,19}(\.[0-9]{1,7})?$/;
+
+/** An account answer that is not usable. Names the field, never its value. */
+function unusableAccount(field: string): Error {
+  return new Error(`Horizon returned an account with an unusable ${field}`);
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * The account from Horizon's answer, known fields only, each checked: the
+ * id is the one asked for, the sequence a decimal string, the counts whole
+ * numbers and every balance line well formed. Anything else throws.
+ */
+function toAccount(acc: Record<string, unknown>, address: string): HorizonAccount {
+  if (acc['id'] !== address) throw unusableAccount('id');
+  const sequence = acc['sequence'];
+  if (typeof sequence !== 'string' || !SEQUENCE.test(sequence)) throw unusableAccount('sequence');
+  const subentries = acc['subentry_count'];
+  if (!isCount(subentries)) throw unusableAccount('subentry_count');
+  const counts: { num_sponsoring?: number; num_sponsored?: number } = {};
+  for (const key of ['num_sponsoring', 'num_sponsored'] as const) {
+    const value = acc[key];
+    if (value === undefined) continue;
+    if (!isCount(value)) throw unusableAccount(key);
+    counts[key] = value;
+  }
+  const balances = acc['balances'];
+  if (!Array.isArray(balances)) throw unusableAccount('balances');
+  return { id: address, sequence, subentry_count: subentries, ...counts, balances: balances.map(toBalanceLine) };
+}
+
+const ISSUED_TYPES = new Set(['credit_alphanum4', 'credit_alphanum12']);
+
+function toBalanceLine(value: unknown): HorizonBalanceLine {
+  const line = asObject(value);
+  const type = line['asset_type'];
+  const balance = line['balance'];
+  if (typeof type !== 'string' || typeof balance !== 'string' || !DECIMAL.test(balance)) throw unusableAccount('balance');
+  const out: Record<string, unknown> = { asset_type: type, balance };
+  if (ISSUED_TYPES.has(type)) {
+    if (typeof line['asset_code'] !== 'string' || typeof line['asset_issuer'] !== 'string') throw unusableAccount('balance');
+    out['asset_code'] = line['asset_code'];
+    out['asset_issuer'] = line['asset_issuer'];
+  }
+  for (const key of ['limit', 'buying_liabilities', 'selling_liabilities'] as const) {
+    const amount = line[key];
+    if (amount === undefined) continue;
+    if (typeof amount !== 'string' || !DECIMAL.test(amount)) throw unusableAccount('balance');
+    out[key] = amount;
+  }
+  const authorized = line['is_authorized'];
+  if (authorized !== undefined) {
+    if (typeof authorized !== 'boolean') throw unusableAccount('balance');
+    out['is_authorized'] = authorized;
+  }
+  return out as unknown as HorizonBalanceLine;
 }
 
 const PAYMENT_FIELDS = [
