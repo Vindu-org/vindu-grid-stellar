@@ -9,7 +9,7 @@ Typed [BlindPay](https://blindpay.com) client for two-leg transfers settled on S
 | Version | 0.1.0, git tag only: not on npm. Install from the tag `v0.1.0` as the [root README](../../README.md#install-from-a-git-tag) shows. |
 | Node | 22 or later. |
 | Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-blindpay` only; files under `dist/` are internal. |
-| Stability | Early. Every API here may change before the first release. |
+| Stability | 0.x: a breaking change bumps the minor version, a patch never breaks. See the [stability policy](../../README.md#stability). |
 | Planned | BlindPay's answers to the points under [Unconfirmed](#unconfirmed). Passing the shared adapter conformance suite once it exists (tranche 3). |
 
 ## What it covers

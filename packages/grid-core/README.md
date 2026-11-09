@@ -11,7 +11,7 @@ Pure TypeScript. No network calls, no environment reads, no partner code. Partne
 | Version | 0.1.0, git tag only: not on npm. Install from the tag `v0.1.0` as the [root README](../../README.md#install-from-a-git-tag) shows. |
 | Node | 22 or later. |
 | Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-core` only; files under `dist/` are internal. |
-| Stability | Early. Every API here may change before the first release. |
+| Stability | 0.x: a breaking change bumps the minor version, a patch never breaks. See the [stability policy](../../README.md#stability). |
 | Planned | The adapter conformance suite, in the tranche 3 integration kit. Corridor names such as `awaiting_pix` and `pixCode` stay while every partner uses PIX; renaming them later is a breaking change. |
 
 ## What is inside

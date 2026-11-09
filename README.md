@@ -2,7 +2,7 @@
 
 Open-source toolkit for settling cross-border payments on Stellar. It holds the partner clients, the two-leg transfer core and the Stellar layer that Vindú Grid uses to move money from Brazil through USDC on Stellar.
 
-> **Status: early.** This repository is being built as part of Vindú's Stellar Community Fund project. No package is published yet, and every API here will change before the first release.
+> **Status: early, 0.x.** This repository is being built as part of Vindú's Stellar Community Fund project. No package is on npm yet: install from a git tag. See the [stability policy](#stability).
 
 ## Why it exists
 
@@ -105,6 +105,14 @@ Then run the demo, a full two-leg transfer with mock partners and an in-memory H
 ```sh
 yarn workspace testnet-demo start
 ```
+
+## Stability
+
+The packages follow a 0.x policy until 1.0:
+
+- A breaking change bumps the minor version (`0.1.x` to `0.2.0`). A patch version (`0.1.0` to `0.1.1`) never breaks the API.
+- All three packages share one version and are tagged together. Use the same tag for every package.
+- From 1.0 on, the packages follow semantic versioning.
 
 ## Install from a git tag
 
