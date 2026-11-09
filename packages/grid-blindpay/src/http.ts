@@ -199,10 +199,11 @@ function queryString(query: RequestOptions['query']): string {
 const CODE_LIKE_RE = /^[A-Za-z][A-Za-z0-9_.-]{0,80}$/;
 
 /**
- * The error body format is UNCONFIRMED. Best effort: a code-shaped `code`,
- * then `error` (string or `{ code }`), then a code-shaped `message`. Only a
- * code-shaped string ever becomes `code`, so free text (which may echo client
- * data) never does. `message` is the free text, used only with `includeErrorBodies`.
+ * The error body format is UNCONFIRMED. The code comes only from a
+ * code-shaped `code`, or else a code-shaped `error.code`. `message`, a bare
+ * `error` string and any other free text never become the code, even when
+ * they look like one word: a one-word message can be a client's name.
+ * `message` is the free text, used only with `includeErrorBodies`.
  */
 export function readErrorBody(text: string): { code?: string; message?: string } {
   let parsed: unknown;
@@ -216,7 +217,7 @@ export function readErrorBody(text: string): { code?: string; message?: string }
   const err = o['error'];
   const nested = typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : undefined;
   const message = str(o['message']) ?? str(nested?.['message']) ?? str(err);
-  const code = [o['code'], err, nested?.['code'], o['message']].find(
+  const code = [o['code'], nested?.['code']].find(
     (v): v is string => typeof v === 'string' && CODE_LIKE_RE.test(v),
   );
   return { ...(code === undefined ? {} : { code }), ...(message === undefined ? {} : { message }) };

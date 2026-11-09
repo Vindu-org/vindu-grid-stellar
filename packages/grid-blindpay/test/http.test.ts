@@ -65,8 +65,9 @@ describe('client http', () => {
   it.each([
     [409, { code: 'idempotency_key_in_flight' }, 'idempotency_key_in_flight', true],
     [409, { code: 'self_custody_already_set' }, 'self_custody_already_set', false],
-    [422, { error: 'idempotency_key_payload_mismatch' }, 'idempotency_key_payload_mismatch', false],
-    [400, { message: 'self_custody_required' }, 'self_custody_required', false],
+    // Only `code` and `error.code` give a code: a bare `error` string or a one-word message does not.
+    [422, { error: 'idempotency_key_payload_mismatch' }, undefined, false],
+    [400, { message: 'self_custody_required' }, undefined, false],
     [404, { error: { code: 'customer_not_found', message: 'Customer not found' } }, 'customer_not_found', false],
     [429, { code: 'development_instance_rate_limit_exceeded' }, 'development_instance_rate_limit_exceeded', true],
     [503, undefined, undefined, true],
@@ -267,13 +268,31 @@ describe('client config', () => {
 });
 
 describe('client error body parsing', () => {
-  it('reads code, error and message fields best-effort', () => {
+  it('reads the code only from code or error.code', () => {
     expect(readErrorBody('{"code":"a_b","message":"Nice text"}')).toEqual({ code: 'a_b', message: 'Nice text' });
+    expect(readErrorBody('{"error":{"code":"a_b","message":"Nice text"}}')).toEqual({ code: 'a_b', message: 'Nice text' });
+    expect(readErrorBody('{"code":"Not a code","error":{"code":"b_c"}}')).toEqual({ code: 'b_c' });
     expect(readErrorBody('{"message":"Not a code: spaces"}')).toEqual({ message: 'Not a code: spaces' });
     expect(readErrorBody('{"code":"free text with 000.000.000-00"}')).toEqual({});
     expect(readErrorBody('[1]')).toEqual({});
     expect(readErrorBody('not json')).toEqual({});
     expect(readErrorBody('')).toEqual({});
+  });
+
+  // Review probe: a 400 with {"message":"Maria"} reported partnerCode "Maria".
+  it.each([
+    ['a one-word message', '{"message":"Maria"}', 'Maria'],
+    ['a bare error string', '{"error":"Maria"}', 'Maria'],
+    ['an error object with only a message', '{"error":{"message":"Maria"}}', 'Maria'],
+  ])('never takes %s as the code', (_name, body, message) => {
+    expect(readErrorBody(body)).toEqual({ message });
+  });
+
+  it('never puts a one-word message in partnerCode', async () => {
+    const { fetch } = mockFetch([{ status: 400, body: { message: 'Maria' } }]);
+    const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e.partnerCode).toBeUndefined();
+    expect(JSON.stringify({ ...e, message: e.message })).not.toMatch(/Maria/);
   });
 
   it('parses Retry-After seconds and dates', () => {
