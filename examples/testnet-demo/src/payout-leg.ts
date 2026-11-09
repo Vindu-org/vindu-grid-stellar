@@ -141,8 +141,7 @@ export async function runPayoutLeg(
   }
   const stellar = createStellarSubmitter(submitterOptions);
   const before = { submissions: ledger.submissions.length, lookups: ledger.lookups.length };
-  // The application records the outcome as it happens: after a success the
-  // transfer is payout_submitted before the partner hears about it.
+  // Prints what the submit found; the transfer moves only in onSubmitted.
   const submitter: StellarSubmitter = {
     async submit(signedXdr) {
       const outcome = await stellar.submit(signedXdr);
@@ -151,9 +150,6 @@ export async function runPayoutLeg(
           `${ledger.submissions.length - before.submissions} submission(s), ` +
           `${ledger.lookups.length - before.lookups} hash lookup(s), no second signature`,
       );
-      if (outcome.status === 'success') {
-        transfer.move('payout_submitted', `tx ${short(outcome.hash)} in ledger ${outcome.detail.ledger ?? '?'}`);
-      }
       return outcome;
     },
   };
@@ -186,6 +182,10 @@ export async function runPayoutLeg(
             `    signer (${signer.custody}) checked state, expiry, source and operation source, destination, ` +
               'asset, amount, fee and maxTime, then signed once; the signed XDR is stored before it leaves',
           ),
+        // The money moved: the transfer is payout_submitted before the partner hears about it.
+        onSubmitted: (outcome) => {
+          transfer.move('payout_submitted', `tx ${short(outcome.hash)} confirmed on the ledger`);
+        },
       },
     });
   } catch (e) {
