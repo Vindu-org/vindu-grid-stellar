@@ -94,7 +94,8 @@ The run starts in `payout_quoted`, and the transfer moves to `awaiting_signature
 | `QuoteExpiredError`, `stage: 'authorization'` | `payout_quoted` | `payout_quoted -> funded`, then get a fresh quote |
 | `PayoutAuthorizationError` (the authorize step threw or returned something unknown; keeps the cause's `code`, not its text) | `payout_quoted` | `payout_quoted -> needs_attention` |
 | `QuoteExpiredError`, `stage: 'signing'` | `awaiting_signature` | `awaiting_signature -> funded`, then get a fresh quote |
-| `PayoutIncompleteError`, `stage: 'submit'` | `awaiting_signature` | `awaiting_signature -> needs_attention` |
+| `SigningNotAllowedError` (the signer refused the transaction) | `awaiting_signature` | `awaiting_signature -> needs_attention` (`signer_refused`) |
+| `PayoutIncompleteError`, `stage: 'submit'` | `awaiting_signature` | `awaiting_signature -> needs_attention` (`submission_rejected_or_unknown`) |
 | `PayoutIncompleteError`, `stage: 'create'` | `payout_submitted` (after a success you stored) | retry with `retryPayoutExecute`; `payout_submitted -> needs_attention` if the partner never takes it |
 
 The quote must have more than `expiryMarginMs` left (default one minute) before authorizing, before signing and again before submitting. Only a submit outcome of `success` lets the payout be created. Any other outcome throws `PayoutIncompleteError` with `stage: 'submit'` and the outcome: sign a replacement only when `canSignReplacement(outcome)` is true (`failed` or `expired_not_landed`), never while the first transaction could still land (`unknown`, `rejected`). A failed create throws `stage: 'create'` with the exact input and key; pass `error.pending` to `retryPayoutExecute`.

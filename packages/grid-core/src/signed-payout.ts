@@ -145,6 +145,7 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  * | {@link QuoteExpiredError} | `authorization` | `payout_quoted` | `payout_quoted -> funded` (`quote_expired_before_authorization`): get a fresh quote |
  * | {@link PayoutAuthorizationError} | authorize (`preparePayout` threw or returned an unknown authorization) | `payout_quoted` | `payout_quoted -> needs_attention` (`authorization_failed`) |
  * | {@link QuoteExpiredError} | `signing` | `awaiting_signature` | `awaiting_signature -> funded` (`quote_expired_before_signing`): any signed XDR was never submitted, drop it |
+ * | {@link SigningNotAllowedError} | signing (the signer refused, or the stored state was wrong) | `awaiting_signature` | `awaiting_signature -> needs_attention` (`signer_refused`): nothing left the signer |
  * | {@link PayoutIncompleteError} | `submit` | `awaiting_signature` | `awaiting_signature -> needs_attention` (`submission_rejected_or_unknown`) |
  * | {@link PayoutIncompleteError} | `create` | `payout_submitted` (`client_submits`, stored on the success), `awaiting_signature` (`partner_submits`) or `payout_quoted` (`none`) | retry with {@link retryPayoutExecute}; if the partner never takes a signed payout, `payout_submitted -> needs_attention` (`partner_refused_or_unknown`) or `awaiting_signature -> needs_attention` |
  *
@@ -157,8 +158,9 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  * transfer stays where it is for an operator. {@link InvalidInputError} for
  * unusable input (before any call, the transfer in `payout_quoted`) or a
  * clock that breaks; {@link SigningNotAllowedError} when `onAuthorized`
- * returned another state or the signer refused; and whatever `onAuthorized`
- * or `onSigned` throw, unchanged.
+ * returned a state other than `awaiting_signature` (the signer refusing is the
+ * `signer_refused` row above); and whatever `onAuthorized` or `onSigned`
+ * throw, unchanged.
  */
 export async function runSignedPayout(input: RunSignedPayoutInput): Promise<SignedPayoutResult> {
   const margin = input.expiryMarginMs ?? DEFAULT_EXPIRY_MARGIN_MS;
