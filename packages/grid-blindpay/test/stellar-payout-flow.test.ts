@@ -1,5 +1,6 @@
 import {
   type ExecutePayoutInput,
+  InvalidConfigError,
   InvalidInputError,
   type LegQuote,
   PayoutAuthorizationError,
@@ -54,12 +55,16 @@ const AUTHORIZED: MockReply = { body: { transaction_hash: UNSIGNED } };
 const CREATED: MockReply = { body: { id: 'po_000000000000', status: 'processing' } };
 const SUCCESS: SubmitOutcome = { status: 'success', hash: HASH };
 
-function setup(replies: MockReply[], opts: { clock?: () => number; field?: SignedTransactionField } = {}) {
+function setup(
+  replies: MockReply[],
+  opts: { clock?: () => number; field?: SignedTransactionField; payoutDestination?: string } = {},
+) {
   const { fetch, calls } = mockFetch(replies);
   const adapter = createBlindPayAdapter(config(fetch), {
     network: 'stellar_testnet',
     assetIssuers: { USDB: USDB_ISSUER },
     ...(opts.field === undefined ? {} : { signedTransactionField: opts.field }),
+    ...(opts.payoutDestination === undefined ? {} : { payoutDestination: opts.payoutDestination }),
   });
   const signStellar = jest.fn(async () => SIGNED);
   const signer: Signer = { custody: 'test_key', signStellar };
@@ -112,6 +117,55 @@ describe('stellar payout flow', () => {
     expect(res).toMatchObject({ leg: { partner: 'blindpay', kind: 'payout', id: 'po_000000000000' }, authorization: 'stellar_xdr', signedXdr: SIGNED });
     expect(res.pending.idempotencyKey).toBe(KEY);
     expect(res.txHash).toBe(submits === 1 ? HASH : undefined);
+  });
+
+  describe('the payout destination', () => {
+    const expectedDestination = (signStellar: jest.Mock) =>
+      ((signStellar.mock.calls[0] as unknown[] | undefined)?.[2] as { expected: { destination: string } }).expected.destination;
+
+    it("uses the adapter's payoutDestination when signing has none", async () => {
+      const { signStellar, base } = setup([AUTHORIZED, CREATED], { payoutDestination: TREASURY });
+      await runStellarPayout(withSigning(base, { destination: undefined }));
+      expect(expectedDestination(signStellar)).toBe(TREASURY);
+    });
+
+    it('accepts both when they are the same account', async () => {
+      const { signStellar, base } = setup([AUTHORIZED, CREATED], { payoutDestination: TREASURY });
+      await runStellarPayout(base);
+      expect(expectedDestination(signStellar)).toBe(TREASURY);
+    });
+
+    it.each<[string, { payoutDestination?: string }, string | undefined, RegExp]>([
+      ['two different accounts', { payoutDestination: `G${'C'.repeat(55)}` }, TREASURY, /is not the adapter's payoutDestination/],
+      ['no destination at all', {}, undefined, /No payout destination/],
+    ])('refuses %s before any call or signature', async (_name, opts, destination, message) => {
+      const { calls, signStellar, onAuthorized, base } = setup([AUTHORIZED, CREATED], opts);
+      const e = await caught(runStellarPayout(withSigning(base, { destination })));
+      expect(e).toBeInstanceOf(InvalidInputError);
+      expect((e as Error).message).toMatch(message);
+      expect(calls).toHaveLength(0);
+      expect(onAuthorized).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    it.each(['nowhere', `M${'A'.repeat(68)}`, `g${'B'.repeat(55)}`, '', 42])(
+      'refuses a payoutDestination of %p when the adapter is built',
+      (payoutDestination) => {
+        const { fetch } = mockFetch([]);
+        expect(() =>
+          createBlindPayAdapter(config(fetch), {
+            network: 'stellar_testnet',
+            assetIssuers: { USDB: USDB_ISSUER },
+            payoutDestination: payoutDestination as string,
+          }),
+        ).toThrow(InvalidConfigError);
+      },
+    );
+
+    it('reports the configured payoutDestination on the adapter', () => {
+      expect(setup([], { payoutDestination: TREASURY }).adapter.payoutDestination).toBe(TREASURY);
+      expect(setup([]).adapter.payoutDestination).toBeUndefined();
+    });
   });
 
   it('payout with partner_submits and a tx_hash adapter is refused before any call or signature', async () => {

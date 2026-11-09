@@ -8,6 +8,10 @@
  *
  * A thin wrapper over core's `runSignedPayout` with the BlindPay adapter, so
  * the safety rules, and the error to transition table in its doc, are core's:
+ * - The payment must reach BlindPay's payout account: `signing.destination`,
+ *   else the adapter's `payoutDestination`, configured from what BlindPay
+ *   gave you in writing. Two that differ, or none, are refused before any
+ *   call. It is never read from the transaction BlindPay returns.
  * - Core checks before any call that the quote is from this adapter's id and
  *   that `quote.source` is a positive amount of the funded asset, no more
  *   than `funded`. The adapter already refuses a quote whose `sender_amount`
@@ -57,16 +61,27 @@ import {
 import type { BlindPayAdapter } from './adapter';
 
 /** The parts of the BlindPay adapter the flow uses. */
-export type StellarPayoutAdapter = Pick<BlindPayAdapter, 'id' | 'signedTransactionField' | 'preparePayout' | 'executePayout'>;
+export type StellarPayoutAdapter = Pick<
+  BlindPayAdapter,
+  'id' | 'signedTransactionField' | 'payoutDestination' | 'preparePayout' | 'executePayout'
+>;
 
 /**
- * Core's signing group, with `submission` defaulting to `client_submits`.
+ * Core's signing group, with `submission` defaulting to `client_submits`
+ * and `destination` defaulting to the adapter's `payoutDestination`.
  * BlindPay always returns a transaction to sign, so it is required here.
- * With `client_submits`, `submitter` and `onSubmitted` are required.
+ * With `client_submits`, `submitter` (with its `maxDurationMs`) and
+ * `onSubmitted` are required.
  */
-export interface StellarPayoutSigning extends Omit<SignedPayoutSigning, 'submission'> {
+export interface StellarPayoutSigning extends Omit<SignedPayoutSigning, 'submission' | 'destination'> {
   /** Default `client_submits`. */
   readonly submission?: PayoutSubmission;
+  /**
+   * BlindPay's account the payment must reach (G...). Default: the
+   * adapter's `payoutDestination`. When both are set they must be the same
+   * account. Never take it from the transaction BlindPay returns.
+   */
+  readonly destination?: string;
 }
 
 export interface RunStellarPayoutInput {
@@ -79,7 +94,7 @@ export interface RunStellarPayoutInput {
   readonly context: SignedPayoutContext;
   /** The amount confirmed in the account. The quote may not move more. */
   readonly funded: Money;
-  /** Signer, submission, submitter, BlindPay's account to pay (`destination`) and the hooks. */
+  /** Signer, submission, submitter, BlindPay's account to pay (`destination`, or the adapter's `payoutDestination`) and the hooks. */
   readonly signing: StellarPayoutSigning;
   /** Key for BlindPay's create. Store it before calling, and reuse it on every retry. */
   readonly idempotencyKey: string;
@@ -94,7 +109,9 @@ export interface RunStellarPayoutInput {
  * Runs the payout once. See the module notes.
  *
  * @throws {InvalidInputError} before any call for missing signing inputs,
- *   `partner_submits` with a `tx_hash` adapter, a non-Stellar account, and
+ *   `partner_submits` with a `tx_hash` adapter, a non-Stellar account, no
+ *   destination (neither `signing.destination` nor the adapter's
+ *   `payoutDestination`), two destinations that differ, and
  *   everything core refuses up front (a quote from another partner, a quote
  *   above `funded`, `client_submits` without a submitter or `onSubmitted`).
  * @throws core's `QuoteExpiredError`, `PayoutAuthorizationError`,
@@ -113,11 +130,12 @@ export async function runStellarPayout(input: RunStellarPayoutInput): Promise<Si
   if (context.account.chain !== 'stellar') {
     throw new InvalidInputError('BlindPay pays out from Stellar accounts only');
   }
+  const destination = payoutDestinationFor(adapter, input.signing.destination);
   return runSignedPayout({
     adapter,
     context,
     funded: input.funded,
-    signing: { ...input.signing, submission },
+    signing: { ...input.signing, submission, destination },
     now: input.now ?? Date.now,
     ...(input.expiryMarginMs === undefined ? {} : { expiryMarginMs: input.expiryMarginMs }),
     idempotencyKey: input.idempotencyKey,
@@ -145,4 +163,24 @@ export async function retryStellarPayoutCreate(
   logger?: Logger,
 ): Promise<SignedPayoutResult> {
   return retryPayoutExecute(adapter, pending, logger);
+}
+
+/**
+ * The account the payout must pay: `signing.destination`, else the
+ * adapter's `payoutDestination`. Both set and different, or neither set, is
+ * refused before any call: the destination comes from configuration agreed
+ * with BlindPay, never from the transaction it returns.
+ */
+function payoutDestinationFor(adapter: StellarPayoutAdapter, fromSigning: string | undefined): string {
+  const configured = adapter.payoutDestination;
+  if (fromSigning !== undefined && configured !== undefined && fromSigning !== configured) {
+    throw new InvalidInputError("signing.destination is not the adapter's payoutDestination: refusing to pay either");
+  }
+  const destination = fromSigning ?? configured;
+  if (destination === undefined) {
+    throw new InvalidInputError(
+      "No payout destination: set the adapter's payoutDestination (from BlindPay, in writing) or signing.destination",
+    );
+  }
+  return destination;
 }

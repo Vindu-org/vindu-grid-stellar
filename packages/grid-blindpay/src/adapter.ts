@@ -15,6 +15,7 @@ import {
   type Asset,
   InvalidConfigError,
   InvalidInputError,
+  isStellarAccountId,
   type LegKind,
   type LegQuote,
   type LegRef,
@@ -68,6 +69,15 @@ export interface BlindPayAdapterOptions {
    * submitted by us first (`client_submits`).
    */
   readonly signedTransactionField?: SignedTransactionField;
+  /**
+   * The Stellar account (G...) BlindPay payouts must pay. Get it from
+   * BlindPay in writing and configure it here; never read it from the
+   * transaction BlindPay returns, which is what the signer checks against
+   * it. `runStellarPayout` uses it when `signing.destination` is absent,
+   * and refuses a `signing.destination` that differs. Checked when the
+   * adapter is built: anything but a G account throws `InvalidConfigError`.
+   */
+  readonly payoutDestination?: string;
   /** Reuse an existing client instead of building one from the config. Its `partnerId` must match. */
   readonly client?: BlindPayClient;
 }
@@ -76,6 +86,8 @@ export interface BlindPayAdapter extends PartnerAdapter {
   readonly client: BlindPayClient;
   /** The `signedTransactionField` option in effect. */
   readonly signedTransactionField: SignedTransactionField;
+  /** The `payoutDestination` option: the account BlindPay payouts pay, when configured. */
+  readonly payoutDestination: string | undefined;
 }
 
 export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayAdapterOptions): BlindPayAdapter {
@@ -96,6 +108,10 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   if (field !== 'signed_xdr' && field !== 'tx_hash') {
     throw new InvalidConfigError(`Unknown signedTransactionField: ${String(field)}`);
   }
+  const payoutDestination = options.payoutDestination;
+  if (payoutDestination !== undefined && (typeof payoutDestination !== 'string' || !isStellarAccountId(payoutDestination))) {
+    throw new InvalidConfigError('payoutDestination must be the Stellar account (G...) BlindPay gave you for payouts');
+  }
   const ref = (kind: LegKind, id: string): LegRef => ({ partner: partnerId, kind, id });
 
   const feeId = (leg: LegKind, spreadBps: number | undefined) => {
@@ -113,6 +129,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
     id: partnerId,
     client,
     signedTransactionField: field,
+    payoutDestination,
 
     async quoteFunding(input) {
       if (input.rail !== 'pix') throw new InvalidInputError(`Funding rail ${input.rail} is not supported; use pix`);
