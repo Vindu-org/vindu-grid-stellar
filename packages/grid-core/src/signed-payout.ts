@@ -38,6 +38,7 @@ import {
   type PendingPayout,
   QuoteExpiredError,
   type QuoteExpiredStage,
+  SignerRefusedError,
   SigningNotAllowedError,
 } from './errors';
 import { type Money, compare, isPositive, isValidAmount } from './money';
@@ -50,7 +51,7 @@ import type {
   PartnerAdapter,
   PayoutAuthorization,
 } from './ports';
-import { type Signer, type SigningContext, assertSigningAllowed } from './signer';
+import type { Signer, SigningContext } from './signer';
 import type { StellarSubmitter, SubmitOutcome } from './submission';
 import type { TransferState } from './transfer-states';
 
@@ -233,13 +234,15 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   // A quote that cannot outlive the submit is dropped here, before anything moves.
   assertFresh('authorization', submitBudget);
   const state = await signing.onAuthorized(auth);
-  const signingContext = signingContextFor({ ...context, destination: signing.destination }, state);
-  const at = assertFresh('signing', submitBudget);
-  assertSigningAllowed(signingContext, new Date(at));
-  const signedXdr = await signer.signStellar(account, auth.unsignedXdr, signingContext);
-  if (typeof signedXdr !== 'string' || signedXdr === '') {
-    throw new SigningNotAllowedError('The signer returned an empty transaction');
+  // The stored state first: a wrong state is an operator's question, whatever the clock says.
+  if (state !== 'awaiting_signature') {
+    throw new SigningNotAllowedError(
+      `Transfer ${transferId} is in ${String(state)}, not awaiting_signature: nothing was signed`,
+    );
   }
+  assertFresh('signing', submitBudget);
+  const signingContext = signingContextFor({ ...context, destination: signing.destination }, state);
+  const signedXdr = await sign(signer, account, auth.unsignedXdr, signingContext, logger);
   logger.info('payout signed', { transferId, quoteId: quote.id, custody: signer.custody });
   await signing.onSigned?.(signedXdr);
 
@@ -319,6 +322,33 @@ export function signingContextFor(
       amount: context.quote.source,
     },
   };
+}
+
+/**
+ * Calls the signer once. Anything it throws or rejects with, and anything
+ * but a non-empty string, becomes {@link SignerRefusedError} (cause code only).
+ */
+async function sign(
+  signer: Signer,
+  account: AccountRef,
+  unsignedXdr: string,
+  context: SigningContext,
+  logger: Logger,
+): Promise<string> {
+  const ids = { transferId: context.transferId, quoteId: context.quoteId, custody: signer.custody };
+  let signed: unknown;
+  try {
+    signed = await signer.signStellar(account, unsignedXdr, context);
+  } catch (cause) {
+    const error = new SignerRefusedError('threw', cause);
+    logger.warn('payout signer refused', { ...ids, causeCode: error.causeCode ?? 'none' });
+    throw error;
+  }
+  if (typeof signed !== 'string' || signed === '') {
+    logger.warn('payout signer returned no transaction', ids);
+    throw new SignerRefusedError('invalid_result');
+  }
+  return signed;
 }
 
 /**

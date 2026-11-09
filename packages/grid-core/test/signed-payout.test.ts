@@ -5,6 +5,7 @@ import {
   PayoutAuthorizationError,
   PayoutIncompleteError,
   QuoteExpiredError,
+  SignerRefusedError,
   SigningNotAllowedError,
 } from '../src/errors';
 import { money } from '../src/money';
@@ -351,6 +352,21 @@ describe('signed payout', () => {
       expect(signStellar).not.toHaveBeenCalled();
     });
 
+    // Review probe: the expiry was checked first, so a wrong state on an expiring
+    // quote surfaced as QuoteExpiredError(signing), whose edge starts in a state
+    // the transfer was not in.
+    it('checks the returned state before the expiry', async () => {
+      let t = NOW;
+      const { input, onAuthorized, signStellar } = setup({ clock: () => t });
+      onAuthorized.mockImplementationOnce(async () => {
+        t = Date.parse(EXPIRES_AT);
+        return 'payout_quoted';
+      });
+      const e = await caught(runSignedPayout(input));
+      expect(e).toBeInstanceOf(SigningNotAllowedError);
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
     it('stops before signing when it throws, with its own error', async () => {
       const { input, onAuthorized, signStellar } = setup();
       onAuthorized.mockRejectedValueOnce(new Error('db down'));
@@ -608,16 +624,29 @@ describe('signed payout', () => {
     expect(signStellar).not.toHaveBeenCalled();
   });
 
-  it('stops when the signer refuses or returns nothing', async () => {
-    const refused = setup();
-    refused.signStellar.mockRejectedValueOnce(new SigningNotAllowedError('wrong destination'));
-    await expect(runSignedPayout(refused.input)).rejects.toThrow(/wrong destination/);
-    expect(refused.submit).not.toHaveBeenCalled();
-
-    const empty = setup();
-    empty.signStellar.mockResolvedValueOnce('');
-    await expect(runSignedPayout(empty.input)).rejects.toThrow(/empty transaction/);
-    expect(empty.submit).not.toHaveBeenCalled();
+  describe('a signer that does not sign', () => {
+    // Review probe: a plain Error from a custodian, or a non-string result, had no
+    // edge in the table; a refusal shared its error with a wrong stored state.
+    it.each<[string, (s: ReturnType<typeof setup>) => void, string, string | undefined]>([
+      ['refuses with SigningNotAllowedError', (s) => s.signStellar.mockRejectedValueOnce(new SigningNotAllowedError('pays GXYZ')), 'threw', 'signing_not_allowed'],
+      ['throws a plain Error', (s) => s.signStellar.mockRejectedValueOnce(new Error('ECONNRESET to custodian')), 'threw', undefined],
+      ['throws a code-shaped error', (s) => s.signStellar.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'ETIMEDOUT' })), 'threw', 'ETIMEDOUT'],
+      ['rejects with a string', (s) => s.signStellar.mockRejectedValueOnce('no'), 'threw', undefined],
+      ['throws synchronously', (s) => s.signStellar.mockImplementationOnce(() => { throw new Error('sync'); }), 'threw', undefined],
+      ['returns an empty string', (s) => s.signStellar.mockResolvedValueOnce(''), 'invalid_result', undefined],
+      ['returns a number', (s) => s.signStellar.mockResolvedValueOnce(42 as unknown as string), 'invalid_result', undefined],
+    ])('becomes SignerRefusedError when it %s, and nothing is submitted', async (_name, arrange, failure, causeCode) => {
+      const s = setup();
+      arrange(s);
+      const e = await caught(runSignedPayout(s.input));
+      expect(e).toBeInstanceOf(SignerRefusedError);
+      expect(e).toMatchObject({ code: 'signer_refused', failure, causeCode });
+      expect((e as Error).message).not.toMatch(/GXYZ|ECONNRESET|sync/);
+      expect(s.store.state).toBe('awaiting_signature');
+      expect(transition(s.store.state, 'needs_attention', 'signer_refused')).toBeDefined();
+      expect(s.submit).not.toHaveBeenCalled();
+      expect(s.executePayout).not.toHaveBeenCalled();
+    });
   });
 
   it('hands the signed XDR to onSigned before submitting, and stops if it throws', async () => {
