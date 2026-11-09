@@ -26,7 +26,11 @@ describe('money', () => {
       expect(() => parseAmount(a)).not.toThrow();
     });
 
-    it.each(['', '.5', '1.', '+1', '01', '1e5', ' 1', '1 ', '1,5', '0.12345678', 'NaN', '--1', '1.2.3'])(
+    it.each([
+      '', '.5', '1.', '+1', '01', '1e5', ' 1', '1 ', '1,5', '0.12345678', 'NaN', '--1', '1.2.3',
+      // From a review probe: other digit systems, separators, hex and trailing newlines.
+      '\u0661\u0662\u0663', '00.5', '1_000', '1\n', '0x10', 'Infinity', '-Infinity', '0.00000001',
+    ])(
       'rejects %p',
       (a) => {
         expect(isValidAmount(a)).toBe(false);
