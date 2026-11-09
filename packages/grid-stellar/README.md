@@ -95,12 +95,21 @@ Resubmitting the same signed envelope is always safe. This package does not buil
 ### With the core payout flow
 
 ```ts
+// gateway: one Horizon instance you operate or trust, never a public load-balanced URL.
 const submitter = createStellarSubmitter({ gateway, networkPassphrase });
 submitter.maxDurationMs; // timeoutMs + maxWaitMs: 150 000 with the defaults
-// runSignedPayout({ ..., submitter }): only { status: 'success' } creates the payout.
+
+await runSignedPayout({
+  ...payout,                 // adapter, context, funded, now, idempotencyKey
+  signing: {
+    signer, destination, submitter, submission: 'client_submits',
+    onAuthorized,            // compare-and-set: payout_quoted -> awaiting_signature
+    onSubmitted,             // stores awaiting_signature -> payout_submitted before the partner is told
+  },
+});
 ```
 
-Each outcome keeps the status and hash; every other field of the result is in `detail` (for a mismatch, `detail.reason` is `'hash_mismatch'`). `maxDurationMs` is the longest one `submit` can take: keep at least that much quote time, plus a margin, before signing.
+Only `{ status: 'success' }` goes on to `onSubmitted` and then the partner's create. Each outcome keeps the status and hash; every other field of the result is in `detail` (for a mismatch, `detail.reason` is `'hash_mismatch'`). `maxDurationMs` is the longest one `submit` can take: core refuses to sign unless the quote has more than `expiryMarginMs + maxDurationMs` left.
 
 ## Check the payout transaction before signing
 
