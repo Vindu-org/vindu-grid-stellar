@@ -8,7 +8,7 @@
  * amounts in the answers are made up for the demo.
  */
 import { createBlindPayAdapter, runStellarPayout } from '@vindu/grid-blindpay';
-import { type AccountRef, money } from '@vindu/grid-core';
+import { type AccountRef, type TransferState, money, transition } from '@vindu/grid-core';
 import { createStellarSubmitter } from '@vindu/grid-stellar';
 
 import { fmt, short } from './format';
@@ -111,20 +111,28 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
   });
   log(`  payout quote ${payoutQuote.id}: ${fmt(payoutQuote.source)} -> ${fmt(payoutQuote.target)}`);
 
-  // authorize -> check quote and state -> sign once -> submit (hash checked) -> create
+  // From payout_quoted: authorize -> store awaiting_signature -> check quote
+  // and state -> sign once -> submit (hash checked) -> create
+  let state: TransferState = 'payout_quoted';
   const result = await runStellarPayout({
     adapter,
     signer: world.signer,
     submitter: createStellarSubmitter({ gateway: world.ledger, networkPassphrase: world.networkPassphrase, now }),
     context: {
       transferId: 'demo-transfer-2',
-      state: 'awaiting_signature',
+      state: 'payout_quoted',
       quote: payoutQuote,
       account,
       destination: world.partner.treasuryAddress,
     },
     idempotencyKey: 'demo-transfer-2-payout',
     now,
+    onAuthorized: () => {
+      const rule = transition(state, 'awaiting_signature', 'signed_payout_flow');
+      state = rule.to;
+      log(`  ${rule.from} -> ${rule.to} (${rule.label}): BlindPay authorized, stored before signing`);
+      return state;
+    },
   });
   log(`  payout ${result.leg.id} created after a confirmed submit, tx ${short(result.txHash ?? '')}`);
   return { requests, payoutId: result.leg.id, txHash: result.txHash };
