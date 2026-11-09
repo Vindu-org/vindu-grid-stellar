@@ -12,13 +12,13 @@ Every Vindú transfer runs in two legs: fiat to USDC, then USDC to fiat. Stellar
 
 - typed clients for partner APIs that settle USDC on Stellar, starting with BlindPay;
 - the core of a two-leg transfer: states, routing rules and price tolerance;
-- the Stellar layer: following accounts on Horizon, reconciling on-chain payments with partner data, and building and submitting transactions;
+- the Stellar layer: following accounts on Horizon, reconciling on-chain payments with partner data, and decoding, submitting and looking up signed transactions;
 - later, an open-source Soroban registry for transfer and verification attestations.
 
 ## What it is not
 
 - **Not a Vindú API.** Nothing here calls Vindú. It gives no access to Vindú's accounts, clients or transfers.
-- **Not a custody solution.** The library never holds a signing key. It hands out unsigned transactions and accepts signed ones.
+- **Not a custody solution.** The library never holds a signing key. It passes the partner's unsigned transaction to your signer and submits what your signer returns.
 - **Not an auth layer.** There are no users, sessions or roles here. Your application decides who may do what before it calls this code.
 
 ## How it fits in an application
