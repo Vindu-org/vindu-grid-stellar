@@ -7,7 +7,7 @@
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-import { GridError, type WebhookHeaders } from '@vindu/grid-core';
+import { GridError, InvalidConfigError, InvalidInputError, type WebhookHeaders } from '@vindu/grid-core';
 
 import type { BlockchainWallet, Customer, Payin, Payout } from './types';
 
@@ -33,9 +33,13 @@ export interface VerifyWebhookInput {
   readonly headers: HeaderSource;
   /** Endpoint signing secret, `whsec_<base64>`. */
   readonly secret: string;
-  /** Largest accepted gap between `svix-timestamp` and now, both directions. Default 300 s. */
+  /**
+   * Largest accepted gap between `svix-timestamp` and now, both directions.
+   * Default 300 s. Must be a finite number of seconds above zero: anything
+   * else throws {@link InvalidConfigError} rather than accept every timestamp.
+   */
   readonly toleranceSec?: number;
-  /** Clock in epoch milliseconds. Defaults to `Date.now`. */
+  /** Clock in epoch milliseconds. Defaults to `Date.now`. A non-finite reading throws {@link InvalidInputError}. */
   readonly now?: () => number;
 }
 
@@ -49,9 +53,29 @@ export interface VerifiedWebhook {
 export const DEFAULT_WEBHOOK_TOLERANCE_SEC = 300;
 const SECRET_PREFIX = 'whsec_';
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+/** Svix secrets are 24 bytes or more; anything under 16 is a mistake, not a key. */
+const MIN_SECRET_BYTES = 16;
 
-/** Verifies the Svix signature and timestamp. Throws {@link WebhookVerificationError} on any failure. */
+/** Throws {@link InvalidConfigError} unless `toleranceSec` is a finite number above zero. */
+export function assertWebhookTolerance(toleranceSec: number): void {
+  if (typeof toleranceSec !== 'number' || !Number.isFinite(toleranceSec) || toleranceSec <= 0) {
+    throw new InvalidConfigError(`Webhook toleranceSec must be a finite number of seconds above zero: ${String(toleranceSec)}`);
+  }
+}
+
+/**
+ * Verifies the Svix signature and timestamp. Throws {@link WebhookVerificationError}
+ * on any failure of the delivery, and fails closed on a broken setup: an
+ * invalid tolerance throws {@link InvalidConfigError}, a clock that gives a
+ * non-finite time throws {@link InvalidInputError}.
+ */
 export function verifyWebhook(input: VerifyWebhookInput): VerifiedWebhook {
+  const tolerance = input.toleranceSec ?? DEFAULT_WEBHOOK_TOLERANCE_SEC;
+  assertWebhookTolerance(tolerance);
+  const nowMs = (input.now ?? Date.now)();
+  if (typeof nowMs !== 'number' || !Number.isFinite(nowMs)) {
+    throw new InvalidInputError('The clock gave an invalid time: refusing to verify the webhook');
+  }
   const id = header(input.headers, 'svix-id');
   const ts = header(input.headers, 'svix-timestamp');
   const sig = header(input.headers, 'svix-signature');
@@ -61,8 +85,7 @@ export function verifyWebhook(input: VerifyWebhookInput): VerifiedWebhook {
   const key = decodeSecret(input.secret);
   if (!/^\d{1,12}$/.test(ts)) throw new WebhookVerificationError('bad_timestamp', 'svix-timestamp is not epoch seconds');
   const timestamp = Number(ts);
-  const tolerance = input.toleranceSec ?? DEFAULT_WEBHOOK_TOLERANCE_SEC;
-  const nowSec = Math.floor((input.now ?? Date.now)() / 1000);
+  const nowSec = Math.floor(nowMs / 1000);
   if (Math.abs(nowSec - timestamp) > tolerance) {
     throw new WebhookVerificationError(
       'stale',
@@ -76,8 +99,9 @@ export function verifyWebhook(input: VerifyWebhookInput): VerifiedWebhook {
     .digest();
   const matched = sig
     .split(' ')
-    .filter((part) => part.startsWith('v1,'))
+    .filter((part) => part.startsWith('v1,') && BASE64_RE.test(part.slice(3)))
     .some((part) => {
+      // Strict base64 only: Buffer.from would skip stray characters and still match.
       const candidate = Buffer.from(part.slice(3), 'base64');
       return candidate.length === expected.length && timingSafeEqual(candidate, expected);
     });
@@ -89,7 +113,9 @@ function decodeSecret(secret: string): Buffer {
   const b64 = typeof secret === 'string' && secret.startsWith(SECRET_PREFIX) ? secret.slice(SECRET_PREFIX.length) : '';
   const key = BASE64_RE.test(b64) ? Buffer.from(b64, 'base64') : Buffer.alloc(0);
   // Never echo the secret.
-  if (key.length === 0) throw new WebhookVerificationError('bad_secret', 'Webhook secret must be whsec_ followed by base64');
+  if (key.length < MIN_SECRET_BYTES) {
+    throw new WebhookVerificationError('bad_secret', `Webhook secret must be whsec_ followed by base64 of at least ${MIN_SECRET_BYTES} bytes`);
+  }
   return key;
 }
 

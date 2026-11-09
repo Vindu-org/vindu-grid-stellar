@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
-import { GridError } from '@vindu/grid-core';
+import { GridError, InvalidConfigError, InvalidInputError } from '@vindu/grid-core';
 
 import { WebhookVerificationError, parseWebhookEvent, verifyWebhook } from '../src/webhooks';
 
@@ -92,6 +92,59 @@ describe('webhook verification', () => {
   it('ignores non-v1 versions, even with a correct digest', () => {
     expect(reason(() => verify({ headers: headers(`v2,${sign(BODY)} v1a,${sign(BODY)}`) }))).toBe('signature_mismatch');
     expect(reason(() => verify({ headers: headers(`v2,${sign(BODY)} v1,${sign('x')}`) }))).toBe('signature_mismatch');
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, Number(undefined)])(
+    'fails closed on toleranceSec %p, even for a correctly signed delivery from 2001',
+    (toleranceSec) => {
+      const old = '1000000000';
+      const h = { ...headers(`v1,${sign(BODY, KEY, ID, old)}`), 'svix-timestamp': old };
+      expect(() => verify({ headers: h, toleranceSec })).toThrow(InvalidConfigError);
+    },
+  );
+
+  it('fails closed when toleranceSec is Infinity and the timestamp is 1', () => {
+    const h = { ...headers(`v1,${sign(BODY, KEY, ID, '1')}`), 'svix-timestamp': '1' };
+    expect(() => verify({ headers: h, toleranceSec: Number.POSITIVE_INFINITY })).toThrow(InvalidConfigError);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])('fails closed when the clock reads %p', (t) => {
+    expect(() => verify({ now: () => t })).toThrow(InvalidInputError);
+  });
+
+  it('rejects a v1 signature with characters outside base64, even around the right digest', () => {
+    expect(reason(() => verify({ headers: headers(`v1,!!${sign(BODY)}`) }))).toBe('signature_mismatch');
+    expect(reason(() => verify({ headers: headers(`v1,${sign(BODY)}#`) }))).toBe('signature_mismatch');
+  });
+
+  it('rejects a secret shorter than 16 bytes', () => {
+    const tiny = Buffer.from([7]);
+    const h = headers(`v1,${sign(BODY, tiny)}`);
+    expect(reason(() => verify({ headers: h, secret: `whsec_${tiny.toString('base64')}` }))).toBe('bad_secret');
+  });
+
+  it('rejects a secret without the whsec_ prefix', () => {
+    expect(reason(() => verify({ secret: KEY.toString('base64') }))).toBe('bad_secret');
+  });
+
+  it('rejects an svix-id and svix-timestamp split at another boundary', () => {
+    const h = { 'svix-id': `${ID}.${TS.slice(0, 2)}`, 'svix-timestamp': TS.slice(2), 'svix-signature': `v1,${sign(BODY)}` };
+    expect(() => verify({ headers: h })).toThrow(WebhookVerificationError);
+  });
+
+  it('reads the right svix-id when a record repeats the header in another case', () => {
+    const h = { 'SVIX-ID': 'msg_evil', ...headers() };
+    expect(reason(() => verify({ headers: h }))).toBe('signature_mismatch');
+  });
+
+  it('accepts a Headers object with a bad and a good signature, and a null-prototype record', () => {
+    const h = new Headers();
+    h.append('svix-id', ID);
+    h.append('svix-timestamp', TS);
+    h.append('svix-signature', 'v1,AAAA');
+    h.append('svix-signature', `v1,${sign(BODY)}`);
+    expect(verify({ headers: h }).eventId).toBe(ID);
+    expect(verify({ headers: Object.assign(Object.create(null) as Record<string, string>, headers()) }).eventId).toBe(ID);
   });
 
   it('rejects a signature of the wrong length without throwing a crypto error', () => {
