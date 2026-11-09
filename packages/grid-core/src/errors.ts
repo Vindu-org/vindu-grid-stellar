@@ -405,10 +405,13 @@ export interface PayoutIncompleteInit<TBody = unknown> {
  *   stored in `awaiting_signature`. Store
  *   `awaiting_signature -> payout_submitted` (`signed_and_on_chain`) with
  *   `txHash`, then create the payout with `pending` through
- *   `retryPayoutExecute`. Never re-quote and never sign again.
- * - `stage: 'create'`: the partner call failed after the transaction was
- *   signed (and submitted, when we submit). Retry it with `pending`: the same
- *   body and the same idempotency key.
+ *   `retryPayoutExecute`. If the transfer is already in `payout_submitted`,
+ *   `onSubmitted` stored the move before it threw: the store is done, so go
+ *   straight to `retryPayoutExecute`. Never re-quote and never sign again.
+ * - `stage: 'create'`: the partner's create call failed. Without a
+ *   signature nothing was signed; with one, the transaction was signed, and
+ *   also submitted when we submit (`txHash` is set). Retry it with
+ *   `pending`: the same body and the same idempotency key.
  */
 export class PayoutIncompleteError<TBody = unknown> extends GridError {
   readonly stage: PayoutIncompleteStage;
