@@ -4,7 +4,15 @@ The Stellar layer for two-leg transfers: follow registered accounts on Horizon, 
 
 No environment reads, no keys, no signing. Your signer signs; the network passphrase and the Horizon URL are arguments. `TESTNET_*` and `MAINNET_*` constants hold the public values for convenience.
 
-> Status: early, not published. Every API here will change before the first release.
+## Status
+
+| Aspect | Status |
+|---|---|
+| Version | 0.1.0, git tag only: not on npm. Install from the tag `v0.1.0` as the [root README](../../README.md#install-from-a-git-tag) shows. |
+| Node | 22.12 or later: the Stellar SDK needs `require()` of ES modules. |
+| Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-stellar` only; files under `dist/` are internal. |
+| Stability | Early. Every API here may change before the first release. |
+| Planned | A shared fake Horizon for application tests, in the tranche 3 integration kit. |
 
 ## What is inside
 

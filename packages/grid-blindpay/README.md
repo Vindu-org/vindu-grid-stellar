@@ -2,7 +2,15 @@
 
 Typed [BlindPay](https://blindpay.com) client for two-leg transfers settled on Stellar, and its `@vindu/grid-core` `PartnerAdapter`. PIX in, USDC on Stellar in between, bank payout out.
 
-> Status: early, not published. Every API here will change before the first release.
+## Status
+
+| Aspect | Status |
+|---|---|
+| Version | 0.1.0, git tag only: not on npm. Install from the tag `v0.1.0` as the [root README](../../README.md#install-from-a-git-tag) shows. |
+| Node | 22 or later. |
+| Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-blindpay` only; files under `dist/` are internal. |
+| Stability | Early. Every API here may change before the first release. |
+| Planned | BlindPay's answers to the points under [Unconfirmed](#unconfirmed). Passing the shared adapter conformance suite once it exists (tranche 3). |
 
 ## What it covers
 

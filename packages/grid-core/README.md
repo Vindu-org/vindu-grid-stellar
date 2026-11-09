@@ -4,7 +4,15 @@ Types, transfer states, routing rules and the partner adapter interface for two-
 
 Pure TypeScript. No network calls, no environment reads, no partner code. Partner clients such as `@vindu/grid-blindpay` implement the interfaces defined here.
 
-> Status: early, not published. Every API here will change before the first release.
+## Status
+
+| Aspect | Status |
+|---|---|
+| Version | 0.1.0, git tag only: not on npm. Install from the tag `v0.1.0` as the [root README](../../README.md#install-from-a-git-tag) shows. |
+| Node | 22 or later. |
+| Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-core` only; files under `dist/` are internal. |
+| Stability | Early. Every API here may change before the first release. |
+| Planned | The adapter conformance suite, in the tranche 3 integration kit. Corridor names such as `awaiting_pix` and `pixCode` stay while every partner uses PIX; renaming them later is a breaking change. |
 
 ## What is inside
 
