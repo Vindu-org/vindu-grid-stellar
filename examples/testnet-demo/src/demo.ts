@@ -4,7 +4,8 @@
  * Everything outside the application is simulated (see `world.ts`), but the
  * code paths are the real ones from `@vindu/grid-core` and
  * `@vindu/grid-stellar`: routing, the transition table, price tolerance,
- * signing checks, the read layer, matching and safe submission.
+ * the signed payout flow (`runSignedPayout` with `createStellarSubmitter`),
+ * the read layer and matching.
  */
 import { type AccountRef, type RouteDecision, type TransferState, money, selectRoute } from '@vindu/grid-core';
 import { checkReceiveReadiness } from '@vindu/grid-stellar';
@@ -24,6 +25,11 @@ export interface DemoOptions {
   readonly now?: () => number;
   /** Make Horizon time out once on the payout submission. Default true. */
   readonly simulateHorizonTimeout?: boolean;
+  /**
+   * Make Horizon refuse the payout submission. The transfer then stops in
+   * `needs_attention` and the partner payout is never created. Default false.
+   */
+  readonly simulateSubmitRejection?: boolean;
 }
 
 export interface DemoResult {
@@ -112,7 +118,10 @@ export async function runDemo(options: DemoOptions = {}): Promise<DemoResult> {
   const payoutTxHash =
     funded === undefined
       ? undefined
-      : await runPayoutLeg(ctx, funded, estimate, { simulateHorizonTimeout: options.simulateHorizonTimeout ?? true });
+      : await runPayoutLeg(ctx, funded, estimate, {
+          simulateHorizonTimeout: options.simulateHorizonTimeout ?? true,
+          simulateSubmitRejection: options.simulateSubmitRejection ?? false,
+        });
 
   log('');
   log(`Final state: ${transfer.state}`);
