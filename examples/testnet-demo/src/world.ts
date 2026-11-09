@@ -82,7 +82,7 @@ export function createWorld(now: () => number): DemoWorld {
     networkPassphrase,
     ledger,
     usdc,
-    signer: new TestKeySigner(client, networkPassphrase, now),
+    signer: new TestKeySigner(client, networkPassphrase, { now }),
     clientAddress: client.publicKey(),
     partner,
     offchain,
