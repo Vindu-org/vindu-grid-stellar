@@ -1,10 +1,9 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
-import { type AccountRef, type LegQuote, fiat, money } from '@vindu/grid-core';
+import { type AccountRef, InvalidConfigError, InvalidInputError, type LegQuote, fiat, money } from '@vindu/grid-core';
 
 import { DEV_SENTINEL_AMOUNTS } from '../src/amounts';
 import { type BlindPayAdapterOptions, createBlindPayAdapter, toLegStatus } from '../src/adapter';
-import { InvalidConfigError, InvalidInputError } from '../src/errors';
 import { WebhookVerificationError } from '../src/webhooks';
 import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, WALLET_ID, config, mockFetch } from './helpers';
 

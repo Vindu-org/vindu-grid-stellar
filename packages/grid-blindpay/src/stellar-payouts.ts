@@ -10,10 +10,10 @@
  *
  * `runStellarPayout` in `stellar-payout-flow.ts` chains them safely.
  */
-import { isStellarAccountId } from '@vindu/grid-core';
+import { InvalidInputError, isStellarAccountId } from '@vindu/grid-core';
 
 import { BLINDPAY_PARTNER_ID } from './config';
-import { BlindPayHttpError, InvalidInputError } from './errors';
+import { BlindPayHttpError } from './errors';
 import { type BlindPayHttp, type Created, type IdempotencyOptions, create, get } from './http';
 import { assertId } from './ids';
 import type { AuthorizeStellarPayoutRequest, CreateStellarPayoutRequest, Payout } from './types';

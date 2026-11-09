@@ -1,7 +1,7 @@
-import { PartnerHttpError } from '@vindu/grid-core';
+import { InvalidConfigError, PartnerHttpError } from '@vindu/grid-core';
 
 import { resolveConfig } from '../src/config';
-import { type BlindPayHttpError, InvalidConfigError } from '../src/errors';
+import type { BlindPayHttpError } from '../src/errors';
 import { createBlindPayHttp, parseRetryAfter, readErrorBody } from '../src/http';
 import { API_KEY, INSTANCE_ID, captureOutput, caught, config, dumpError, mockFetch } from './helpers';
 

@@ -1,5 +1,5 @@
 /** Payin quotes (`qu_`): PIX in, stablecoin out to a Stellar wallet. Quotes last about 5 minutes. */
-import { InvalidInputError } from './errors';
+import { InvalidInputError } from '@vindu/grid-core';
 import { type BlindPayHttp, type Created, type IdempotencyOptions, create } from './http';
 import { assertId } from './ids';
 import type { CreatePayinQuoteRequest, PayinQuote } from './types';

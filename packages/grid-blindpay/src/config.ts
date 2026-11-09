@@ -3,9 +3,8 @@
  * library never reads environment variables. BlindPay has no separate sandbox
  * host; the instance behind the API key decides development or production.
  */
-import { type Logger, type OnPartnerCall, noopLogger } from '@vindu/grid-core';
+import { InvalidConfigError, type Logger, type OnPartnerCall, noopLogger } from '@vindu/grid-core';
 
-import { InvalidConfigError } from './errors';
 
 /** Partner id used in leg refs, errors and `onCall` reports. */
 export const BLINDPAY_PARTNER_ID = 'blindpay';

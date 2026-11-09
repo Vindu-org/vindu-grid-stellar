@@ -1,7 +1,6 @@
-import { fiat, money } from '@vindu/grid-core';
+import { InvalidInputError, fiat, money } from '@vindu/grid-core';
 
 import { DEV_SENTINEL_AMOUNTS, fromBlindPayAmount, toBlindPayAmount } from '../src/amounts';
-import { InvalidInputError } from '../src/errors';
 
 const usdc = fiat('USDC');
 const brl = fiat('BRL');

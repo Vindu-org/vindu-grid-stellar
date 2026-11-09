@@ -21,15 +21,16 @@
  */
 import {
   type AccountRef,
-  GridError,
+  InvalidInputError,
   type Logger,
+  PayoutIncompleteError,
+  QuoteExpiredError,
   type Signer,
   type SigningContext,
   assertSigningAllowed,
   noopLogger,
 } from '@vindu/grid-core';
 
-import { InvalidInputError } from './errors';
 import type { BlindPayClient } from './client';
 import type { CreateStellarPayoutRequest, Payout } from './types';
 
@@ -77,13 +78,6 @@ export interface StellarPayoutResult extends PendingPayoutCreate {
   readonly replayed: boolean;
 }
 
-/** The quote expired before the transaction was signed or submitted. Re-quote and re-authorize. */
-export class QuoteExpiredError extends GridError {
-  constructor(readonly quoteId: string, readonly expiresAt: string) {
-    super('quote_expired', `Quote ${quoteId} expired at ${expiresAt}: get a fresh quote and authorize again; do not reuse the old transaction`);
-  }
-}
-
 /**
  * The transaction may be on Stellar but BlindPay has not recorded the payout.
  * - `stage: 'submit'`: the submit outcome is unknown. Check the hash on Stellar
@@ -91,22 +85,25 @@ export class QuoteExpiredError extends GridError {
  * - `stage: 'create'`: retry `create` with `pending` (same body, same key) via
  *   {@link retryStellarPayoutCreate}. BlindPay keeps keys for 24 hours.
  */
-export class StellarPayoutIncompleteError extends GridError {
+export class StellarPayoutIncompleteError extends PayoutIncompleteError<CreateStellarPayoutRequest> {
+  declare readonly signedXdr: string;
+  /** Undefined only when the create body needs a hash that is not known yet. */
+  declare readonly pending: PendingPayoutCreate | undefined;
+
   constructor(
-    readonly stage: 'submit' | 'create',
-    readonly signedXdr: string,
-    readonly txHash: string | undefined,
-    /** Undefined only when the create body needs a hash that is not known yet. */
-    readonly pending: PendingPayoutCreate | undefined,
+    stage: 'submit' | 'create',
+    signedXdr: string,
+    txHash: string | undefined,
+    pending: PendingPayoutCreate | undefined,
     options: { cause?: unknown } = {},
   ) {
-    super(
-      'payout_not_recorded',
-      stage === 'submit'
-        ? 'Stellar submit outcome unknown: check the transaction on Stellar before anything else; do not sign again'
-        : 'Payout create failed after signing: retry create with the same body and Idempotency-Key',
-      options,
-    );
+    super({
+      stage,
+      signedXdr,
+      ...(txHash === undefined ? {} : { txHash }),
+      ...(pending === undefined ? {} : { pending }),
+      cause: options.cause,
+    });
   }
 }
 

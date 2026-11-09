@@ -4,7 +4,7 @@
  * `ba_` bank account. Ids are checked before they go into a URL path, and
  * reports use a templated path so metrics do not explode by id.
  */
-import { InvalidInputError } from './errors';
+import { InvalidInputError } from '@vindu/grid-core';
 
 export const ID_PREFIXES = {
   in: 'instance',

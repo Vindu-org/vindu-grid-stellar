@@ -13,6 +13,8 @@
  */
 import {
   type Asset,
+  InvalidConfigError,
+  InvalidInputError,
   type LegKind,
   type LegQuote,
   type LegRef,
@@ -25,7 +27,6 @@ import { fromBlindPayAmount, toBlindPayAmount } from './amounts';
 import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig } from './config';
-import { InvalidConfigError, InvalidInputError } from './errors';
 import type { SignedTransactionField } from './stellar-payout-flow';
 import type { StellarNetwork, StellarToken, Tracking } from './types';
 import { parseWebhookEvent, verifyWebhook } from './webhooks';

@@ -9,9 +9,8 @@
  *
  * Conversion is exact: an amount with sub-cent precision throws, it is never rounded.
  */
-import { type Asset, type Money, fromMinorUnits, isPositive, toMinorUnits } from '@vindu/grid-core';
+import { type Asset, InvalidInputError, type Money, fromMinorUnits, isPositive, toMinorUnits } from '@vindu/grid-core';
 
-import { InvalidInputError } from './errors';
 
 /** Decimals of every BlindPay amount, fiat and stablecoin. */
 export const BLINDPAY_DECIMALS = 2;

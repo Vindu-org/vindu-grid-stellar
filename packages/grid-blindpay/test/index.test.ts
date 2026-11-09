@@ -16,12 +16,9 @@ describe('package index', () => {
     'BLINDPAY_PARTNER_ID',
     'DEV_SENTINEL_AMOUNTS',
     'UNCONFIRMED_GET_PAYOUT_PATH',
-    'QuoteExpiredError',
     'StellarPayoutIncompleteError',
     'WebhookVerificationError',
     'BlindPayHttpError',
-    'InvalidConfigError',
-    'InvalidInputError',
   ])('exports %s', (name) => {
     expect((api as Record<string, unknown>)[name]).toBeDefined();
   });

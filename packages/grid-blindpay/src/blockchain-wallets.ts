@@ -3,9 +3,8 @@
  * network with a trustline for the token. Managed wallets do not support
  * Stellar, so every wallet here is an external account (`is_account_abstraction: true`).
  */
-import { isStellarAccountId } from '@vindu/grid-core';
+import { InvalidInputError, isStellarAccountId } from '@vindu/grid-core';
 
-import { InvalidInputError } from './errors';
 import { type BlindPayHttp, type Created, type IdempotencyOptions, create, get, list } from './http';
 import { assertId } from './ids';
 import type { BlockchainWallet, ListParams, Page, StellarNetwork } from './types';

@@ -1,5 +1,5 @@
 import { createBlindPayClient } from '../src/client';
-import { InvalidInputError } from '../src/errors';
+import { InvalidInputError } from '@vindu/grid-core';
 import { UNCONFIRMED_GET_PAYOUT_PATH } from '../src/stellar-payouts';
 import { BANK_ACCOUNT_ID, CUSTOMER_ID, type MockReply, STELLAR_ADDRESS, WALLET_ID, config, mockFetch } from './helpers';
 

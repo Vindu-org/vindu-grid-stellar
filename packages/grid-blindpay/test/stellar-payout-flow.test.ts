@@ -1,10 +1,17 @@
-import { type Signer, type SigningContext, SigningNotAllowedError, fiat, money } from '@vindu/grid-core';
+import {
+  InvalidInputError,
+  PayoutIncompleteError,
+  QuoteExpiredError,
+  type Signer,
+  type SigningContext,
+  SigningNotAllowedError,
+  fiat,
+  money,
+} from '@vindu/grid-core';
 
 import { createBlindPayClient } from '../src/client';
-import { InvalidInputError } from '../src/errors';
 import {
   type PayoutSubmission,
-  QuoteExpiredError,
   type RunStellarPayoutInput,
   type SignedTransactionField,
   StellarPayoutIncompleteError,
@@ -137,6 +144,7 @@ describe('stellar payout flow', () => {
     submit.mockRejectedValueOnce(new Error('horizon timeout'));
     const e = (await caught(runStellarPayout(base))) as StellarPayoutIncompleteError;
     expect(e).toBeInstanceOf(StellarPayoutIncompleteError);
+    expect(e).toBeInstanceOf(PayoutIncompleteError);
     expect(e).toMatchObject({ stage: 'submit', code: 'payout_not_recorded', signedXdr: SIGNED, txHash: undefined });
     expect(e.message).toMatch(/check the transaction on Stellar/);
     expect(e.pending?.body.signed_transaction).toBe(SIGNED);
