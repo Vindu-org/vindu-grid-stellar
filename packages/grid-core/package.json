@@ -18,6 +18,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "node ../../scripts/prepack-package.cjs && yarn build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "jest"
   },
