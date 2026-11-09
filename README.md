@@ -68,6 +68,7 @@ For a payout that needs a signature, the partner builds the unsigned transaction
 
 These rules decide when money may move. The packages enforce them where they can, and your application must follow them where it decides.
 
+- **Authorize before the transfer waits for a signature.** The payout runs from `payout_quoted`, and the transfer moves to `awaiting_signature` only once the partner's authorization exists. A failed authorization goes `payout_quoted -> needs_attention`, and a quote that runs out first goes back to `funded`; nothing was signed either way.
 - **Sign once.** For a payout quote the signer is called at most once. If the quote gets too close to its expiry before the signed transaction leaves, the transaction is dropped unsubmitted: get a fresh quote and a new transaction. An old transaction is never signed again.
 - **Sign a replacement only when the first can never land.** That is only after `failed` (the transaction is in a ledger as failed: nothing moved) or `expired_not_landed`. `expired_not_landed` is judged by Horizon, never by your clock: the latest ledger Horizon has ingested closed after the transaction's time limit, and a lookup after that still finds nothing. After `unknown` or `rejected` the first transaction could still land, so check again later and do not sign again.
 - **The partner is told only after a confirmed success.** When you submit, the partner payout is created only after the submit reports `success`.
