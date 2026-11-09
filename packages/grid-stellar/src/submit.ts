@@ -10,6 +10,16 @@
  * network fails, the hashes are checked on Horizon before anything else. Resubmitting the same signed envelope is safe (Stellar
  * applies a transaction once); asking for a new signature is never done here.
  *
+ * Whether a transaction expired is decided by the network, never by the
+ * local clock. `expired_not_landed` needs all three: the transaction has a
+ * maxTime; Horizon's latest ingested ledger closed after that maxTime (no
+ * later ledger can include it, and Horizon ingests ledgers in order, so
+ * every ledger that could is already ingested); and a successful lookup
+ * made after reading that ledger finds nothing by any hash. A failed ledger
+ * read or lookup never counts. Point the gateway at one Horizon instance:
+ * behind a load balancer the ledger read and the lookup may hit instances
+ * that have ingested different ledgers.
+ *
  * Horizon's answer is checked too: an accepted submission whose hash is not
  * the locally computed envelope hash is `rejected` with reason
  * `hash_mismatch`, never `success`.
@@ -21,7 +31,7 @@
  * transaction could still land.
  */
 import { InvalidConfigError, InvalidInputError, type Logger, noopLogger } from '@vindu/grid-core';
-import type { HorizonGateway, HorizonSubmitResponse, HorizonTransactionFound } from './horizon';
+import type { HorizonGateway, HorizonLedger, HorizonSubmitResponse, HorizonTransactionFound } from './horizon';
 import { type SubmitError, mapResultCodes } from './result-codes';
 import { FeeBumpTransaction, TransactionBuilder } from './sdk';
 
@@ -74,8 +84,19 @@ export type SubmitResult =
     }
   /** Not found, and it could still land (maxTime not passed, or no maxTime). Check again later; do not re-sign. */
   | { readonly status: 'unknown'; readonly hash: string; readonly innerHash?: string; readonly lastError?: SubmitError }
-  /** maxTime has passed and it is not on the ledger. It can never land: a replacement may be signed. */
-  | { readonly status: 'expired_not_landed'; readonly hash: string; readonly innerHash?: string; readonly maxTime: number };
+  /**
+   * A ledger Horizon had ingested closed after maxTime, and a later lookup
+   * found nothing by any hash. It can never land: a replacement may be signed.
+   */
+  | {
+      readonly status: 'expired_not_landed';
+      readonly hash: string;
+      readonly innerHash?: string;
+      /** The transaction's maxTime, unix seconds. */
+      readonly maxTime: number;
+      /** The ingested ledger that closed after maxTime: the evidence. */
+      readonly checkedLedger: { readonly sequence: number; readonly closedAt: string };
+    };
 
 export type SubmitStatus = SubmitResult['status'];
 
@@ -94,15 +115,13 @@ export interface SubmitOptions {
   readonly pollIntervalMs?: number;
   /** Longest total wait after a timeout before returning `unknown`. Default 2 min. */
   readonly maxWaitMs?: number;
-  /**
-   * Margin after maxTime before `expired_not_landed`, covering clock skew and
-   * Horizon ingestion lag. Default 30 s.
-   */
-  readonly expiryGraceMs?: number;
   /** Resubmit the same signed envelope while waiting. Default true. */
   readonly resubmit?: boolean;
   readonly logger?: Logger;
-  /** Clock in ms since epoch. Default `Date.now`. */
+  /**
+   * Clock in ms since epoch, for the `maxWaitMs` budget only. Never decides
+   * whether the transaction expired. Default `Date.now`.
+   */
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
 }
@@ -162,7 +181,6 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   const timeoutMs = duration(options.timeoutMs ?? 30_000, 'timeoutMs', 1);
   const pollIntervalMs = duration(options.pollIntervalMs ?? 5_000, 'pollIntervalMs', 1);
   const maxWaitMs = duration(options.maxWaitMs ?? 120_000, 'maxWaitMs', 0);
-  const expiryGraceMs = duration(options.expiryGraceMs ?? 30_000, 'expiryGraceMs', 0);
   const resubmit = options.resubmit ?? true;
   const logger = options.logger ?? noopLogger;
   const now = options.now ?? Date.now;
@@ -175,7 +193,6 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   // Every hash the transaction can be found by, the envelope's first.
   const lookups: ReadonlyArray<readonly [string, FoundBy]> =
     innerHash === undefined ? [[hash, 'hash']] : [[hash, 'hash'], [innerHash, 'inner_hash']];
-  const expired = (): boolean => maxTime !== undefined && now() > maxTime * 1000 + expiryGraceMs;
   const done = (result: SubmitResult): SubmitResult => {
     logger.info('stellar submission settled', { hash, status: result.status });
     return result;
@@ -246,6 +263,40 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     return { status: accepted.successful ? 'success' : 'failed', hash, ...inner, ...ledger };
   };
 
+  /** Horizon's latest ingested ledger, or `null` when it cannot be read or makes no sense. */
+  async function latestLedger(): Promise<HorizonLedger | null> {
+    try {
+      const ledger = await gateway.latestLedger();
+      const closedAt = ledger.closedAt instanceof Date ? ledger.closedAt.getTime() : Number.NaN;
+      if (Number.isInteger(ledger.sequence) && Number.isFinite(closedAt)) return ledger;
+      logger.warn('latest ledger unusable', { hash });
+    } catch (e) {
+      logger.warn('latest ledger read failed', { hash, error: e instanceof Error ? e.name : typeof e });
+    }
+    return null;
+  }
+
+  /**
+   * Reads the ledger first (only when there is a maxTime), then looks the
+   * transaction up, so the lookup is made after that ledger was ingested.
+   * Settles on a landing, or on expiry when the ledger closed after maxTime
+   * and the lookup succeeded and found nothing. `null`: not settled.
+   */
+  async function probe(error?: SubmitError): Promise<SubmitResult | null> {
+    const ledger = maxTime === undefined ? null : await latestLedger();
+    const look = await lookup();
+    if (look?.found) return fromLookup(look.found, look.by, error);
+    if (look === null || ledger === null || maxTime === undefined) return null;
+    if (Math.floor(ledger.closedAt.getTime() / 1000) <= maxTime) return null;
+    return {
+      status: 'expired_not_landed',
+      hash,
+      ...inner,
+      maxTime,
+      checkedLedger: { sequence: ledger.sequence, closedAt: ledger.closedAt.toISOString() },
+    };
+  }
+
   const first = await attempt();
   if (first.kind === 'accepted') return done(fromAccepted(first));
   if (first.kind === 'rejected') {
@@ -253,11 +304,8 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     // A rejection of an envelope that already landed (e.g. tx_bad_seq on a
     // retry, or another fee bump around the same transaction) must not hide
     // the landing: check the hashes first.
-    const look = await lookup();
-    if (look?.found) return done(fromLookup(look.found, look.by, error));
-    if (look !== null && maxTime !== undefined && expired()) {
-      return done({ status: 'expired_not_landed', hash, ...inner, maxTime });
-    }
+    const settled = await probe(error);
+    if (settled !== null) return done(settled);
     logger.warn('stellar submission rejected', { hash, code: error.code });
     return done({ status: 'rejected', reason: 'refused', hash, ...inner, error });
   }
@@ -268,18 +316,16 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   const deadline = now() + maxWaitMs;
   let lastError: SubmitError | undefined;
   for (;;) {
-    const look = await lookup();
-    if (look?.found) return done(fromLookup(look.found, look.by, lastError));
-    if (look !== null && maxTime !== undefined && expired()) {
-      return done({ status: 'expired_not_landed', hash, ...inner, maxTime });
-    }
+    const settled = await probe(lastError);
+    if (settled !== null) return done(settled);
     const t = now();
     // A clock that stops returning numbers ends the wait instead of looping forever.
     if (!Number.isFinite(t) || t >= deadline) {
       return done({ status: 'unknown', hash, ...inner, ...(lastError === undefined ? {} : { lastError }) });
     }
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - t)));
-    if (resubmit && !expired()) {
+    // Resubmitting after maxTime is harmless: the network refuses it as too late.
+    if (resubmit) {
       const again = await attempt();
       if (again.kind === 'accepted') return done(fromAccepted(again));
       if (again.kind === 'rejected') lastError = mapResultCodes(again.transactionCode, again.operationCodes);
