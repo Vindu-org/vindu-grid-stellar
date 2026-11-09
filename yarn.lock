@@ -1071,7 +1071,20 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@vindu/grid-core@workspace:packages/grid-core":
+"@vindu/grid-blindpay@workspace:packages/grid-blindpay":
+  version: 0.0.0-use.local
+  resolution: "@vindu/grid-blindpay@workspace:packages/grid-blindpay"
+  dependencies:
+    "@types/jest": "npm:^29"
+    "@types/node": "npm:^22"
+    "@vindu/grid-core": "workspace:^"
+    jest: "npm:^29"
+    ts-jest: "npm:^29"
+    typescript: "npm:^5.5"
+  languageName: unknown
+  linkType: soft
+
+"@vindu/grid-core@workspace:^, @vindu/grid-core@workspace:packages/grid-core":
   version: 0.0.0-use.local
   resolution: "@vindu/grid-core@workspace:packages/grid-core"
   dependencies:
