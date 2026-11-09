@@ -15,6 +15,10 @@
  * Stellar route needs 1% more source for the same target. The measure is the
  * same whether the partners quoted a fixed source or a fixed target.
  *
+ * Only eligible candidates are checked for well-formed prices. A candidate
+ * already excluded (e.g. not approved) is reported in `excluded` whatever its
+ * price, so one bad quote from an unusable partner never blocks routing.
+ *
  * The chosen route is stored on the transfer and never changes after the
  * funding leg is created: the client's money is already committed to that
  * partner, so there is no silent failover. See {@link assertRouteImmutable}.
@@ -111,7 +115,7 @@ export function selectRoute(
   if (options.stellarPriceLimitBps !== undefined) {
     assertBps(options.stellarPriceLimitBps, 'stellarPriceLimitBps');
   }
-  assertWellFormed(candidates);
+  assertNoDuplicates(candidates);
 
   const excluded: CandidateExclusion[] = [];
   const eligible: RouteCandidate[] = [];
@@ -120,6 +124,7 @@ export function selectRoute(
     if (reason === undefined) eligible.push(c);
     else excluded.push({ partner: c.partner, chain: c.chain, reason });
   }
+  assertPricesWellFormed(eligible);
 
   const ranked = [...eligible].sort(byPriceThenId);
   const best = ranked[0];
@@ -150,9 +155,7 @@ export function selectRoute(
 }
 
 function exclusionReason(c: RouteCandidate, options: RouteOptions): ExclusionReason | undefined {
-  const caps = Object.prototype.hasOwnProperty.call(options.registry, c.partner)
-    ? options.registry[c.partner]
-    : undefined;
+  const caps = Object.hasOwn(options.registry, c.partner) ? options.registry[c.partner] : undefined;
   if (caps === undefined) return 'unknown_partner';
   if (!c.customerApproved) return 'customer_not_approved';
   if (!supportsCorridor(caps, c.chain, options.corridor)) return 'corridor_unsupported';
@@ -160,13 +163,19 @@ function exclusionReason(c: RouteCandidate, options: RouteOptions): ExclusionRea
   return undefined;
 }
 
-function assertWellFormed(candidates: readonly RouteCandidate[]): void {
+function assertNoDuplicates(candidates: readonly RouteCandidate[]): void {
   const seen = new Set<string>();
-  const first = candidates[0];
   for (const c of candidates) {
     const key = `${c.partner}\u0000${c.chain}`;
     if (seen.has(key)) throw new TypeError(`Duplicate route candidate: ${c.partner} on ${c.chain}`);
     seen.add(key);
+  }
+}
+
+/** Positive prices in one source asset and one target asset, for the candidates that can win. */
+function assertPricesWellFormed(eligible: readonly RouteCandidate[]): void {
+  const first = eligible[0];
+  for (const c of eligible) {
     if (toUnits(c.price.source) <= 0n || toUnits(c.price.target) <= 0n) {
       throw new InvalidMoneyError(`Route price for ${c.partner} must be positive`);
     }

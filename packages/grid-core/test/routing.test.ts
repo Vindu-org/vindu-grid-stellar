@@ -276,6 +276,44 @@ describe('routing', () => {
     expect(d.stellarPriceGapBps).toBeUndefined();
   });
 
+  it('reports an excluded candidate with a zero or foreign price instead of aborting', () => {
+    const zero = candidate('other-a', 'otherchain', '0', {
+      customerApproved: false,
+      price: { source: money('0', BRL), target: money('0', USD) },
+    });
+    const eur = candidate('other-b', 'otherchain', '1', {
+      accountReady: false,
+      price: { source: money('1', BRL), target: money('1', fiat('EUR')) },
+    });
+    const d = selectRoute([candidate('stellar-a', 'stellar', '9600'), zero, eur], opts());
+    expect(d.route.partner).toBe('stellar-a');
+    expect(d.excluded).toEqual([
+      { partner: 'other-a', chain: 'otherchain', reason: 'customer_not_approved' },
+      { partner: 'other-b', chain: 'otherchain', reason: 'account_not_ready' },
+    ]);
+    expect(d.stellarPriceGapBps).toBeUndefined();
+  });
+
+  it('an unknown partner with a malformed price is excluded, not validated', () => {
+    const broken = { ...candidate('ghost', 'stellar', '1'), price: { source: money('0', BRL), target: money('-1', USD) } };
+    const d = selectRoute([broken, candidate('other-a', 'otherchain', '9550')], opts());
+    expect(d.route.partner).toBe('other-a');
+    expect(d.excluded).toEqual([{ partner: 'ghost', chain: 'stellar', reason: 'unknown_partner' }]);
+  });
+
+  it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty'])(
+    'a corridor or partner named %s finds nothing instead of a built-in',
+    (name) => {
+      const odd: Corridor = { ...corridor, sourceCurrency: name, targetCurrency: name };
+      expect(() => selectRoute([candidate('stellar-a', 'stellar', '1')], opts({ corridor: odd }))).toThrow(
+        RouteNotFoundError,
+      );
+      const d = selectRoute([candidate(name, 'stellar', '1'), candidate(name, name, '1'), candidate('other-a', 'otherchain', '9550')], opts());
+      expect(d.route.partner).toBe('other-a');
+      expect(d.excluded.map((e) => e.reason)).toEqual(['unknown_partner', 'unknown_partner']);
+    },
+  );
+
   it('rejects malformed input', () => {
     const eur = candidate('other-a', 'otherchain', '1', {
       price: { source: money('1', BRL), target: money('1', fiat('EUR')) },
