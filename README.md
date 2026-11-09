@@ -122,6 +122,7 @@ The packages are not on npm yet. Install them from the repository's git tag (`v0
 
 - Yarn clones the repository at the tag and packs each workspace; packing builds it, so you get the compiled `dist/`, the README and the license.
 - Keep the `resolutions` entry. `grid-blindpay` and `grid-stellar` depend on `@vindu/grid-core@^0.1.0`, and without it Yarn would look that name up on the npm registry, where it does not exist (or could belong to someone else). The resolution also keeps a single copy of core, so its error classes work with `instanceof` across packages.
+- Do not install `@vindu/...` by a semver range from npm. The maintainers must claim the `@vindu` npm scope before any registry install is supported; until then, a package under that name on npm is not from this project.
 - Use the same tag on every line. Leave out the packages you do not need, but keep `grid-core` and the resolution.
 - npm and pnpm cannot install one workspace from a git URL. Pack the packages instead (`yarn workspace @vindu/grid-core pack`, and so on) and install the tarballs, pinning `@vindu/grid-core` to its tarball with `overrides`.
 
