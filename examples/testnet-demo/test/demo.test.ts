@@ -60,6 +60,29 @@ describe('testnet demo', () => {
     expect(output).toContain('do not sign again');
     expect(output).not.toContain('accepted payout');
   });
+
+  it('stops in needs_attention from payout_quoted, with nothing signed, when the partner refuses to authorize', async () => {
+    const lines: string[] = [];
+    const result = await runDemo({
+      log: (line) => lines.push(line),
+      simulateHorizonTimeout: false,
+      simulateAuthorizationFailure: true,
+    });
+
+    expect(result.finalState).toBe('needs_attention');
+    expect(result.history).toEqual([...FULL_PATH.slice(0, FULL_PATH.indexOf('payout_quoted') + 1), 'needs_attention']);
+    expect(result.history).not.toContain('awaiting_signature');
+    expect(result.payoutTxHash).toBeUndefined();
+    const output = lines.join('\n');
+    expect(output).toContain(
+      "payout_quoted -> needs_attention (authorization failed): The partner's payout authorization failed " +
+        '(authorization_refused): nothing was signed',
+    );
+    expect(output).not.toContain('submission rejected or outcome unknown');
+    expect(output).not.toContain('then signed once');
+    expect(output).not.toContain('submit:');
+    expect(output).not.toContain('accepted payout');
+  });
 });
 
 describe('BlindPay dry run', () => {
@@ -77,6 +100,7 @@ describe('BlindPay dry run', () => {
     expect(result.payoutId).toBe('po_demo1');
     expect(result.txHash).toMatch(/^[0-9a-f]{64}$/);
     const output = lines.join('\n');
+    expect(output).toContain('payout_quoted -> awaiting_signature (signed payout flow): BlindPay authorized, stored before signing');
     expect(output).toContain('payout po_demo1 created after a confirmed submit');
     expect(output).not.toContain('dry-run-placeholder');
   });
