@@ -1,0 +1,171 @@
+import { PartnerHttpError } from '@vindu/grid-core';
+
+import { resolveConfig } from '../src/config';
+import { type BlindPayHttpError, InvalidConfigError } from '../src/errors';
+import { createBlindPayHttp, parseRetryAfter, readErrorBody } from '../src/http';
+import { API_KEY, INSTANCE_ID, captureOutput, caught, config, dumpError, mockFetch } from './helpers';
+
+describe('client http', () => {
+  it('sends Bearer auth and JSON to the instance path', async () => {
+    const { fetch, calls } = mockFetch([{ body: { id: 're_1' } }]);
+    const http = createBlindPayHttp(config(fetch));
+    const res = await http.request<{ id: string }>({ method: 'GET', path: '/customers/re_1', query: { limit: 5, x: undefined } });
+    expect(res.data).toEqual({ id: 're_1' });
+    expect(calls[0]?.url).toBe(`https://api.blindpay.com/v1/instances/${INSTANCE_ID}/customers/re_1?limit=5`);
+    expect(calls[0]?.headers['Authorization']).toBe(`Bearer ${API_KEY}`);
+    expect(calls[0]?.headers['Idempotency-Key']).toBeUndefined();
+  });
+
+  it('sends the caller Idempotency-Key on POST and reports replays', async () => {
+    const { fetch, calls } = mockFetch([{ body: { id: 'pi_1' }, headers: { 'Idempotency-Replayed': 'true' } }]);
+    const http = createBlindPayHttp(config(fetch));
+    const res = await http.request({ method: 'POST', path: '/payins/evm', body: { a: 1 }, idempotencyKey: 'key-1' });
+    expect(calls[0]?.headers['Idempotency-Key']).toBe('key-1');
+    expect(calls[0]?.headers['Content-Type']).toBe('application/json');
+    expect(calls[0]?.body).toEqual({ a: 1 });
+    expect(res).toMatchObject({ idempotencyKey: 'key-1', replayed: true });
+  });
+
+  it('generates and returns an Idempotency-Key on every POST and DELETE without one', async () => {
+    const { fetch, calls } = mockFetch([{ body: {} }, { body: {} }, { status: 500 }]);
+    const http = createBlindPayHttp(config(fetch));
+    const a = await http.request({ method: 'POST', path: '/quotes', body: {} });
+    const b = await http.request({ method: 'DELETE', path: '/partner-fees/pf_1' });
+    const err = await caught(http.request({ method: 'POST', path: '/quotes', body: {} }));
+    expect(a.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(calls[0]?.headers['Idempotency-Key']).toBe(a.idempotencyKey);
+    expect(calls[1]?.headers['Idempotency-Key']).toBe(b.idempotencyKey);
+    expect(a.idempotencyKey).not.toBe(b.idempotencyKey);
+    // On failure the generated key comes back on the error, so a retry can reuse it.
+    expect((err as BlindPayHttpError).idempotencyKey).toBe(calls[2]?.headers['Idempotency-Key']);
+  });
+
+  it('reports each call with a templated path and ids, never a body', async () => {
+    const out = captureOutput();
+    const { fetch } = mockFetch([{ body: { secret: 'resp' } }]);
+    let t = 1000;
+    const http = createBlindPayHttp(config(fetch, { onCall: out.onCall, now: () => (t += 5) }));
+    await http.request({ method: 'POST', path: '/customers/re_9/blockchain-wallets', body: { address: 'G' } });
+    expect(out.calls).toEqual([
+      {
+        partner: 'blindpay',
+        method: 'POST',
+        path: '/v1/instances/{in_id}/customers/{re_id}/blockchain-wallets',
+        status: 200,
+        durationMs: 5,
+        ids: { instance: INSTANCE_ID, customer: 're_9' },
+      },
+    ]);
+  });
+
+  it.each([
+    [409, { code: 'idempotency_key_in_flight' }, 'idempotency_key_in_flight', true],
+    [409, { code: 'self_custody_already_set' }, 'self_custody_already_set', false],
+    [422, { error: 'idempotency_key_payload_mismatch' }, 'idempotency_key_payload_mismatch', false],
+    [400, { message: 'self_custody_required' }, 'self_custody_required', false],
+    [404, { error: { code: 'customer_not_found', message: 'Customer not found' } }, 'customer_not_found', false],
+    [429, { code: 'development_instance_rate_limit_exceeded' }, 'development_instance_rate_limit_exceeded', true],
+    [503, undefined, undefined, true],
+  ])('maps HTTP %p %j to a typed error', async (status, body, code, retryable) => {
+    const { fetch } = mockFetch([{ status, ...(body === undefined ? {} : { body }), headers: { 'Retry-After': '3' } }]);
+    const http = createBlindPayHttp(config(fetch));
+    const e = (await caught(http.request({ method: 'POST', path: '/payouts/stellar', body: {}, idempotencyKey: 'k' }))) as BlindPayHttpError;
+    expect(e).toBeInstanceOf(PartnerHttpError);
+    expect(e).toMatchObject({ partner: 'blindpay', status, partnerCode: code, retryable, retryAfterMs: 3000, idempotencyKey: 'k' });
+    expect(e.path).toBe('/v1/instances/{in_id}/payouts/stellar');
+  });
+
+  it('keeps a non-JSON error body as a capped snippet', async () => {
+    const { fetch } = mockFetch([{ status: 502, text: 'x'.repeat(1000) }]);
+    const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e.bodySnippet?.length).toBeLessThanOrEqual(259);
+    expect(e.partnerCode).toBeUndefined();
+  });
+
+  it('times out with a retryable error and no status', async () => {
+    const fetch = (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    const out = captureOutput();
+    const http = createBlindPayHttp(config(fetch, { timeoutMs: 20, onCall: out.onCall }));
+    const e = (await caught(http.request({ method: 'POST', path: '/payouts/stellar', body: {} }))) as BlindPayHttpError;
+    expect(e).toMatchObject({ status: null, partnerCode: 'timeout', retryable: true });
+    expect(e.idempotencyKey).toBeDefined();
+    expect(out.calls[0]).toMatchObject({ status: null, error: 'timeout' });
+  });
+
+  it('maps a network failure to a retryable error', async () => {
+    const fetch = async () => {
+      throw new TypeError('fetch failed');
+    };
+    const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e).toMatchObject({ status: null, partnerCode: 'network', retryable: true });
+  });
+
+  it('refuses a 2xx body that is not JSON, without marking it retryable', async () => {
+    const { fetch } = mockFetch([{ text: '<html>' }]);
+    const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'POST', path: '/x', body: {} }))) as BlindPayHttpError;
+    expect(e).toMatchObject({ status: 200, partnerCode: 'invalid_json', retryable: false });
+  });
+
+  it('never exposes the API key in errors, logs or onCall payloads', async () => {
+    const out = captureOutput();
+    const { fetch } = mockFetch([
+      { status: 401, body: { message: 'unauthorized' } },
+      { status: 500, text: 'boom' },
+      { status: 409, body: { code: 'idempotency_key_in_flight' } },
+      { body: { ok: true } },
+    ]);
+    const http = createBlindPayHttp(config(fetch, { logger: out.logger, onCall: out.onCall }));
+    const errors = [
+      await caught(http.request({ method: 'GET', path: '/customers/re_1' })),
+      await caught(http.request({ method: 'POST', path: '/quotes', body: { a: 1 } })),
+      await caught(http.request({ method: 'POST', path: '/quotes', body: { a: 1 } })),
+    ];
+    await http.request({ method: 'GET', path: '/x' });
+    const configErrors = [
+      (() => { try { resolveConfig({ apiKey: API_KEY, instanceId: API_KEY }); } catch (e) { return e; } })(),
+      (() => { try { resolveConfig({ apiKey: `${API_KEY} x`, instanceId: INSTANCE_ID }); } catch (e) { return e; } })(),
+    ];
+    const everything = [...errors, ...configErrors].map(dumpError).join('\n') + out.lines.join('\n') + JSON.stringify(http);
+    expect(out.lines.length).toBeGreaterThan(0);
+    expect(configErrors.every((e) => e instanceof InvalidConfigError)).toBe(true);
+    expect(everything).not.toContain(API_KEY);
+    expect(everything).not.toContain('SECRET_KEY');
+  });
+});
+
+describe('client config', () => {
+  it.each([
+    [{ instanceId: 'bad' }, /instanceId/],
+    [{ apiKey: '' }, /apiKey/],
+    [{ baseUrl: 'ftp://x' }, /https/],
+    [{ baseUrl: 'https://x?y=1' }, /query/],
+    [{ timeoutMs: 0 }, /timeoutMs/],
+  ])('rejects %j', (override, msg) => {
+    expect(() => resolveConfig({ apiKey: API_KEY, instanceId: INSTANCE_ID, ...override })).toThrow(msg);
+  });
+
+  it('uses a custom base URL without a trailing slash', async () => {
+    const { fetch, calls } = mockFetch([{ body: [] }]);
+    await createBlindPayHttp(config(fetch, { baseUrl: 'http://localhost:4010/' })).request({ method: 'GET', path: '/x' });
+    expect(calls[0]?.url).toBe(`http://localhost:4010/v1/instances/${INSTANCE_ID}/x`);
+  });
+});
+
+describe('client error body parsing', () => {
+  it('reads code, error and message fields best-effort', () => {
+    expect(readErrorBody('{"code":"a_b","message":"Nice text"}')).toEqual({ code: 'a_b', snippet: 'Nice text' });
+    expect(readErrorBody('{"message":"Not a code: spaces"}')).toEqual({ snippet: 'Not a code: spaces' });
+    expect(readErrorBody('[1]')).toEqual({ snippet: '[1]' });
+    expect(readErrorBody('')).toEqual({});
+  });
+
+  it('parses Retry-After seconds and dates', () => {
+    expect(parseRetryAfter('7', 0)).toBe(7000);
+    expect(parseRetryAfter('Thu, 01 Jan 1970 00:00:10 GMT', 4000)).toBe(6000);
+    expect(parseRetryAfter('soon', 0)).toBeUndefined();
+    expect(parseRetryAfter(null, 0)).toBeUndefined();
+  });
+});
