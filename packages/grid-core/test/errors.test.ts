@@ -49,9 +49,14 @@ describe('shared errors', () => {
   it('config, input and quote expiry errors carry core codes', () => {
     expect(new InvalidConfigError('bad')).toMatchObject({ code: 'invalid_config', name: 'InvalidConfigError' });
     expect(new InvalidInputError('bad')).toMatchObject({ code: 'invalid_input', name: 'InvalidInputError' });
-    const expired = new QuoteExpiredError('q_1', '2030-01-01T00:00:00Z');
-    expect(expired).toMatchObject({ code: 'quote_expired', quoteId: 'q_1', expiresAt: '2030-01-01T00:00:00Z' });
-    expect(expired.message).toMatch(/fresh quote/);
+    const expired = new QuoteExpiredError('q_1', '2030-01-01T00:00:00Z', 'signing');
+    expect(expired).toMatchObject({
+      code: 'quote_expired',
+      quoteId: 'q_1',
+      expiresAt: '2030-01-01T00:00:00Z',
+      stage: 'signing',
+    });
+    expect(expired.message).toMatch(/before signing: get a fresh quote/);
     for (const e of [new InvalidConfigError('x'), new InvalidInputError('x'), expired]) {
       expect(e).toBeInstanceOf(GridError);
     }

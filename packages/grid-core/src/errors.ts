@@ -19,6 +19,7 @@ export type CoreErrorCode =
   | 'invalid_input'
   | 'webhook_rejected'
   | 'quote_expired'
+  | 'payout_authorization_failed'
   | 'payout_not_recorded';
 
 /**
@@ -145,18 +146,29 @@ export class InvalidInputError extends GridError {
 }
 
 /**
+ * Where a payout run stopped on an expiring quote, which tells the caller
+ * the transfer's state and the edge to take:
+ * - `authorization`: before the partner's authorization was handed over, so
+ *   the transfer is still in `payout_quoted`: take `payout_quoted -> funded`.
+ * - `signing`: after the transfer moved to `awaiting_signature`, before the
+ *   signed transaction left: take `awaiting_signature -> funded`.
+ */
+export type QuoteExpiredStage = 'authorization' | 'signing';
+
+/**
  * The quote expired, or is too close to expiry, before the transaction was
  * signed or submitted. Get a fresh quote and a new transaction; never reuse
- * the old one.
+ * the old one. `stage` says how far the run got.
  */
 export class QuoteExpiredError extends GridError {
   constructor(
     readonly quoteId: string,
     readonly expiresAt: string,
+    readonly stage: QuoteExpiredStage,
   ) {
     super(
       'quote_expired',
-      `Quote ${quoteId} expired at ${expiresAt}: get a fresh quote and authorize again; do not reuse the old transaction`,
+      `Quote ${quoteId} expired at ${expiresAt}, before ${stage}: get a fresh quote and authorize again; do not reuse the old transaction`,
     );
   }
 }

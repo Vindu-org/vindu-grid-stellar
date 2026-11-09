@@ -30,6 +30,7 @@ import {
   PayoutIncompleteError,
   type PendingPayout,
   QuoteExpiredError,
+  type QuoteExpiredStage,
   SigningNotAllowedError,
 } from './errors';
 import { type Logger, noopLogger } from './observability';
@@ -125,9 +126,10 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
   const { adapter, signer, context } = input;
   const { quote, account, transferId } = context;
   const logger = input.logger ?? noopLogger;
-  const assertFresh = (): number => assertQuoteFresh(quote, input.now(), margin);
+  const assertFresh = (stage: QuoteExpiredStage = 'signing'): number =>
+    assertQuoteFresh(quote, input.now(), margin, stage);
 
-  assertFresh();
+  assertFresh('authorization');
   const auth = await adapter.preparePayout({ quote, account, transferId });
   const base: ExecutePayoutInput = { quote, account, transferId, idempotencyKey: input.idempotencyKey };
 
@@ -239,13 +241,13 @@ async function execute(
 }
 
 /** Returns `now` when the quote has more than `marginMs` left; throws otherwise. */
-function assertQuoteFresh(quote: LegQuote, now: number, marginMs: number): number {
+function assertQuoteFresh(quote: LegQuote, now: number, marginMs: number, stage: QuoteExpiredStage): number {
   if (typeof now !== 'number' || !Number.isFinite(now)) {
     throw new InvalidInputError('The clock gave an invalid time: refusing to continue the payout');
   }
   const expiresAt = Date.parse(quote.expiresAt);
   if (!Number.isFinite(expiresAt) || expiresAt - now <= marginMs) {
-    throw new QuoteExpiredError(quote.id, quote.expiresAt);
+    throw new QuoteExpiredError(quote.id, quote.expiresAt, stage);
   }
   return now;
 }

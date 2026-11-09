@@ -41,6 +41,7 @@ export {
   type PayoutIncompleteInit,
   type PendingPayout,
   QuoteExpiredError,
+  type QuoteExpiredStage,
   type RouteExclusion,
   RouteImmutableError,
   RouteNotFoundError,
