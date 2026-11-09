@@ -26,6 +26,7 @@ export {
 } from './accounts';
 export {
   createHorizonGateway,
+  DEFAULT_HORIZON_MAX_RESPONSE_BYTES,
   DEFAULT_HORIZON_REQUEST_TIMEOUT_MS,
   type HorizonAccount,
   type HorizonBalanceLine,

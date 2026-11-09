@@ -183,11 +183,15 @@ export interface HorizonFetchInit {
   readonly redirect: 'error';
 }
 
-/** What {@link createHorizonGateway} reads from a `fetch` response. The standard `Response` has this shape. */
+/**
+ * What {@link createHorizonGateway} reads from a `fetch` response. The
+ * standard `Response` has this shape. The body is read as a stream, so a
+ * body over `maxResponseBytes` is abandoned without being held in memory.
+ */
 export interface HorizonFetchResponse {
   readonly status: number;
   readonly headers: { get(name: string): string | null };
-  json(): Promise<unknown>;
+  readonly body: ReadableStream<Uint8Array> | null;
 }
 
 /** A `fetch` for Horizon GETs. The global `fetch` fits. */
@@ -214,6 +218,12 @@ export interface HorizonGatewayOptions {
    * in ms. A GET that takes longer is aborted and throws. Default 10 s.
    */
   readonly requestTimeoutMs?: number;
+  /**
+   * Largest response body one Horizon GET may return, in bytes. The body is
+   * read as it arrives and the request is abandoned once it grows past this:
+   * the read throws, never reports "not found". Default 1 MiB.
+   */
+  readonly maxResponseBytes?: number;
   /** `fetch` for the GETs. Default the global `fetch`. */
   readonly fetch?: HorizonFetch;
   /**
@@ -238,6 +248,9 @@ export interface HorizonServer {
 /** Default longest wait for one Horizon GET. */
 export const DEFAULT_HORIZON_REQUEST_TIMEOUT_MS = 10_000;
 
+/** Default largest response body of one Horizon GET: 1 MiB. */
+export const DEFAULT_HORIZON_MAX_RESPONSE_BYTES = 1_048_576;
+
 /** Longest delay `setTimeout` honours; anything longer fires at once. */
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -249,7 +262,8 @@ const LEDGER_HEADER = /^[1-9][0-9]{0,9}$/;
  * with a timeout, and submission through `Horizon.Server` (or `server`).
  *
  * @throws {InvalidConfigError} when the URL is not https (unless `allowHttp`
- * and http), `requestTimeoutMs` is out of range, or no `fetch` is available.
+ * and http) or carries a query, fragment or credentials, `requestTimeoutMs`
+ * or `maxResponseBytes` is out of range, or no `fetch` is available.
  */
 export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGateway {
   const base = baseUrl(options.horizonUrl, options.allowHttp ?? false);
@@ -262,27 +276,38 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
   ) {
     throw new InvalidConfigError(`requestTimeoutMs must be a finite number of milliseconds from 1 to ${MAX_TIMER_MS}`);
   }
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_HORIZON_MAX_RESPONSE_BYTES;
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1) {
+    throw new InvalidConfigError('maxResponseBytes must be a positive whole number of bytes');
+  }
   const fetchFn: HorizonFetch | undefined = options.fetch ?? (globalThis.fetch as HorizonFetch | undefined);
   if (typeof fetchFn !== 'function') throw new InvalidConfigError('No fetch available: pass the fetch option');
   let server = options.server;
   const submitServer = (): HorizonServer =>
     (server ??= new Horizon.Server(options.horizonUrl, { allowHttp: options.allowHttp ?? false }));
 
-  /** GETs `path`. 404 gives `null` body; any other non-2xx, a network error or a timeout throws. */
+  /**
+   * GETs `path`. 404 gives `null` body; any other non-2xx, a network error,
+   * a timeout or a body over `maxResponseBytes` throws.
+   */
   async function get(path: string, signal: AbortSignal | undefined): Promise<{ body: unknown; latestLedger?: number }> {
     const timeout = AbortSignal.timeout(requestTimeoutMs);
+    const combined = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
     const res = await (fetchFn as HorizonFetch)(`${base}${path}`, {
       method: 'GET',
       headers: { Accept: 'application/hal+json, application/json' },
-      signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      signal: combined,
       redirect: 'error',
     });
     const header = res.headers.get('latest-ledger')?.trim();
     const latestLedger = header !== undefined && LEDGER_HEADER.test(header) ? Number(header) : undefined;
     const withLedger = latestLedger === undefined ? {} : { latestLedger };
-    if (res.status === 404) return { body: null, ...withLedger };
-    if (res.status < 200 || res.status > 299) throw new HorizonRequestError(res.status);
-    return { body: await res.json(), ...withLedger };
+    if (res.status < 200 || res.status > 299) {
+      discard(res);
+      if (res.status === 404) return { body: null, ...withLedger };
+      throw new HorizonRequestError(res.status);
+    }
+    return { body: await readJson(res, maxResponseBytes, combined), ...withLedger };
   }
 
   return {
@@ -375,6 +400,62 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       } as HorizonAccount;
     },
   };
+}
+
+/** A Horizon answer whose body is larger than `maxResponseBytes`. Never a "not found". */
+class HorizonResponseTooLargeError extends Error {
+  constructor(readonly maxResponseBytes: number) {
+    super(`Horizon answered with a body over ${maxResponseBytes} bytes`);
+    this.name = 'HorizonResponseTooLargeError';
+  }
+}
+
+/** Lets go of a body that will not be read. */
+function discard(res: HorizonFetchResponse): void {
+  try {
+    res.body?.getReader().cancel().catch(() => undefined);
+  } catch {
+    // Already read or locked: nothing to release.
+  }
+}
+
+/**
+ * Reads the body as it arrives and parses it as JSON. Stops, and cancels the
+ * stream, once more than `maxBytes` arrived (or `Content-Length` says it
+ * will) and when `signal` aborts.
+ */
+async function readJson(res: HorizonFetchResponse, maxBytes: number, signal: AbortSignal): Promise<unknown> {
+  const declared = res.headers.get('content-length')?.trim();
+  if (declared !== undefined && /^[0-9]+$/.test(declared) && Number(declared) > maxBytes) {
+    discard(res);
+    throw new HorizonResponseTooLargeError(maxBytes);
+  }
+  if (res.body === null || typeof res.body?.getReader !== 'function') throw new Error('Horizon answered without a body');
+  const reader = res.body.getReader();
+  const stop = (): void => {
+    reader.cancel(signal.reason).catch(() => undefined);
+  };
+  signal.addEventListener('abort', stop, { once: true });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal.throwIfAborted();
+      if (done) break;
+      if (!ArrayBuffer.isView(value)) throw new Error('Horizon answered with a body that is not bytes');
+      size += value.byteLength;
+      if (size > maxBytes) {
+        stop();
+        throw new HorizonResponseTooLargeError(maxBytes);
+      }
+      chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    }
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
 }
 
 /** A Horizon GET answered with a status other than 2xx or 404. Carries the status only, never the body. */

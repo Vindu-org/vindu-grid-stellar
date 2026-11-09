@@ -41,7 +41,7 @@ function fakeFetch(routes: Record<string, Answer | (() => Promise<Answer>)>) {
     return {
       status: answer.status ?? 200,
       headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
-      json: async () => answer.body,
+      body: new Response(JSON.stringify(answer.body ?? null)).body,
     };
   };
   return { fetch, calls };
@@ -266,6 +266,118 @@ describe('horizon gateway', () => {
     const pending = gateway.latestLedger({ signal: controller.signal });
     controller.abort();
     await expect(pending).rejects.toThrow('aborted');
+  });
+
+  it('refuses a maxResponseBytes that is not a positive whole number', () => {
+    for (const maxResponseBytes of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        createHorizonGateway({
+          horizonUrl: TESTNET_HORIZON_URL,
+          networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+          fetch: fakeFetch({}).fetch,
+          maxResponseBytes,
+        }),
+      ).toThrow(InvalidConfigError);
+    }
+  });
+
+  /** A fetch whose 200 body streams `chunks` one by one, and reports what was pulled and cancelled. */
+  function streamingFetch(chunks: readonly Uint8Array[], headers: Record<string, string> = {}) {
+    const seen = { pulled: 0, cancelled: false };
+    const fetch: HorizonFetch = async () => {
+      let i = 0;
+      const source = {
+        pull(controller: ReadableStreamDefaultController<Uint8Array>) {
+          const chunk = chunks[i++];
+          seen.pulled += 1;
+          if (chunk === undefined) controller.close();
+          else controller.enqueue(chunk);
+        },
+        cancel() {
+          seen.cancelled = true;
+        },
+      };
+      // No read ahead: a chunk is pulled only when the gateway asks for it.
+      const body = new ReadableStream<Uint8Array>(source, { highWaterMark: 0 });
+      return { status: 200, headers: { get: (name: string) => headers[name.toLowerCase()] ?? null }, body };
+    };
+    return { fetch, seen };
+  }
+
+  it('reads a body in chunks and stops, as an error, once it grows past maxResponseBytes', async () => {
+    const chunk = new Uint8Array(400).fill(0x20);
+    const { fetch, seen } = streamingFetch(Array.from({ length: 1000 }, () => chunk));
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      maxResponseBytes: 1_000,
+    });
+    const error = await gateway.transaction(HASH).catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: 'HorizonResponseTooLargeError', maxResponseBytes: 1_000 });
+    // The third chunk passes the cap: the rest is never pulled.
+    expect(seen.pulled).toBe(3);
+    expect(seen.cancelled).toBe(true);
+  });
+
+  it('refuses a body whose Content-Length is over the cap without reading it', async () => {
+    const { fetch, seen } = streamingFetch([new TextEncoder().encode('{}')], { 'content-length': '2000000' });
+    const gateway = createHorizonGateway({ horizonUrl: TESTNET_HORIZON_URL, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, fetch });
+    await expect(gateway.latestLedger()).rejects.toMatchObject({ name: 'HorizonResponseTooLargeError' });
+    expect(seen.pulled).toBe(0);
+    expect(seen.cancelled).toBe(true);
+  });
+
+  it('a body over the cap on a lookup is an error, never "not found"', async () => {
+    const big = new TextEncoder().encode(JSON.stringify({ hash: HASH, successful: true, pad: 'x'.repeat(2_000) }));
+    const { fetch } = streamingFetch([big]);
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      maxResponseBytes: 1_024,
+    });
+    await expect(gateway.transaction(HASH)).rejects.toThrow('over 1024 bytes');
+  });
+
+  it('reads a body that arrives in several chunks, up to the cap', async () => {
+    const text = JSON.stringify({ history_latest_ledger: 9, history_latest_ledger_closed_at: '2026-11-09T12:00:05Z' });
+    const bytes = new TextEncoder().encode(text);
+    const { fetch } = streamingFetch([bytes.subarray(0, 10), bytes.subarray(10)]);
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      maxResponseBytes: bytes.byteLength,
+    });
+    expect(await gateway.latestLedger()).toMatchObject({ sequence: 9 });
+  });
+
+  it('stops reading a body that trickles in past requestTimeoutMs', async () => {
+    let timer: NodeJS.Timeout | undefined;
+    const fetch: HorizonFetch = async () => ({
+      status: 200,
+      headers: { get: () => null },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"hash":"'));
+          timer = setInterval(() => controller.enqueue(new TextEncoder().encode('a')), 5);
+        },
+        cancel() {
+          clearInterval(timer);
+        },
+      }),
+    });
+    const gateway = createHorizonGateway({
+      horizonUrl: TESTNET_HORIZON_URL,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      fetch,
+      requestTimeoutMs: 30,
+    });
+    const started = Date.now();
+    await expect(gateway.transaction(HASH)).rejects.toThrow();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    clearInterval(timer);
   });
 
   it('treats a missing account as not found', async () => {
