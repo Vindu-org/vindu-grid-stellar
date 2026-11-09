@@ -1042,9 +1042,23 @@ describe('signed payout', () => {
       ['an empty signed XDR', { body: { ...body, signedXdr: '' }, idempotencyKey: KEY }],
       ['a malformed hash', { body: { ...body, txHash: 'zz' }, idempotencyKey: KEY }],
       ['a hash without a signed XDR', { body: { ...body, signedXdr: undefined }, idempotencyKey: KEY }],
+      ['a quote without its partner', { body: { ...body, quote: { ...quote, partner: undefined } }, idempotencyKey: KEY }],
+      // Review probe: a pending create for another partner's quote was sent to this adapter.
+      ['a quote from another partner', { body: { ...body, quote: { ...quote, partner: 'evil' } }, idempotencyKey: KEY }],
     ])('refuses %s before calling the partner', async (_name, pending) => {
       const { input, executePayout } = setup();
       await expect(retryPayoutExecute(input.adapter, pending as Pending)).rejects.toThrow(InvalidInputError);
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, unknown]>([
+      ['no id', undefined],
+      ['an empty id', ''],
+      ['another id', 'other'],
+    ])('refuses an adapter with %s before calling it', async (_name, id) => {
+      const { executePayout } = setup();
+      const adapter = { id: id as string, executePayout };
+      await expect(retryPayoutExecute(adapter, { body, idempotencyKey: KEY })).rejects.toThrow(/pending payout is for p/);
       expect(executePayout).not.toHaveBeenCalled();
     });
 

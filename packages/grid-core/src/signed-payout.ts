@@ -410,17 +410,25 @@ async function submitAndRecord(
 /**
  * Sends `executePayout` again with exactly the pending input and key. Use it
  * after {@link PayoutIncompleteError} with `stage: 'create'`, or with
- * `stage: 'record'` once `payout_submitted` is stored. Never signs or
- * submits anything.
+ * `stage: 'record'` once `payout_submitted` is stored (or found already
+ * stored). Never signs or submits anything.
+ *
+ * The adapter must be the one the quote is from: `pending.body.quote.partner`
+ * must be `adapter.id`, or {@link InvalidInputError} is thrown before the
+ * partner is called.
  */
 export async function retryPayoutExecute(
-  adapter: Pick<PartnerAdapter, 'executePayout'>,
+  adapter: Pick<PartnerAdapter, 'id' | 'executePayout'>,
   pending: PendingPayout<ExecutePayoutInput>,
   logger: Logger = noopLogger,
 ): Promise<SignedPayoutResult> {
   checkPending(pending);
   if (typeof adapter?.executePayout !== 'function') throw new InvalidInputError('The adapter has no executePayout');
-  return execute(adapter, pending, logger);
+  const partner = pending.body.quote.partner;
+  if (typeof adapter.id !== 'string' || adapter.id === '' || partner !== adapter.id) {
+    throw new InvalidInputError(`The pending payout is for ${String(partner)}, not ${String(adapter.id)}`);
+  }
+  return execute(adapter, pending, safeLogger(logger));
 }
 
 /**
@@ -439,10 +447,11 @@ function checkPending(pending: unknown): asserts pending is PendingPayout<Execut
   const b = body as Partial<Record<keyof ExecutePayoutInput, unknown>>;
   if (b.idempotencyKey !== idempotencyKey) fail('the body and its idempotency key do not match');
   if (typeof b.transferId !== 'string' || b.transferId === '') fail('no transfer id');
-  const quote = b.quote as { id?: unknown; kind?: unknown } | null | undefined;
+  const quote = b.quote as { id?: unknown; kind?: unknown; partner?: unknown } | null | undefined;
   if (typeof quote !== 'object' || quote === null || typeof quote.id !== 'string' || quote.kind !== 'payout') {
     fail('no payout quote');
   }
+  if (typeof quote?.partner !== 'string' || quote.partner === '') fail('a quote without its partner');
   const account = b.account as { address?: unknown } | null | undefined;
   if (typeof account !== 'object' || account === null || typeof account.address !== 'string') fail('no account');
   if (b.signedXdr !== undefined && (typeof b.signedXdr !== 'string' || b.signedXdr === '')) fail('an empty signed XDR');
