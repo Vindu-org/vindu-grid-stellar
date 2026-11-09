@@ -25,9 +25,8 @@ import { floorToBlindPayAmount, fromBlindPayAmount, toBlindPayAmount } from './a
 import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
-import type { SignedTransactionField } from './stellar-payout-flow';
 import { type StablecoinIssuers, stablecoins } from './tokens';
-import type { BlindPayNetwork } from './types';
+import type { BlindPayNetwork, SignedTransactionField } from './types';
 import { legAmount, legChangedAt, legTxHash, toLegStatus } from './legs';
 import { assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
@@ -59,7 +58,11 @@ export interface BlindPayAdapterOptions {
    * the quote is refused rather than silently priced without the spread.
    */
   readonly partnerFeeIdFor?: (leg: LegKind, spreadBps: number | undefined) => string | undefined;
-  /** What goes in `signed_transaction`; UNCONFIRMED which one BlindPay expects. Default `signed_xdr`. */
+  /**
+   * What `executePayout` sends in `signed_transaction`; UNCONFIRMED which one
+   * BlindPay expects. Default `signed_xdr`. With `tx_hash`, the payout must be
+   * submitted by us first (`client_submits`).
+   */
   readonly signedTransactionField?: SignedTransactionField;
   /** Reuse an existing client instead of building one from the config. Its `partnerId` must match. */
   readonly client?: BlindPayClient;
@@ -67,6 +70,8 @@ export interface BlindPayAdapterOptions {
 
 export interface BlindPayAdapter extends PartnerAdapter {
   readonly client: BlindPayClient;
+  /** The `signedTransactionField` option in effect. */
+  readonly signedTransactionField: SignedTransactionField;
 }
 
 export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayAdapterOptions): BlindPayAdapter {
@@ -83,6 +88,9 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   const now = config.now ?? Date.now;
   const coverFees = options.coverFees ?? false;
   const field = options.signedTransactionField ?? 'signed_xdr';
+  if (field !== 'signed_xdr' && field !== 'tx_hash') {
+    throw new InvalidConfigError(`Unknown signedTransactionField: ${String(field)}`);
+  }
   const ref = (kind: LegKind, id: string): LegRef => ({ partner: partnerId, kind, id });
 
   const feeId = (leg: LegKind, spreadBps: number | undefined) => {
@@ -99,6 +107,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   return {
     id: partnerId,
     client,
+    signedTransactionField: field,
 
     async quoteFunding(input) {
       if (input.rail !== 'pix') throw new InvalidInputError(`Funding rail ${input.rail} is not supported; use pix`);

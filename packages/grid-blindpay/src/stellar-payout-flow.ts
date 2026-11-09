@@ -1,220 +1,116 @@
 /**
- * The signed Stellar payout, end to end:
+ * The signed Stellar payout through BlindPay, end to end:
  *
  *   authorize -> check the quote and transfer state -> sign once
- *     -> [client_submits: put the transaction on Stellar] -> create
+ *     -> [client_submits: submit, success only] -> create
  *
- * Two BlindPay answers are still open, so both are options rather than code paths
- * to rewrite later:
- * - `submission`: whether we submit to Stellar first (`client_submits`, the
- *   docs' example and the default) or hand the signed XDR to BlindPay (`partner_submits`).
- * - `signedTransactionField`: whether `signed_transaction` carries the signed
- *   XDR (`signed_xdr`, default) or the transaction hash (`tx_hash`). UNCONFIRMED.
+ * A thin wrapper over core's `runSignedPayout` with the BlindPay adapter, so
+ * the safety rules are core's:
+ * - The signer is called at most once. A quote with no more than
+ *   `expiryMarginMs` (default one minute) left throws `QuoteExpiredError`
+ *   before signing, and again before the signed transaction leaves.
+ * - With `client_submits`, only a submitter outcome `{ status: 'success' }`
+ *   with a valid hash creates the payout. `rejected`, `unknown`,
+ *   `expired_not_landed`, `failed`, a malformed outcome or a throw stop with
+ *   `PayoutIncompleteError` (`stage: 'submit'`), and BlindPay is never told.
+ * - A failed create throws `PayoutIncompleteError` (`stage: 'create'`) with
+ *   the exact input and key. Retry with {@link retryStellarPayoutCreate}.
+ * - A clock or margin that is not a finite number fails closed.
  *
- * Safety rules:
- * - The signer is called at most once per run. An expired quote throws
- *   {@link QuoteExpiredError}: get a fresh quote and authorize again. An old
- *   XDR is never signed or submitted.
- * - Once the transaction may be on Stellar, every failure throws
- *   {@link StellarPayoutIncompleteError} with the signed XDR, the hash and the
- *   exact create body and key, so the caller can retry `create` unchanged.
+ * Two BlindPay answers are still open, so both are options:
+ * - `submission`: we submit to Stellar first (`client_submits`, the docs'
+ *   example and the default) or BlindPay receives the signed XDR (`partner_submits`).
+ * - The adapter's `signedTransactionField`: `signed_transaction` carries the
+ *   signed XDR (`signed_xdr`, default) or the hash (`tx_hash`). `tx_hash`
+ *   needs `client_submits`: without a submit there is no hash.
  */
 import {
-  type AccountRef,
+  type ExecutePayoutInput,
   InvalidInputError,
   type Logger,
-  PayoutIncompleteError,
   type PayoutSubmission,
-  QuoteExpiredError,
+  type PendingPayout,
+  type SignedPayoutContext,
+  type SignedPayoutResult,
   type Signer,
-  type SigningContext,
-  assertSigningAllowed,
-  noopLogger,
+  type StellarSubmitter,
+  retryPayoutExecute,
+  runSignedPayout,
 } from '@vindu/grid-core';
 
-import type { BlindPayClient } from './client';
-import type { CreateStellarPayoutRequest, Payout } from './types';
+import type { BlindPayAdapter } from './adapter';
 
-/** Core's submission modes, re-exported so existing imports keep working. */
-export type { PayoutSubmission };
-export type SignedTransactionField = 'signed_xdr' | 'tx_hash';
-
-/** Puts a signed transaction on Stellar. `@vindu/grid-stellar` provides one; any object of this shape works. */
-export interface StellarSubmitter {
-  submit(signedXdr: string): Promise<{ readonly hash: string }>;
-}
+/** The parts of the BlindPay adapter the flow uses. */
+export type StellarPayoutAdapter = Pick<BlindPayAdapter, 'id' | 'signedTransactionField' | 'preparePayout' | 'executePayout'>;
 
 export interface RunStellarPayoutInput {
-  readonly client: Pick<BlindPayClient, 'stellarPayouts'>;
-  readonly quoteId: string;
-  /** The registered wallet's Stellar account (G...). */
-  readonly senderAddress: string;
-  /** The wallet's BlindPay id (`bw_`), passed to the signer as `partnerAccountId`. */
-  readonly walletId?: string;
+  readonly adapter: StellarPayoutAdapter;
   readonly signer: Signer;
-  /** Must name the same quote. Its `expiresAt` is the quote's expiry. */
-  readonly signingContext: SigningContext;
-  /** Required for `client_submits`. */
+  /** Core's submitter port. Required for `client_submits`. */
   readonly submitter?: StellarSubmitter;
+  /** Default `client_submits`. */
   readonly submission?: PayoutSubmission;
-  readonly signedTransactionField?: SignedTransactionField;
-  /** Key for `create`. Store it before calling, and reuse it on every retry of this payout. */
+  /**
+   * The transfer, its stored state, the fresh payout quote from this adapter,
+   * the client's Stellar account (`partnerAccountId` = `bw_...`) and the
+   * BlindPay account the transaction must pay. The signer receives the
+   * expected source, destination and amount from it.
+   */
+  readonly context: SignedPayoutContext;
+  /** Key for BlindPay's create. Store it before calling, and reuse it on every retry. */
   readonly idempotencyKey: string;
-  /** Refuse to sign when less than this is left on the quote. Default 0. */
-  readonly expiryMarginMs?: number;
+  /** Clock in epoch milliseconds. Defaults to `Date.now`. */
   readonly now?: () => number;
+  /** Refuse to sign or submit with this little left on the quote. Default core's `DEFAULT_EXPIRY_MARGIN_MS`. */
+  readonly expiryMarginMs?: number;
+  /** Store the signed XDR (and its hash) here before it is submitted or sent. */
+  readonly onSigned?: (signedXdr: string) => void | Promise<void>;
   readonly logger?: Logger;
 }
 
-/** Everything needed to repeat `create` unchanged. */
-export interface PendingPayoutCreate {
-  readonly body: CreateStellarPayoutRequest;
-  readonly idempotencyKey: string;
-  readonly signedXdr: string;
-  readonly txHash?: string;
-}
-
-export interface StellarPayoutResult extends PendingPayoutCreate {
-  readonly payout: Payout;
-  /** True when BlindPay replayed an earlier create with the same key. */
-  readonly replayed: boolean;
-}
-
 /**
- * The transaction may be on Stellar but BlindPay has not recorded the payout.
- * - `stage: 'submit'`: the submit outcome is unknown. Check the hash on Stellar
- *   before anything else, and never sign a replacement while it could still land.
- * - `stage: 'create'`: retry `create` with `pending` (same body, same key) via
- *   {@link retryStellarPayoutCreate}. BlindPay keeps keys for 24 hours.
+ * Runs the payout once. See the module notes.
+ *
+ * @throws {InvalidInputError} before any call for `partner_submits` with a
+ *   `tx_hash` adapter, a quote from another partner, or a non-Stellar account.
+ * @throws core's `QuoteExpiredError`, `SigningNotAllowedError` and `PayoutIncompleteError`.
  */
-export class StellarPayoutIncompleteError extends PayoutIncompleteError<CreateStellarPayoutRequest> {
-  declare readonly signedXdr: string;
-  /** Undefined only when the create body needs a hash that is not known yet. */
-  declare readonly pending: PendingPayoutCreate | undefined;
-
-  constructor(
-    stage: 'submit' | 'create',
-    signedXdr: string,
-    txHash: string | undefined,
-    pending: PendingPayoutCreate | undefined,
-    options: { cause?: unknown } = {},
-  ) {
-    super({
-      stage,
-      signedXdr,
-      ...(txHash === undefined ? {} : { txHash }),
-      ...(pending === undefined ? {} : { pending }),
-      cause: options.cause,
-    });
-  }
-}
-
-const TX_HASH_RE = /^[0-9a-f]{64}$/i;
-
-export async function runStellarPayout(input: RunStellarPayoutInput): Promise<StellarPayoutResult> {
+export async function runStellarPayout(input: RunStellarPayoutInput): Promise<SignedPayoutResult> {
   const submission = input.submission ?? 'client_submits';
-  const field = input.signedTransactionField ?? 'signed_xdr';
-  const now = input.now ?? Date.now;
-  const logger = input.logger ?? noopLogger;
-  checkInput(input, submission, field);
-
-  const ctx = input.signingContext;
-  const assertFresh = () => {
-    const expiresAt = Date.parse(ctx.expiresAt);
-    if (Number.isNaN(expiresAt) || now() + (input.expiryMarginMs ?? 0) >= expiresAt) {
-      throw new QuoteExpiredError(input.quoteId, ctx.expiresAt);
-    }
-  };
-
-  assertFresh();
-  const { unsignedXdr } = await input.client.stellarPayouts.authorize({
-    quote_id: input.quoteId,
-    sender_wallet_address: input.senderAddress,
-  });
-  logger.info('stellar payout authorized', { quoteId: input.quoteId });
-
-  assertFresh();
-  assertSigningAllowed(ctx, new Date(now()));
-  const account: AccountRef = {
-    chain: 'stellar',
-    address: input.senderAddress,
-    ...(input.walletId === undefined ? {} : { partnerAccountId: input.walletId }),
-  };
-  const signedXdr = await input.signer.signStellar(account, unsignedXdr, ctx);
-  if (typeof signedXdr !== 'string' || signedXdr === '') {
-    throw new InvalidInputError('signer returned an empty transaction');
-  }
-
-  // Still unsubmitted: an expired quote here is safe to abandon. The signed XDR is dropped.
-  assertFresh();
-
-  let txHash: string | undefined;
-  if (submission === 'client_submits') {
-    const submitter = input.submitter as StellarSubmitter;
-    try {
-      txHash = (await submitter.submit(signedXdr)).hash;
-    } catch (cause) {
-      throw new StellarPayoutIncompleteError('submit', signedXdr, undefined, pendingFor(input, field, signedXdr, undefined), { cause });
-    }
-    if (typeof txHash !== 'string' || !TX_HASH_RE.test(txHash)) {
-      throw new StellarPayoutIncompleteError('submit', signedXdr, undefined, pendingFor(input, field, signedXdr, undefined));
-    }
-    logger.info('stellar payout submitted', { quoteId: input.quoteId, txHash });
-  }
-
-  const pending = pendingFor(input, field, signedXdr, txHash) as PendingPayoutCreate;
-  return retryStellarPayoutCreate(input.client, pending);
-}
-
-/**
- * Sends `create` with exactly the pending body and key. Use it to retry after
- * {@link StellarPayoutIncompleteError}; it never signs or submits anything.
- */
-export async function retryStellarPayoutCreate(
-  client: Pick<BlindPayClient, 'stellarPayouts'>,
-  pending: PendingPayoutCreate,
-): Promise<StellarPayoutResult> {
-  try {
-    const res = await client.stellarPayouts.create(pending.body, { idempotencyKey: pending.idempotencyKey });
-    return { ...pending, payout: res.data, replayed: res.replayed };
-  } catch (cause) {
-    throw new StellarPayoutIncompleteError('create', pending.signedXdr, pending.txHash, pending, { cause });
-  }
-}
-
-function pendingFor(
-  input: RunStellarPayoutInput,
-  field: SignedTransactionField,
-  signedXdr: string,
-  txHash: string | undefined,
-): PendingPayoutCreate | undefined {
-  const signed = field === 'signed_xdr' ? signedXdr : txHash;
-  if (signed === undefined) return undefined;
-  return {
-    body: { quote_id: input.quoteId, signed_transaction: signed, sender_wallet_address: input.senderAddress },
-    idempotencyKey: input.idempotencyKey,
-    signedXdr,
-    ...(txHash === undefined ? {} : { txHash }),
-  };
-}
-
-function checkInput(input: RunStellarPayoutInput, submission: PayoutSubmission, field: SignedTransactionField): void {
-  if (submission !== 'client_submits' && submission !== 'partner_submits') {
-    throw new InvalidInputError(`Unknown submission mode: ${String(submission)}`);
-  }
-  if (field !== 'signed_xdr' && field !== 'tx_hash') {
-    throw new InvalidInputError(`Unknown signedTransactionField: ${String(field)}`);
-  }
-  if (submission === 'client_submits' && input.submitter === undefined) {
-    throw new InvalidInputError('client_submits needs a submitter');
-  }
-  if (submission === 'partner_submits' && field === 'tx_hash') {
+  const { adapter, context } = input;
+  if (submission === 'partner_submits' && adapter.signedTransactionField === 'tx_hash') {
     throw new InvalidInputError('partner_submits cannot send a tx_hash: nothing was submitted, so there is no hash');
   }
-  if (typeof input.idempotencyKey !== 'string' || input.idempotencyKey === '') {
-    throw new InvalidInputError('idempotencyKey is required and must be reused on every retry');
+  if (context.quote.partner !== adapter.id) {
+    throw new InvalidInputError(`Quote ${context.quote.id} is from ${context.quote.partner}, not ${adapter.id}`);
   }
-  if (input.signingContext.quoteId !== input.quoteId) {
-    throw new InvalidInputError('signingContext.quoteId does not match quoteId');
+  if (context.account.chain !== 'stellar') {
+    throw new InvalidInputError('BlindPay pays out from Stellar accounts only');
   }
+  return runSignedPayout({
+    adapter,
+    signer: input.signer,
+    ...(input.submitter === undefined ? {} : { submitter: input.submitter }),
+    submission,
+    context,
+    now: input.now ?? Date.now,
+    ...(input.expiryMarginMs === undefined ? {} : { expiryMarginMs: input.expiryMarginMs }),
+    idempotencyKey: input.idempotencyKey,
+    ...(input.onSigned === undefined ? {} : { onSigned: input.onSigned }),
+    ...(input.logger === undefined ? {} : { logger: input.logger }),
+  });
+}
+
+/**
+ * Sends BlindPay's create again with exactly the pending input and key, after
+ * `PayoutIncompleteError` with `stage: 'create'`. Use the same adapter
+ * configuration, so the body is byte for byte the same. Never signs or submits.
+ * BlindPay keeps idempotency keys for 24 hours.
+ */
+export async function retryStellarPayoutCreate(
+  adapter: Pick<BlindPayAdapter, 'executePayout'>,
+  pending: PendingPayout<ExecutePayoutInput>,
+  logger?: Logger,
+): Promise<SignedPayoutResult> {
+  return retryPayoutExecute(adapter, pending, logger);
 }

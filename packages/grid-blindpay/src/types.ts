@@ -226,11 +226,18 @@ export interface AuthorizeStellarPayoutRequest {
   readonly sender_wallet_address: string;
 }
 
+/**
+ * What goes in `signed_transaction` when creating a Stellar payout: the signed
+ * XDR envelope (`signed_xdr`) or the Stellar transaction hash (`tx_hash`).
+ * UNCONFIRMED which one BlindPay expects, so it is an adapter option.
+ */
+export type SignedTransactionField = 'signed_xdr' | 'tx_hash';
+
 export interface CreateStellarPayoutRequest {
   readonly quote_id: string;
   /**
    * What goes here (signed XDR envelope or Stellar transaction hash) is
-   * UNCONFIRMED. See `SignedTransactionField` in `stellar-payout-flow.ts`.
+   * UNCONFIRMED. See {@link SignedTransactionField}.
    */
   readonly signed_transaction: string;
   readonly sender_wallet_address: string;

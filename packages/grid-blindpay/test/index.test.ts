@@ -15,7 +15,6 @@ describe('package index', () => {
     'BLINDPAY_PARTNER_ID',
     'DEV_SENTINEL_AMOUNTS',
     'UNCONFIRMED_GET_PAYOUT_PATH',
-    'StellarPayoutIncompleteError',
     'WebhookVerificationError',
     'BlindPayHttpError',
   ])('exports %s', (name) => {
