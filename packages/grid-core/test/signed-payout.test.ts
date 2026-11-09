@@ -1055,6 +1055,108 @@ describe('signed payout', () => {
     });
   });
 
+  describe('a frozen snapshot of the context', () => {
+    // Review probe: an adapter changed the shared quote in preparePayout, and
+    // the signer then expected (and signed) the new amount.
+    it('refuses an adapter that changes the quote in preparePayout; nothing is signed', async () => {
+      const { input, preparePayout, signStellar } = setup();
+      preparePayout.mockImplementationOnce(async (...args: unknown[]) => {
+        const prepared = args[0] as { quote: { source: unknown; expiresAt: string } };
+        prepared.quote.source = money('1000000', USDC);
+        prepared.quote.expiresAt = '2031-01-01T00:00:00Z';
+        return { kind: 'stellar_xdr', unsignedXdr: UNSIGNED };
+      });
+      const e = await caught(runSignedPayout(input));
+      expect(e).toBeInstanceOf(PayoutAuthorizationError);
+      expect(e).toMatchObject({ failure: 'threw' });
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    it('signs what was checked even when the caller changes its own quote mid-run', async () => {
+      const { input, preparePayout, signStellar, executePayout } = setup();
+      const shared = { ...quote, source: { ...quote.source, asset: { ...quote.source.asset } } };
+      preparePayout.mockImplementationOnce(async () => {
+        shared.source.amount = '1000000';
+        shared.source.asset.issuer = DESTINATION;
+        shared.expiresAt = '2031-01-01T00:00:00Z';
+        return { kind: 'stellar_xdr', unsignedXdr: UNSIGNED };
+      });
+      await runSignedPayout({ ...input, context: { ...input.context, quote: shared } });
+      const context = (signStellar.mock.calls[0] as unknown[] | undefined)?.[2] as ReturnType<typeof signingContextFor>;
+      expect(context.expected.amount).toEqual(quote.source);
+      expect(context.expiresAt).toBe(EXPIRES_AT);
+      expect(executePayout.mock.calls[0]?.[0].quote).toEqual(quote);
+    });
+
+    it('reads a getter once: the signer gets what the funds check saw', async () => {
+      const { input, signStellar } = setup();
+      let reads = 0;
+      const changing = {
+        ...quote,
+        get source() {
+          reads += 1;
+          return reads === 1 ? quote.source : money('1000000', USDC);
+        },
+      };
+      await runSignedPayout({ ...input, context: { ...input.context, quote: changing } });
+      expect(reads).toBe(1);
+      const context = (signStellar.mock.calls[0] as unknown[] | undefined)?.[2] as ReturnType<typeof signingContextFor>;
+      expect(context.expected.amount.amount).toBe('100');
+    });
+
+    it('hands the adapter, the hooks and the signer frozen copies, never the caller objects', async () => {
+      const { input, preparePayout, onAuthorized, signStellar, executePayout } = setup();
+      await runSignedPayout(input);
+      const prepared = (preparePayout.mock.calls[0] as unknown[] | undefined)?.[0] as { quote: LegQuote };
+      expect(prepared.quote).not.toBe(quote);
+      expect(prepared.quote).toEqual(quote);
+      for (const frozen of [prepared, prepared.quote, prepared.quote.source, prepared.quote.source.asset, prepared.quote.fees]) {
+        expect(Object.isFrozen(frozen)).toBe(true);
+      }
+      expect(Object.isFrozen(onAuthorized.mock.calls[0]?.[0])).toBe(true);
+      const context = (signStellar.mock.calls[0] as unknown[] | undefined)?.[2] as ReturnType<typeof signingContextFor>;
+      expect(Object.isFrozen(context)).toBe(true);
+      expect(Object.isFrozen(context.expected.amount.asset)).toBe(true);
+      const body = executePayout.mock.calls[0]?.[0] as ExecutePayoutInput;
+      expect(Object.isFrozen(body)).toBe(true);
+      expect(Object.isFrozen(body.account)).toBe(true);
+    });
+
+    it('signs the XDR the partner returned, even if onAuthorized changes the authorization', async () => {
+      const { input, onAuthorized, signStellar, store } = setup();
+      onAuthorized.mockImplementationOnce(async (auth: PayoutAuthorization) => {
+        try {
+          (auth as { unsignedXdr: string }).unsignedXdr = 'AAAAOTHER';
+        } catch {
+          // frozen
+        }
+        store.state = transition(store.state, 'awaiting_signature', 'signed_payout_flow').to;
+        return store.state;
+      });
+      await runSignedPayout(input);
+      expect(signStellar).toHaveBeenCalledWith(account, UNSIGNED, expect.anything());
+    });
+
+    it.each<[string, (i: RunSignedPayoutInput) => RunSignedPayoutInput]>([
+      ['a context that refers to itself', (i) => {
+        const looping: Record<string, unknown> = { ...i.context };
+        looping['self'] = looping;
+        return { ...i, context: looping as unknown as RunSignedPayoutInput['context'] };
+      }],
+      ['a quote whose getter throws', (i) => ({
+        ...i,
+        context: { ...i.context, quote: { ...quote, get source(): never { throw new Error('no'); } } },
+      })],
+      ['no context', (i) => ({ ...i, context: undefined as unknown as RunSignedPayoutInput['context'] })],
+      ['no quote', (i) => ({ ...i, context: { ...i.context, quote: null as unknown as LegQuote } })],
+      ['no account', (i) => ({ ...i, context: { ...i.context, account: undefined as unknown as typeof account } })],
+    ])('refuses %s before any call', async (_name, change) => {
+      const { input, preparePayout } = setup();
+      await expect(runSignedPayout(change(input))).rejects.toThrow(InvalidInputError);
+      expect(preparePayout).not.toHaveBeenCalled();
+    });
+  });
+
   describe('the amount is bounded by the funds', () => {
     const withQuote = (i: RunSignedPayoutInput, source: LegQuote['source']): RunSignedPayoutInput => ({
       ...i,

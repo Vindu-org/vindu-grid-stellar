@@ -254,7 +254,10 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  *   than `awaiting_signature`, e.g. a concurrent run already moved it.
  * - Whatever `onAuthorized` or `onSigned` throw, unchanged.
  */
-export async function runSignedPayout(input: RunSignedPayoutInput): Promise<SignedPayoutResult> {
+export async function runSignedPayout(callerInput: RunSignedPayoutInput): Promise<SignedPayoutResult> {
+  // Read once and frozen: what the checks see is what the adapter and the
+  // signer get, and nobody can change the quote half way through the run.
+  const input = snapshotInput(callerInput);
   const margin = input.expiryMarginMs ?? DEFAULT_EXPIRY_MARGIN_MS;
   // Read once: what submitting may take. The quote must outlive it, not just the margin.
   const submitBudget = checkInput(input, margin);
@@ -267,14 +270,14 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
 
   assertFresh('authorization');
   const auth = await authorize(adapter, context, logger);
-  const base: ExecutePayoutInput = { quote, account, transferId, idempotencyKey: input.idempotencyKey };
+  const base: ExecutePayoutInput = Object.freeze({ quote, account, transferId, idempotencyKey: input.idempotencyKey });
 
   if (auth.kind === 'none') {
     // The partner moves the funds on create: a quote that ran out while it
     // authorized is dropped here, still in payout_quoted, never created.
     assertFresh('authorization');
     logger.info('payout needs no signature', { transferId, quoteId: quote.id });
-    return execute(adapter, { body: base, idempotencyKey: input.idempotencyKey }, logger);
+    return execute(adapter, frozenPending(base), logger);
   }
 
   if (signing === undefined) {
@@ -327,7 +330,7 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
 
   try {
     assertStillFresh();
-    const signingContext = signingContextFor({ ...context, destination: signing.destination }, state);
+    const signingContext = frozenCopy(signingContextFor({ ...context, destination: signing.destination }, state), 'the signing context');
     signedXdr = await sign(signer, account, unsignedXdr, signingContext, logger);
     logger.info('payout signed', { transferId, quoteId: quote.id, custody: signer.custody });
     if (signing.onSigned !== undefined) {
@@ -344,7 +347,7 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
     if (signing.submission === 'client_submits') {
       return await submitAndRecord(input, signing, base, signedXdr, logger);
     }
-    return await execute(adapter, { body: { ...base, signedXdr }, idempotencyKey: input.idempotencyKey }, logger);
+    return await execute(adapter, frozenPending({ ...base, signedXdr }), logger);
   } catch (e) {
     if (
       e instanceof QuoteExpiredError ||
@@ -375,7 +378,8 @@ async function submitAndRecord(
   const submitter = signing.submitter as StellarSubmitter;
   let outcome: unknown;
   try {
-    outcome = await submitter.submit(signedXdr);
+    // A frozen copy: onSubmitted gets what was checked, and a hostile getter fails here, as an unknown outcome.
+    outcome = frozenCopy(await submitter.submit(signedXdr), 'the submit outcome');
   } catch (cause) {
     throw new PayoutIncompleteError({ stage: 'submit', signedXdr, cause });
   }
@@ -391,7 +395,7 @@ async function submitAndRecord(
   }
   const txHash = outcome.hash;
   logger.info('payout submitted', { transferId, quoteId: quote.id, txHash });
-  const pending = { body: { ...base, signedXdr, txHash }, idempotencyKey: input.idempotencyKey };
+  const pending = frozenPending({ ...base, signedXdr, txHash });
   // The money has moved: record it before the partner hears about it.
   const onSubmitted = signing.onSubmitted as NonNullable<SignedPayoutSigning['onSubmitted']>;
   try {
@@ -509,22 +513,85 @@ async function authorize(
   const { quote, account, transferId } = context;
   let auth: unknown;
   try {
-    auth = await adapter.preparePayout({ quote, account, transferId });
+    auth = await adapter.preparePayout(Object.freeze({ quote, account, transferId }));
   } catch (cause) {
     const error = new PayoutAuthorizationError('threw', cause);
     logger.warn('payout authorization failed', { transferId, quoteId: quote.id, causeCode: error.causeCode ?? 'none' });
     throw error;
   }
-  if (isKnownAuthorization(auth)) return auth;
+  const known = readAuthorization(auth);
+  if (known !== undefined) return known;
   logger.warn('payout authorization not recognised', { transferId, quoteId: quote.id });
   throw new PayoutAuthorizationError('invalid_authorization');
 }
 
-function isKnownAuthorization(value: unknown): value is PayoutAuthorization {
-  if (typeof value !== 'object' || value === null) return false;
-  const auth = value as { kind?: unknown; unsignedXdr?: unknown };
-  if (auth.kind === 'none') return true;
-  return auth.kind === 'stellar_xdr' && typeof auth.unsignedXdr === 'string' && auth.unsignedXdr !== '';
+/**
+ * A frozen copy of an authorization this flow knows, each field read once,
+ * or `undefined`. The hooks and the signer then see exactly what was checked.
+ */
+function readAuthorization(value: unknown): PayoutAuthorization | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  let kind: unknown;
+  let unsignedXdr: unknown;
+  try {
+    ({ kind, unsignedXdr } = value as { kind?: unknown; unsignedXdr?: unknown });
+  } catch {
+    return undefined;
+  }
+  if (kind === 'none') return Object.freeze({ kind: 'none' });
+  if (kind === 'stellar_xdr' && typeof unsignedXdr === 'string' && unsignedXdr !== '') {
+    return Object.freeze({ kind: 'stellar_xdr', unsignedXdr });
+  }
+  return undefined;
+}
+
+/** The frozen create input and its key. */
+function frozenPending(body: ExecutePayoutInput): PendingPayout<ExecutePayoutInput> {
+  return Object.freeze({ body: Object.freeze(body), idempotencyKey: body.idempotencyKey });
+}
+
+/** Deepest nesting {@link frozenCopy} follows. A quote nests four levels. */
+const MAX_COPY_DEPTH = 8;
+
+/**
+ * A deep, frozen copy of plain data: each own enumerable property is read
+ * once, arrays stay arrays, functions are kept as they are. Anything that
+ * cannot be read, or nests deeper than {@link MAX_COPY_DEPTH} (a cycle), is
+ * {@link InvalidInputError}.
+ */
+function frozenCopy<T>(value: T, what: string): T {
+  const copy = (v: unknown, depth: number): unknown => {
+    if (typeof v !== 'object' || v === null) return v;
+    if (depth >= MAX_COPY_DEPTH) throw new InvalidInputError(`${what} is nested too deep`);
+    if (Array.isArray(v)) return Object.freeze(v.map((item: unknown) => copy(item, depth + 1)));
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(v)) {
+      // defineProperty, not assignment: a `__proto__` key stays plain data.
+      Object.defineProperty(out, key, { value: copy((v as Record<string, unknown>)[key], depth + 1), enumerable: true });
+    }
+    return Object.freeze(out);
+  };
+  try {
+    return copy(value, 0) as T;
+  } catch (e) {
+    throw e instanceof InvalidInputError ? e : new InvalidInputError(`${what} could not be read`);
+  }
+}
+
+/**
+ * The run's input, read once: the context and `funded` deep-frozen, the
+ * signing group's fields read once, every other field read once.
+ */
+function snapshotInput(input: RunSignedPayoutInput): RunSignedPayoutInput {
+  if (typeof input !== 'object' || input === null) throw new InvalidInputError('The payout run needs its input');
+  const { signing, ...rest } = input;
+  return Object.freeze({
+    ...rest,
+    context: frozenCopy(input.context, 'context'),
+    funded: frozenCopy(input.funded, 'funded'),
+    // Shallow: the signer and the submitter stay the caller's objects, with their methods.
+    ...(signing === undefined ? {} : { signing: Object.freeze({ ...signing }) }),
+  });
 }
 
 async function execute(
@@ -625,6 +692,12 @@ function checkInput(input: RunSignedPayoutInput, margin: number): number {
     throw new InvalidInputError('now must be a clock function');
   }
   const { context, adapter } = input;
+  if (typeof context !== 'object' || context === null || typeof context.quote !== 'object' || context.quote === null) {
+    throw new InvalidInputError('context must hold the transfer, its payout quote and its account');
+  }
+  if (typeof context.account !== 'object' || context.account === null) {
+    throw new InvalidInputError(`Transfer ${context.transferId} has no account`);
+  }
   if (context.state !== 'payout_quoted') {
     throw new InvalidInputError(
       `Transfer ${context.transferId} is in ${String(context.state)}: the payout runs from payout_quoted`,
