@@ -34,7 +34,7 @@ describe('signer guard', () => {
     expect(() => assertSigningAllowed(base, new Date('2030-01-02T00:00:00Z'))).toThrow(/fresh quote/);
   });
 
-  it.each(['soon', '1', '2030-01-01', '2030-01-01T00:00:00', ''])('refuses the expiry %p', (expiresAt) => {
+  it.each(['soon', '1', '2030-01-01', '2030-01-01T00:00:00', '', '2030-02-31T00:00:00Z', '2030-01-01T24:00:00Z', '2030-02-29T00:00:00Z'])('refuses the expiry %p', (expiresAt) => {
     expect(() => assertSigningAllowed({ ...base, expiresAt }, new Date('2000-01-01T00:00:00Z'))).toThrow(
       /invalid expiry/,
     );
