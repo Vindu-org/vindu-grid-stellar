@@ -1,8 +1,4 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "rootDir": ".",
-    "types": ["node", "jest"]
-  },
+  "extends": "../../tsconfig.dev.json",
   "include": ["src", "test"]
 }

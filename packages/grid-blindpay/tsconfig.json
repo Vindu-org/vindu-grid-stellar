@@ -1,10 +1,4 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "types": ["node", "jest"],
-    // Type-check tests and the typecheck script against grid-core's sources,
-    // so no build of grid-core is needed first. The build config does not use this.
-    "paths": { "@vindu/grid-core": ["../grid-core/src"] }
-  },
+  "extends": "../../tsconfig.dev.json",
   "include": ["src", "test"]
 }

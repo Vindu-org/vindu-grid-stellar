@@ -1,14 +1,4 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "rootDir": "..",
-    "types": ["node", "jest"],
-    // Type-check tests and sources against grid-core's sources, so neither
-    // `yarn typecheck` nor `yarn test` needs grid-core built first. The build
-    // (tsconfig.build.json) still resolves grid-core through its dist types.
-    "paths": {
-      "@vindu/grid-core": ["../grid-core/src"]
-    }
-  },
+  "extends": "../../tsconfig.dev.json",
   "include": ["src", "test"]
 }
