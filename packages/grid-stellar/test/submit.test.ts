@@ -480,7 +480,7 @@ describe('submit: fee bumps', () => {
     const ours = feeBumped(inner.tx);
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'timeout' }];
-    const result = await run(gateway, ours.xdr, clock(), { maxWaitMs: 0 });
+    const result = await run(gateway, ours.xdr, clock(), { maxWaitMs: 1_000 });
     expect(result).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
     expect(gateway.transactionLookups).toEqual([ours.hash, inner.hash]);
   });
@@ -716,9 +716,30 @@ describe('submit: ingestion proof', () => {
     expect(order.filter((o) => o === 'ledger').length).toBe(2);
   });
 
-  it('with maxWaitMs 0 nothing is read before submitting, so it never expires', async () => {
+  it('with maxWaitMs 0 nothing is read or looked up, so it never expires', async () => {
     const { xdr, hash, gateway } = pastMaxTime();
     expect(await run(gateway, xdr, clock(), { maxWaitMs: 0 })).toEqual({ status: 'unknown', hash });
+    expect(gateway.ledgerReads).toEqual([]);
+    expect(gateway.transactionLookups).toEqual([]);
+  });
+
+  it('with maxWaitMs 0 a quick network error is unknown without a lookup', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.submitResponses = [{ kind: 'unavailable', status: null }];
+    expect(await run(gateway, xdr, clock(), { maxWaitMs: 0 })).toEqual({ status: 'unknown', hash });
+    expect(gateway.transactionLookups).toEqual([]);
+  });
+
+  it('with maxWaitMs 0 a refusal is reported as is, without a lookup', async () => {
+    const { xdr, hash, gateway } = pastMaxTime();
+    gateway.submitResponses = [{ kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] }];
+    gateway.transactions.set(hash, { found: true, hash, successful: true });
+    expect(await run(gateway, xdr, clock(), { maxWaitMs: 0 })).toMatchObject({
+      status: 'rejected',
+      reason: 'refused',
+      error: { code: 'bad_seq' },
+    });
+    expect(gateway.transactionLookups).toEqual([]);
   });
 });
 
@@ -803,7 +824,7 @@ describe('submit: Horizon reads time out', () => {
     gateway.submitResponses = [{ kind: 'timeout' }];
     gateway.ledger = ledgerAt(T0 / 1000);
     gateway.transaction = hang;
-    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 1_000 });
     expect(result).toEqual({ status: 'unknown', hash });
   });
 
@@ -825,7 +846,7 @@ describe('submit: Horizon reads time out', () => {
       if (options?.signal !== undefined) signals.push(options.signal);
       return hang();
     };
-    await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 1_000 });
     expect(signals.length).toBeGreaterThan(0);
     expect(signals.every((s) => s.aborted)).toBe(true);
   });

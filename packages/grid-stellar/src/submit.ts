@@ -158,8 +158,10 @@ export interface SubmitOptions {
   readonly pollIntervalMs?: number;
   /**
    * Longest extra wait, after `timeoutMs`, before returning `unknown`.
-   * Default 2 min. With 0, no ledger is read before submitting, so the
-   * result is never `expired_not_landed`.
+   * Default 2 min. With 0 nothing is looked up: the submission's own answer
+   * is the result (a refusal is reported without checking whether the
+   * transaction already landed, and no answer gives `unknown`), so it is
+   * never `expired_not_landed`.
    */
   readonly maxWaitMs?: number;
   /**
@@ -485,8 +487,11 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
 
   const first = await attempt(true);
   if (first.kind === 'accepted') return done(fromAccepted(first));
+  // No time to wait means no lookup: report the submission's own answer.
+  const settle = maxWaitMs > 0;
   if (first.kind === 'rejected') {
     const error = mapResultCodes(first.transactionCode, first.operationCodes);
+    if (!settle) return done({ status: 'rejected', reason: 'refused', hash, ...inner, error });
     // A rejection of an envelope that already landed (e.g. tx_bad_seq on a
     // retry, or another fee bump around the same transaction) must not hide
     // the landing: check the hashes first.
@@ -499,6 +504,7 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   // Timed out or no answer: the transaction may be on its way. Check the
   // hashes before anything else, and keep checking. The number of rounds is
   // bounded too, so a clock that stops moving cannot keep the loop alive.
+  if (!settle) return unknown(undefined);
   logger.warn('stellar submission without answer; checking the hash', { hash, kind: first.kind });
   const rounds = Math.floor(maxWaitMs / pollIntervalMs) + 1;
   let lastError: SubmitError | undefined;
