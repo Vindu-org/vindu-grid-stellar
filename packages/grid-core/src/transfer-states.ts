@@ -67,6 +67,7 @@ export type TransitionReason =
   | 'quote_expired_before_signing'
   | 'signed_and_on_chain'
   | 'submission_rejected_or_unknown'
+  | 'signer_refused'
   | 'partner_accepted'
   | 'partner_refused_or_unknown'
   | 'fiat_landed'
@@ -110,6 +111,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
     'submission_rejected_or_unknown',
     'submission rejected or outcome unknown',
   ),
+  rule('awaiting_signature', 'needs_attention', 'signer_refused', 'signer refused the transaction'),
   rule('payout_submitted', 'payout_processing', 'partner_accepted', 'partner accepted'),
   rule('payout_submitted', 'needs_attention', 'partner_refused_or_unknown', 'partner refused or unknown'),
   rule('payout_processing', 'completed', 'fiat_landed', 'fiat landed'),

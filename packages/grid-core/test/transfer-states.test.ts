@@ -39,6 +39,7 @@ const EXPECTED: ReadonlyArray<[TransferState, TransferState, TransitionReason, s
   ['payout_quoted', 'funded', 'quote_expired_before_authorization', 'quote expired before authorization'],
   ['payout_quoted', 'needs_attention', 'authorization_failed', 'authorization failed'],
   ['awaiting_signature', 'needs_attention', 'submission_rejected_or_unknown', 'submission rejected or outcome unknown'],
+  ['awaiting_signature', 'needs_attention', 'signer_refused', 'signer refused the transaction'],
 ];
 
 const EXPECTED_STATES = [
