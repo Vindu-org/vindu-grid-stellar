@@ -87,7 +87,7 @@ function setup(options: { auth?: PayoutAuthorization; outcome?: SubmitOutcome; c
     funded: money('100', USDC),
     signing: {
       signer,
-      submitter: { submit },
+      submitter: { submit, maxDurationMs: 0 },
       submission: 'client_submits',
       destination: DESTINATION,
       onAuthorized,
@@ -747,14 +747,35 @@ describe('signed payout', () => {
       await expect(runSignedPayout(run)).resolves.toMatchObject({ authorization: 'stellar_xdr' });
     });
 
-    it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, '1000' as unknown as number])(
+    it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, '1000' as unknown as number, undefined as unknown as number, null as unknown as number])(
       'refuses a maxDurationMs of %p before any call',
       async (maxDurationMs) => {
         const { input, submit, preparePayout } = setup();
-        await expect(runSignedPayout(budgeted(input, submit, maxDurationMs))).rejects.toThrow(/maxDurationMs/);
+        const e = await caught(runSignedPayout(budgeted(input, submit, maxDurationMs)));
+        expect(e).toBeInstanceOf(InvalidInputError);
+        expect((e as Error).message).toMatch(/maxDurationMs/);
         expect(preparePayout).not.toHaveBeenCalled();
       },
     );
+
+    // Review probe: a wrapper that dropped maxDurationMs let a quote with
+    // 100 s left be signed for a submit that may take 150 s.
+    it('refuses a client_submits submitter that leaves maxDurationMs out, before any call', async () => {
+      const { input, submit, preparePayout, onAuthorized, signStellar } = setup();
+      const wrapper = { submit } as unknown as StellarSubmitter;
+      const e = await caught(runSignedPayout(withSigning(input, { submitter: wrapper })));
+      expect(e).toBeInstanceOf(InvalidInputError);
+      expect((e as Error).message).toMatch(/client_submits needs submitter\.maxDurationMs/);
+      expect(preparePayout).not.toHaveBeenCalled();
+      expect(onAuthorized).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
+    it('does not need maxDurationMs with partner_submits, where nothing is submitted here', async () => {
+      const { input } = setup();
+      const run = withSigning(input, { submission: 'partner_submits', submitter: undefined });
+      await expect(runSignedPayout(run)).resolves.toMatchObject({ authorization: 'stellar_xdr' });
+    });
   });
 
   describe('fails closed', () => {

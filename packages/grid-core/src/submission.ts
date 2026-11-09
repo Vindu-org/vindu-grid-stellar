@@ -44,10 +44,11 @@ export interface StellarSubmitter {
    * The longest one `submit` call can take, in milliseconds, including every
    * wait and lookup. The payout flow refuses to sign unless the quote has
    * more than its expiry margin plus this left, so a slow submit cannot run
-   * past the quote. Leave it out only for a submitter that answers at once.
-   * Must be a finite number >= 0.
+   * past the quote. Required: a finite number >= 0, and 0 only for a
+   * submitter that answers at once. A run with `client_submits` refuses a
+   * submitter without it before any call.
    */
-  readonly maxDurationMs?: number;
+  readonly maxDurationMs: number;
   /**
    * Submits `signedXdr` and resolves with what is known about it. Network and
    * Horizon errors should become `unknown`, not a rejection, because the

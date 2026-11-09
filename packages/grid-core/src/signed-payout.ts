@@ -116,7 +116,10 @@ export type StellarXdrAuthorization = Extract<PayoutAuthorization, { kind: 'stel
 export interface SignedPayoutSigning {
   readonly signer: Signer;
   readonly submission: PayoutSubmission;
-  /** Required for `client_submits`. */
+  /**
+   * Required for `client_submits`, with its `maxDurationMs`: a submitter
+   * without a finite `maxDurationMs` >= 0 is refused before any call.
+   */
   readonly submitter?: StellarSubmitter;
   /** The partner's account the transaction must pay (G...). */
   readonly destination: string;
@@ -561,7 +564,11 @@ function isMoney(value: unknown): value is Money {
   );
 }
 
-/** Checks the signing inputs. Returns the submitter's `maxDurationMs` for `client_submits`, else 0. */
+/**
+ * Checks the signing inputs. Returns the submitter's `maxDurationMs` for
+ * `client_submits` (required), else 0: nothing is submitted here with
+ * `partner_submits`.
+ */
 function checkSigning(signing: SignedPayoutSigning): number {
   if (signing.submission !== 'client_submits' && signing.submission !== 'partner_submits') {
     throw new InvalidInputError(`Unknown submission mode: ${String(signing.submission)}`);
@@ -581,12 +588,16 @@ function checkSigning(signing: SignedPayoutSigning): number {
   if (signing.submission === 'client_submits' && typeof signing.submitter?.submit !== 'function') {
     throw new InvalidInputError('client_submits needs a submitter');
   }
-  const budget = signing.submission === 'client_submits' ? signing.submitter?.maxDurationMs : undefined;
-  if (budget !== undefined && (typeof budget !== 'number' || !Number.isFinite(budget) || budget < 0)) {
-    throw new InvalidInputError(`submitter.maxDurationMs must be a finite number of ms >= 0: ${String(budget)}`);
+  if (signing.submission !== 'client_submits') return 0;
+  // Required: without it the quote could run out while the submit is still going.
+  const budget: unknown = signing.submitter?.maxDurationMs;
+  if (typeof budget !== 'number' || !Number.isFinite(budget) || budget < 0) {
+    throw new InvalidInputError(
+      `client_submits needs submitter.maxDurationMs, a finite number of ms >= 0: ${String(budget)}`,
+    );
   }
-  if (signing.submission === 'client_submits' && typeof signing.onSubmitted !== 'function') {
+  if (typeof signing.onSubmitted !== 'function') {
     throw new InvalidInputError('client_submits needs onSubmitted: store payout_submitted there before the payout is created');
   }
-  return budget ?? 0;
+  return budget;
 }
