@@ -1,4 +1,5 @@
 import {
+  causeCodeOf,
   GridError,
   type GridErrorCode,
   InvalidConfigError,
@@ -170,5 +171,52 @@ describe('shared errors', () => {
     const e = new SignerRefusedError('invalid_result');
     expect(e).toMatchObject({ failure: 'invalid_result', causeCode: undefined });
     expect(e.message).toMatch(/no signed transaction/);
+  });
+
+  describe('causeCodeOf', () => {
+    it.each<[string, string]>([
+      ['partner_http', 'partner_http'],
+      ['payout-xdr-mismatch', 'payout-xdr-mismatch'],
+      ['signing_not_allowed', 'signing_not_allowed'],
+      ['a'.repeat(48), 'a'.repeat(48)],
+      ['x1', 'x1'],
+      // A system constant is kept, lowercased.
+      ['ETIMEDOUT', 'etimedout'],
+      ['UND_ERR_CONNECT_TIMEOUT', 'und_err_connect_timeout'],
+    ])('keeps %p as %p', (code, kept) => {
+      expect(causeCodeOf({ code })).toBe(kept);
+    });
+
+    // Review probe: a signer error whose code was an API key reached the
+    // run's error and the logs as its cause code.
+    it.each<unknown>([
+      'sk_live_SECRET123',
+      'Partner_HTTP',
+      'a'.repeat(49),
+      'has space',
+      'jane.doe',
+      'a:b',
+      '_leading',
+      'trailing_',
+      'double__underscore',
+      '1starts_with_digit',
+      'E2BIG',
+      '',
+      42,
+      null,
+    ])('drops %p', (code) => {
+      expect(causeCodeOf({ code })).toBeUndefined();
+    });
+
+    it.each<unknown>([undefined, null, 'partner_http', 42])('reads nothing from %p', (cause) => {
+      expect(causeCodeOf(cause)).toBeUndefined();
+    });
+
+    it('applies to every error that keeps a cause code', () => {
+      const secret = Object.assign(new Error('x'), { code: 'sk_live_SECRET123' });
+      expect(new PayoutAuthorizationError('threw', secret).causeCode).toBeUndefined();
+      expect(new SignerRefusedError('threw', secret).causeCode).toBeUndefined();
+      expect(new SignerRefusedError('threw', secret).message).not.toMatch(/SECRET/);
+    });
   });
 });

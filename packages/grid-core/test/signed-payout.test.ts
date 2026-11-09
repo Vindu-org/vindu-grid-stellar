@@ -798,7 +798,8 @@ describe('signed payout', () => {
     it.each<[string, (s: ReturnType<typeof setup>) => void, string, string | undefined]>([
       ['refuses with SigningNotAllowedError', (s) => s.signStellar.mockRejectedValueOnce(new SigningNotAllowedError('pays GXYZ')), 'threw', 'signing_not_allowed'],
       ['throws a plain Error', (s) => s.signStellar.mockRejectedValueOnce(new Error('ECONNRESET to custodian')), 'threw', undefined],
-      ['throws a code-shaped error', (s) => s.signStellar.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'ETIMEDOUT' })), 'threw', 'ETIMEDOUT'],
+      ['throws a code-shaped error', (s) => s.signStellar.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'ETIMEDOUT' })), 'threw', 'etimedout'],
+      ['throws a secret-shaped code', (s) => s.signStellar.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'sk_live_SECRET123' })), 'threw', undefined],
       ['rejects with a string', (s) => s.signStellar.mockRejectedValueOnce('no'), 'threw', undefined],
       ['throws synchronously', (s) => s.signStellar.mockImplementationOnce(() => { throw new Error('sync'); }), 'threw', undefined],
       ['returns an empty string', (s) => s.signStellar.mockResolvedValueOnce(''), 'invalid_result', undefined],

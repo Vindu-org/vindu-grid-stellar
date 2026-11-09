@@ -177,7 +177,27 @@ export class QuoteExpiredError extends GridError {
 /** How the partner's authorize step failed. */
 export type PayoutAuthorizationFailure = 'threw' | 'invalid_authorization';
 
-const CAUSE_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** Longest cause code an error keeps. */
+const CAUSE_CODE_MAX = 48;
+/** A lowercase snake or kebab code: `partner_http`, `payout-xdr-mismatch`. */
+const CAUSE_CODE_RE = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/;
+/** A system error constant made of capital letters and underscores only: `ETIMEDOUT`, `UND_ERR_SOCKET`. */
+const SYSTEM_CONSTANT_RE = /^[A-Z]+(?:_[A-Z]+)*$/;
+
+/**
+ * The `code` of an error, when it is safe to keep: a lowercase snake or
+ * kebab code of at most 48 characters (`partner_http`). A system constant of
+ * capital letters and underscores only (`ETIMEDOUT`) is kept lowercased
+ * (`etimedout`). Anything else is dropped, so a secret or client data put in
+ * `code` (`sk_live_SECRET123`, `Jane Doe`) never reaches an error or a log.
+ * Every cause code in this library and its adapters comes from here.
+ */
+export function causeCodeOf(cause: unknown): string | undefined {
+  const raw = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  if (typeof raw !== 'string') return undefined;
+  const code = SYSTEM_CONSTANT_RE.test(raw) ? raw.toLowerCase() : raw;
+  return code.length <= CAUSE_CODE_MAX && CAUSE_CODE_RE.test(code) ? code : undefined;
+}
 
 /**
  * The partner's authorize step (`preparePayout`) threw, or returned an
@@ -190,11 +210,11 @@ const CAUSE_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
  */
 export class PayoutAuthorizationError extends GridError {
   readonly failure: PayoutAuthorizationFailure;
-  /** The `code` of what `preparePayout` threw, when it had a plain one. */
+  /** The `code` of what `preparePayout` threw, as {@link causeCodeOf} keeps it. */
   readonly causeCode: string | undefined;
 
   constructor(failure: PayoutAuthorizationFailure, cause?: unknown) {
-    const causeCode = codeOf(cause);
+    const causeCode = causeCodeOf(cause);
     super(
       'payout_authorization_failed',
       failure === 'threw'
@@ -204,11 +224,6 @@ export class PayoutAuthorizationError extends GridError {
     this.failure = failure;
     this.causeCode = causeCode;
   }
-}
-
-function codeOf(cause: unknown): string | undefined {
-  const code = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
-  return typeof code === 'string' && CAUSE_CODE_RE.test(code) ? code : undefined;
 }
 
 /**
@@ -237,17 +252,17 @@ export type SignerRefusalKind = 'threw' | 'invalid_result';
  * The transfer is in `awaiting_signature`: take
  * `awaiting_signature -> needs_attention` (`signer_refused`).
  *
- * It keeps the cause's `code` when it has a plain one (e.g.
+ * It keeps the cause's `code` when {@link causeCodeOf} accepts it (e.g.
  * `signing_not_allowed`), never its message or the error itself: a signer's
  * error text can quote the transaction or client data.
  */
 export class SignerRefusedError extends GridError {
   readonly failure: SignerRefusalKind;
-  /** The `code` of what the signer threw, when it had a plain one. */
+  /** The `code` of what the signer threw, as {@link causeCodeOf} keeps it. */
   readonly causeCode: string | undefined;
 
   constructor(failure: SignerRefusalKind, cause?: unknown) {
-    const causeCode = failure === 'threw' ? codeOf(cause) : undefined;
+    const causeCode = failure === 'threw' ? causeCodeOf(cause) : undefined;
     super(
       'signer_refused',
       failure === 'threw'

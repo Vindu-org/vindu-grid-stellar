@@ -28,6 +28,7 @@ export {
 } from './capabilities';
 export {
   AssetMismatchError,
+  causeCodeOf,
   type CoreErrorCode,
   GridError,
   type GridErrorCode,
