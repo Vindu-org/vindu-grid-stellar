@@ -259,7 +259,7 @@ describe('TestKeySigner', () => {
         funded: money('100', usdc),
         signing: {
           signer: signer(),
-          submitter: { submit },
+          submitter: { submit, maxDurationMs: 0 },
           submission: 'client_submits',
           destination: treasury.publicKey(),
           onAuthorized: () => 'awaiting_signature',

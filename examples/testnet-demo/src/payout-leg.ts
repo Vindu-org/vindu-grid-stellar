@@ -154,6 +154,8 @@ export async function runPayoutLeg(
   const before = { submissions: ledger.submissions.length, lookups: ledger.lookups.length };
   // Prints what the submit found; the transfer moves only in onSubmitted.
   const submitter: StellarSubmitter = {
+    // Passed through: core needs it to keep the quote alive for the whole submit.
+    maxDurationMs: stellar.maxDurationMs,
     async submit(signedXdr) {
       const outcome = await stellar.submit(signedXdr);
       log(
