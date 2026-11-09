@@ -89,6 +89,10 @@ export interface SigningContext {
   readonly expected: ExpectedPayment;
 }
 
+/**
+ * Signs payout transactions. The `SigningContext` it receives from
+ * `runSignedPayout` is frozen plain data: read it, never mutate it.
+ */
 export interface Signer {
   readonly custody: Custody;
   /**
