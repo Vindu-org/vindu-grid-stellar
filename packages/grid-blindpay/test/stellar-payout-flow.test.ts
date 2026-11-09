@@ -8,7 +8,9 @@ import {
   QuoteExpiredError,
   type SignedPayoutContext,
   type Signer,
+  SignerRefusedError,
   SigningNotAllowedError,
+  type TransferState,
   type StellarSubmitter,
   type SubmitOutcome,
   fiat,
@@ -17,7 +19,12 @@ import {
 } from '@vindu/grid-core';
 
 import { createBlindPayAdapter } from '../src/adapter';
-import { type RunStellarPayoutInput, retryStellarPayoutCreate, runStellarPayout } from '../src/stellar-payout-flow';
+import {
+  type RunStellarPayoutInput,
+  type StellarPayoutSigning,
+  retryStellarPayoutCreate,
+  runStellarPayout,
+} from '../src/stellar-payout-flow';
 import type { SignedTransactionField } from '../src/types';
 import { type MockReply, STELLAR_ADDRESS, USDB_ISSUER, WALLET_ID, caught, config, mockFetch } from './helpers';
 
@@ -40,7 +47,8 @@ const quote: LegQuote = {
   fees: [],
 };
 const account = { chain: 'stellar', address: STELLAR_ADDRESS, partnerAccountId: WALLET_ID } as const;
-const context: SignedPayoutContext = { transferId: 'tr_000000000000', state: 'payout_quoted', quote, account, destination: TREASURY };
+const context: SignedPayoutContext = { transferId: 'tr_000000000000', state: 'payout_quoted', quote, account };
+const FUNDED = money('100', usdb);
 
 const AUTHORIZED: MockReply = { body: { transaction_hash: UNSIGNED } };
 const CREATED: MockReply = { body: { id: 'po_000000000000', status: 'processing' } };
@@ -56,12 +64,26 @@ function setup(replies: MockReply[], opts: { clock?: () => number; field?: Signe
   const signStellar = jest.fn(async () => SIGNED);
   const signer: Signer = { custody: 'test_key', signStellar };
   const submit = jest.fn<Promise<SubmitOutcome>, [string]>(async () => SUCCESS);
-  const onAuthorized = jest.fn(async () => 'awaiting_signature' as const);
+  const onAuthorized = jest.fn(async (): Promise<TransferState> => 'awaiting_signature');
+  const onSubmitted = jest.fn(async () => undefined);
   const base: RunStellarPayoutInput = {
-    adapter, signer, context, submitter: { submit }, idempotencyKey: KEY, now: opts.clock ?? (() => NOW), onAuthorized,
+    adapter,
+    context,
+    funded: FUNDED,
+    signing: { signer, submitter: { submit }, destination: TREASURY, onAuthorized, onSubmitted },
+    idempotencyKey: KEY,
+    now: opts.clock ?? (() => NOW),
   };
   const paths = () => calls.map((c) => c.url.replace(/^.*\/in_000000000000/, ''));
-  return { calls, paths, adapter, signStellar, submit, onAuthorized, base };
+  return { calls, paths, adapter, signStellar, submit, onAuthorized, onSubmitted, base };
+}
+
+/** The input with some signing fields changed. */
+function withSigning(
+  input: RunStellarPayoutInput,
+  change: { [K in keyof StellarPayoutSigning]?: StellarPayoutSigning[K] | undefined },
+): RunStellarPayoutInput {
+  return { ...input, signing: { ...input.signing, ...change } as StellarPayoutSigning };
 }
 
 describe('stellar payout flow', () => {
@@ -71,7 +93,7 @@ describe('stellar payout flow', () => {
     ['partner_submits', 'signed_xdr', SIGNED, 0],
   ])('payout with %s and %s sends the right signed_transaction', async (submission, field, sent, submits) => {
     const { calls, paths, signStellar, submit, onAuthorized, base } = setup([AUTHORIZED, CREATED], { field });
-    const res = await runStellarPayout({ ...base, submission });
+    const res = await runStellarPayout(withSigning(base, { submission }));
 
     expect(onAuthorized).toHaveBeenCalledTimes(1);
     expect(onAuthorized).toHaveBeenCalledWith({ kind: 'stellar_xdr', unsignedXdr: UNSIGNED });
@@ -94,16 +116,14 @@ describe('stellar payout flow', () => {
 
   it('payout with partner_submits and a tx_hash adapter is refused before any call or signature', async () => {
     const { calls, signStellar, base } = setup([], { field: 'tx_hash' });
-    await expect(runStellarPayout({ ...base, submission: 'partner_submits' })).rejects.toThrow(InvalidInputError);
+    await expect(runStellarPayout(withSigning(base, { submission: 'partner_submits' }))).rejects.toThrow(InvalidInputError);
     expect(calls).toHaveLength(0);
     expect(signStellar).not.toHaveBeenCalled();
   });
 
   it('payout with client_submits and no submitter is refused up front', async () => {
     const { calls, signStellar, base } = setup([]);
-    const noSubmitter: { -readonly [K in keyof RunStellarPayoutInput]?: RunStellarPayoutInput[K] } = { ...base };
-    delete noSubmitter.submitter;
-    await expect(runStellarPayout(noSubmitter as RunStellarPayoutInput)).rejects.toThrow(/submitter/);
+    await expect(runStellarPayout(withSigning(base, { submitter: undefined }))).rejects.toThrow(/submitter/);
     expect(calls).toHaveLength(0);
     expect(signStellar).not.toHaveBeenCalled();
   });
@@ -113,6 +133,60 @@ describe('stellar payout flow', () => {
     await expect(runStellarPayout({ ...base, context: { ...context, quote: { ...quote, partner: 'other' } } })).rejects.toThrow(/other/);
     await expect(runStellarPayout({ ...base, context: { ...context, account: { ...account, chain: 'other-chain' } } })).rejects.toThrow(/Stellar/);
     expect(calls).toHaveLength(0);
+  });
+
+  it('payout without signing inputs is refused before any call', async () => {
+    const { calls, base } = setup([]);
+    const noSigning: { -readonly [K in keyof RunStellarPayoutInput]?: RunStellarPayoutInput[K] } = { ...base };
+    delete noSigning.signing;
+    await expect(runStellarPayout(noSigning as RunStellarPayoutInput)).rejects.toThrow(/signing is required/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('payout with client_submits and no onSubmitted is refused before any call', async () => {
+    const { calls, signStellar, base } = setup([]);
+    await expect(runStellarPayout(withSigning(base, { onSubmitted: undefined }))).rejects.toThrow(/onSubmitted/);
+    expect(calls).toHaveLength(0);
+    expect(signStellar).not.toHaveBeenCalled();
+  });
+
+  it('payout stores the confirmed submit before BlindPay hears about it', async () => {
+    const { calls, onSubmitted, submit, base } = setup([AUTHORIZED, CREATED]);
+    await runStellarPayout(base);
+    expect(onSubmitted).toHaveBeenCalledWith(SUCCESS);
+    expect(submit.mock.invocationCallOrder[0]).toBeLessThan(onSubmitted.mock.invocationCallOrder[0] ?? 0);
+    // Two calls: authorize, then create; onSubmitted ran between the submit and the create.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('payout whose onSubmitted throws stops with stage record, and the retry creates it', async () => {
+    const { calls, adapter, onSubmitted, signStellar, submit, base } = setup([AUTHORIZED, CREATED]);
+    onSubmitted.mockRejectedValueOnce(new Error('db down'));
+    const e = (await caught(runStellarPayout(base))) as PayoutIncompleteError<ExecutePayoutInput>;
+    expect(e).toMatchObject({ stage: 'record', txHash: HASH });
+    expect(calls).toHaveLength(1);
+    await expect(retryStellarPayoutCreate(adapter, e.pending!)).resolves.toMatchObject({ txHash: HASH });
+    expect(calls).toHaveLength(2);
+    expect(signStellar).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['above the funded amount', money('99.99', usdb)],
+    ['in another asset', money('100', stellarAsset('USDC', USDB_ISSUER))],
+  ])('payout of a quote %s is refused before any call', async (_name, funded) => {
+    const { calls, signStellar, base } = setup([AUTHORIZED, CREATED]);
+    await expect(runStellarPayout({ ...base, funded })).rejects.toThrow(InvalidInputError);
+    expect(calls).toHaveLength(0);
+    expect(signStellar).not.toHaveBeenCalled();
+  });
+
+  it('payout whose signer throws stops with SignerRefusedError and never submits', async () => {
+    const { paths, signStellar, submit, base } = setup([AUTHORIZED, CREATED]);
+    signStellar.mockRejectedValueOnce(new Error('custodian timeout'));
+    await expect(runStellarPayout(base)).rejects.toBeInstanceOf(SignerRefusedError);
+    expect(submit).not.toHaveBeenCalled();
+    expect(paths()).toEqual(['/payouts/stellar/authorize']);
   });
 
   it('payout on an expired quote throws QuoteExpiredError and never authorizes or signs', async () => {
@@ -184,7 +258,8 @@ describe('stellar payout flow', () => {
   ])('payout fails closed when the clock reads %s, even on a quote that expired in 2001', async (_name, reading) => {
     const { calls, signStellar, base } = setup([AUTHORIZED, CREATED], { clock: () => reading });
     const old = { ...context, quote: { ...quote, expiresAt: '2001-01-01T00:00:00Z' } };
-    await expect(runStellarPayout({ ...base, submission: 'partner_submits', context: old })).rejects.toThrow(InvalidInputError);
+    const partnerSubmits = withSigning(base, { submission: 'partner_submits' });
+    await expect(runStellarPayout({ ...partnerSubmits, context: old })).rejects.toThrow(InvalidInputError);
     expect(signStellar).not.toHaveBeenCalled();
     expect(calls).toHaveLength(0);
   });
@@ -210,7 +285,7 @@ describe('stellar payout flow', () => {
     it.each(outcomes)('%s', async (_name, submit) => {
       for (const field of ['signed_xdr', 'tx_hash'] as const) {
         const { paths, signStellar, base } = setup([AUTHORIZED, CREATED], { field });
-        const e = (await caught(runStellarPayout({ ...base, submitter: { submit } }))) as PayoutIncompleteError;
+        const e = (await caught(runStellarPayout(withSigning(base, { submitter: { submit } })))) as PayoutIncompleteError;
         expect(e).toBeInstanceOf(PayoutIncompleteError);
         expect(e).toMatchObject({ stage: 'submit', code: 'payout_not_recorded', signedXdr: SIGNED, pending: undefined });
         expect(e.message).toMatch(/check the transaction on Stellar/);
@@ -222,7 +297,8 @@ describe('stellar payout flow', () => {
     it('keeps the outcome and hash for the operator', async () => {
       const { base } = setup([AUTHORIZED]);
       const outcome: SubmitOutcome = { status: 'unknown', hash: HASH };
-      const e = (await caught(runStellarPayout({ ...base, submitter: { submit: async () => outcome } }))) as PayoutIncompleteError;
+      const run = withSigning(base, { submitter: { submit: async () => outcome } });
+      const e = (await caught(runStellarPayout(run))) as PayoutIncompleteError;
       expect(e).toMatchObject({ txHash: HASH, outcome });
     });
   });
