@@ -144,6 +144,13 @@ describe('adapter', () => {
     await expect(adapter.quoteFunding({ ...input, spreadBps: 75 })).rejects.toThrow(/partner fee/);
   });
 
+  it.each([-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY])('refuses spreadBps %p before calling BlindPay', async (spreadBps) => {
+    const { adapter, calls } = setup({ partnerFeeIdFor: () => 'pf_000000000000' });
+    const input = { customerId: CUSTOMER_ID, account, source: money('100', brl), targetAsset: usdb, rail: 'pix', spreadBps } as const;
+    await expect(adapter.quoteFunding(input)).rejects.toThrow(/spreadBps/);
+    expect(calls).toHaveLength(0);
+  });
+
   it('refuses unsupported inputs before calling BlindPay', async () => {
     const { adapter, calls } = setup();
     const base = { customerId: CUSTOMER_ID, account, source: money('100', brl), targetAsset: usdb, rail: 'pix' } as const;

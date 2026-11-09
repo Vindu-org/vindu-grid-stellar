@@ -86,6 +86,9 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   const ref = (kind: LegKind, id: string): LegRef => ({ partner: partnerId, kind, id });
 
   const feeId = (leg: LegKind, spreadBps: number | undefined) => {
+    if (spreadBps !== undefined && (!Number.isSafeInteger(spreadBps) || spreadBps < 0)) {
+      throw new InvalidInputError(`spreadBps must be a non-negative integer number of basis points: ${spreadBps}`);
+    }
     const id = options.partnerFeeIdFor?.(leg, spreadBps);
     if (id === undefined && spreadBps !== undefined && spreadBps > 0) {
       throw new InvalidInputError(`No partner fee configured for a ${spreadBps} bps spread on the ${leg} leg`);
