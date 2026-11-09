@@ -111,27 +111,32 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
   });
   log(`  payout quote ${payoutQuote.id}: ${fmt(payoutQuote.source)} -> ${fmt(payoutQuote.target)}`);
 
-  // From payout_quoted: authorize -> store awaiting_signature -> check quote
-  // and state -> sign once -> submit (hash checked) -> create
+  // From payout_quoted: check the funds -> authorize -> store awaiting_signature
+  // -> check state and quote -> sign once -> submit (hash checked)
+  // -> store payout_submitted -> create
   let state: TransferState = 'payout_quoted';
   const result = await runStellarPayout({
     adapter,
-    signer: world.signer,
-    submitter: createStellarSubmitter({ gateway: world.ledger, networkPassphrase: world.networkPassphrase, now }),
-    context: {
-      transferId: 'demo-transfer-2',
-      state: 'payout_quoted',
-      quote: payoutQuote,
-      account,
-      destination: world.partner.treasuryAddress,
-    },
+    context: { transferId: 'demo-transfer-2', state: 'payout_quoted', quote: payoutQuote, account },
+    // What the funding leg delivered: the payout quote may not move more.
+    funded: usdc('10000'),
     idempotencyKey: 'demo-transfer-2-payout',
     now,
-    onAuthorized: () => {
-      const rule = transition(state, 'awaiting_signature', 'signed_payout_flow');
-      state = rule.to;
-      log(`  ${rule.from} -> ${rule.to} (${rule.label}): BlindPay authorized, stored before signing`);
-      return state;
+    signing: {
+      signer: world.signer,
+      submitter: createStellarSubmitter({ gateway: world.ledger, networkPassphrase: world.networkPassphrase, now }),
+      destination: world.partner.treasuryAddress,
+      onAuthorized: () => {
+        const rule = transition(state, 'awaiting_signature', 'signed_payout_flow');
+        state = rule.to;
+        log(`  ${rule.from} -> ${rule.to} (${rule.label}): BlindPay authorized, stored before signing`);
+        return state;
+      },
+      onSubmitted: () => {
+        const rule = transition(state, 'payout_submitted', 'signed_and_on_chain');
+        state = rule.to;
+        log(`  ${rule.from} -> ${rule.to} (${rule.label}): stored before BlindPay is told`);
+      },
     },
   });
   log(`  payout ${result.leg.id} created after a confirmed submit, tx ${short(result.txHash ?? '')}`);
