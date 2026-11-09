@@ -61,8 +61,18 @@ For a payout that needs a signature, the partner builds the unsigned transaction
 - **Bring your own credentials.** Partner keys and URLs are passed as arguments. The library never reads environment variables.
 - **Typed in, typed out.** Every call takes a typed input and returns a typed result or a typed error.
 - **Nothing sensitive in logs.** An optional `onCall` hook reports the method, path, status and timing of each partner call. It never includes keys or request and response bodies.
-- **Unsigned out, signed in.** Payouts that need a signature come back as unsigned Stellar transactions. Your signer should check the amount, the destination and the transfer state before it signs.
-- **One adapter interface.** Every partner client implements the same interface and passes the same conformance tests. That suite is the integration kit for Stellar-ready VASPs.
+- **Unsigned in, checked, signed once.** Payouts that need a signature come from the partner as unsigned Stellar transactions. Your signer must check the transfer state, the source, the destination, the asset, the exact amount, the fee and the time bound before it signs. The test signer in `examples/testnet-demo` shows every check.
+- **One adapter interface.** Every partner client implements the same core interface. A shared conformance suite that every adapter must pass is **planned** for tranche 3, as part of the integration kit for Stellar-ready VASPs. It does not exist yet.
+
+## Safety rules
+
+These rules decide when money may move. The packages enforce them where they can, and your application must follow them where it decides.
+
+- **Sign once.** For a payout quote the signer is called at most once. If the quote gets too close to its expiry before the signed transaction leaves, the transaction is dropped unsubmitted: get a fresh quote and a new transaction. An old transaction is never signed again.
+- **Sign a replacement only when the first can never land.** That is only after `failed` (the transaction is in a ledger as failed: nothing moved) or `expired_not_landed`. `expired_not_landed` is judged by Horizon, never by your clock: the latest ledger Horizon has ingested closed after the transaction's time limit, and a lookup after that still finds nothing. After `unknown` or `rejected` the first transaction could still land, so check again later and do not sign again.
+- **The partner is told only after a confirmed success.** When you submit, the partner payout is created only after the submit reports `success`.
+- **The partner and the chain must agree before funding counts.** A transfer is `funded` only when the payment is on Stellar, matches the leg (account, asset and issuer, exact amount), and the partner's amount and the on-chain amount agree.
+- **No automatic refund or reroute.** When something does not add up, the transfer moves to `needs_attention` and waits for a person. Nothing here refunds, reroutes or re-signs on its own, and the route never changes once the funding leg exists.
 
 ## Packages
 
