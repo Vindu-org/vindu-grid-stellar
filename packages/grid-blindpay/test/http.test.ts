@@ -117,10 +117,15 @@ describe('client http', () => {
     expect(e.cause).toBeUndefined();
   });
 
-  it('refuses a 2xx body that is not JSON, without marking it retryable', async () => {
-    const { fetch } = mockFetch([{ text: '<html>' }]);
-    const e = (await caught(createBlindPayHttp(config(fetch)).request({ method: 'POST', path: '/x', body: {} }))) as BlindPayHttpError;
-    expect(e).toMatchObject({ status: 200, partnerCode: 'invalid_json', retryable: false });
+  it('marks a 2xx body that is not JSON retryable with the same key', async () => {
+    const { fetch, calls } = mockFetch([{ text: '<html>' }, { body: { id: 'qu_1' }, headers: { 'Idempotency-Replayed': 'true' } }]);
+    const http = createBlindPayHttp(config(fetch));
+    const e = (await caught(http.request({ method: 'POST', path: '/x', body: { a: 1 } }))) as BlindPayHttpError;
+    expect(e).toMatchObject({ status: 200, partnerCode: 'invalid_json', retryable: true });
+    expect(e.idempotencyKey).toBeDefined();
+    const again = await http.request({ method: 'POST', path: '/x', body: { a: 1 }, idempotencyKey: e.idempotencyKey as string });
+    expect(again).toMatchObject({ data: { id: 'qu_1' }, replayed: true });
+    expect(calls[1]?.headers['Idempotency-Key']).toBe(calls[0]?.headers['Idempotency-Key']);
   });
 
   it('never exposes the API key in errors, logs or onCall payloads', async () => {

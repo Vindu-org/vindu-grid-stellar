@@ -151,8 +151,10 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
     try {
       data = (text === '' ? undefined : JSON.parse(text)) as T;
     } catch {
+      // The call may have taken effect, so retry it with the same key and body:
+      // BlindPay then replays the original result instead of acting twice.
       // No cause: JSON.parse quotes the start of the body in its message.
-      throw fail({ status: response.status, code: 'invalid_json', retryable: false });
+      throw fail({ status: response.status, code: 'invalid_json', retryable: true });
     }
     return {
       data,
