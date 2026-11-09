@@ -13,7 +13,7 @@ No environment reads, no keys, no signing. Your signer signs; the network passph
 | Version | 0.1.0, git tag only: not on npm. Install from the tag `v0.1.0` as the [root README](../../README.md#install-from-a-git-tag) shows. |
 | Node | 22.12 or later: the Stellar SDK needs `require()` of ES modules. |
 | Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-stellar` only; files under `dist/` are internal. |
-| Stability | Early. Every API here may change before the first release. |
+| Stability | 0.x: a breaking change bumps the minor version (0.1 to 0.2); a patch version never breaks the API. |
 | Planned | A shared fake Horizon for application tests, in the tranche 3 integration kit. |
 
 ## What is inside
