@@ -98,7 +98,7 @@ export class MockPartner implements PartnerAdapter {
   readonly id: PartnerId;
   private readonly legs = new Map<string, Leg>();
   private readonly quotes = new Map<string, LegQuote>();
-  private counter = 0;
+  private readonly counters = new Map<string, number>();
 
   constructor(private readonly options: MockPartnerOptions) {
     this.id = options.id;
@@ -299,8 +299,9 @@ export class MockPartner implements PartnerAdapter {
   }
 
   private nextId(prefix: string): string {
-    this.counter += 1;
-    return `${this.id}-${prefix}-${this.counter}`;
+    const n = (this.counters.get(prefix) ?? 0) + 1;
+    this.counters.set(prefix, n);
+    return `${this.id}-${prefix}-${n}`;
   }
 }
 
