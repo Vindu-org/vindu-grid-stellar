@@ -197,4 +197,14 @@ describe('adapter webhook', () => {
     const bare = createBlindPayAdapter(config(mockFetch([]).fetch), { network: 'stellar' });
     await expect(bare.parseWebhook(body, sign(body, ts))).rejects.toThrow(InvalidConfigError);
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, 0, -1])('refuses webhookToleranceSec %p when built', (webhookToleranceSec) => {
+    expect(() => setup({ webhookToleranceSec })).toThrow(InvalidConfigError);
+  });
+
+  it('fails closed when the clock reads NaN', async () => {
+    const adapter = createBlindPayAdapter(config(mockFetch([]).fetch, { now: () => Number.NaN }), { network: 'stellar_testnet', webhookSecret: SECRET });
+    const body = '{"webhook_event":"payout.update","id":"po_000000000001","status":"failed"}';
+    await expect(adapter.parseWebhook(body, sign(body, '1000000000'))).rejects.toThrow(InvalidInputError);
+  });
 });

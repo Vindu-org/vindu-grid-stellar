@@ -29,7 +29,7 @@ import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig } from './config';
 import type { SignedTransactionField } from './stellar-payout-flow';
 import type { StellarNetwork, StellarToken, Tracking } from './types';
-import { parseWebhookEvent, verifyWebhook } from './webhooks';
+import { assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
 export interface BlindPayAdapterOptions {
   /** `stellar` in production, `stellar_testnet` on a development instance. */
@@ -61,6 +61,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   if (options.network !== 'stellar' && options.network !== 'stellar_testnet') {
     throw new InvalidConfigError('network must be stellar or stellar_testnet');
   }
+  if (options.webhookToleranceSec !== undefined) assertWebhookTolerance(options.webhookToleranceSec);
   const client = options.client ?? createBlindPayClient(config);
   const now = config.now ?? Date.now;
   const coverFees = options.coverFees ?? false;
