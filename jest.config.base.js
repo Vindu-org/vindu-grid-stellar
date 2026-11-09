@@ -44,7 +44,7 @@ module.exports = (packageDir, options = {}) => ({
     : {}),
   // Workspace packages resolve to their sources in tests, so no build is needed first.
   moduleNameMapper: {
-    '^@vindu/(grid-[a-z]+)$': path.join(__dirname, 'packages/$1/src'),
+    '^@vindu/(grid-[a-z0-9-]+)$': path.join(__dirname, 'packages/$1/src'),
   },
   clearMocks: true,
   restoreMocks: true,
