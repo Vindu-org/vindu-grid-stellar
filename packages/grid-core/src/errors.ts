@@ -256,6 +256,8 @@ export interface PartnerHttpErrorInit {
   readonly retryable?: boolean;
   /** Wait the partner asked for (from `Retry-After`), in milliseconds. Information only. */
   readonly retryAfterMs?: number;
+  /** The Idempotency-Key sent with the request, when it had one. */
+  readonly idempotencyKey?: string;
   readonly cause?: unknown;
 }
 
@@ -269,6 +271,8 @@ export class PartnerHttpError extends GridError {
   readonly bodySnippet: string | undefined;
   /** Wait the partner asked for before a retry, in milliseconds. The library never retries on its own. */
   readonly retryAfterMs: number | undefined;
+  /** The Idempotency-Key that was sent. Retry with the same key and the same body. */
+  readonly idempotencyKey: string | undefined;
   private readonly retryableOverride: boolean | undefined;
 
   constructor(init: PartnerHttpErrorInit) {
@@ -284,6 +288,7 @@ export class PartnerHttpError extends GridError {
     this.bodySnippet =
       init.bodySnippet === undefined ? undefined : capSnippet(init.bodySnippet);
     this.retryAfterMs = init.retryAfterMs;
+    this.idempotencyKey = init.idempotencyKey;
     this.retryableOverride = init.retryable;
   }
 

@@ -45,6 +45,11 @@ describe('partner http error', () => {
     expect(e.code).toBe('partner_http');
     expect(e.message).toBe('p POST /v1/x failed: HTTP 429');
   });
+
+  it('keeps the idempotency key that was sent, for a retry with the same key', () => {
+    expect(new PartnerHttpError({ ...base, status: 503, idempotencyKey: 'k1' }).idempotencyKey).toBe('k1');
+    expect(new PartnerHttpError({ ...base, status: 503 }).idempotencyKey).toBeUndefined();
+  });
 });
 
 describe('shared errors', () => {
