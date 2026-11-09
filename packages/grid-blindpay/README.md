@@ -24,7 +24,7 @@ Stellar only (`stellar`, `stellar_testnet`; tokens `USDC`, and `USDB` on testnet
 | Pay-ins | PIX payin quote with `pix_allowed_tax_ids`, payin on `/payins/evm` (BlindPay's path for every network), get. |
 | Payouts | Payout quote on `/quotes`, Stellar `authorize` (unsigned XDR) and `create`. |
 | Partner fees | Create (with your own idempotency key), list, get, delete. |
-| Payout flow | `runStellarPayout`: core's `runSignedPayout` with this adapter. From `payout_quoted`, authorize, let you store `awaiting_signature`, check expiry and state, sign once, submit, create only after a confirmed success. |
+| Payout flow | `runStellarPayout`: core's `runSignedPayout` with this adapter. From `payout_quoted`, check the quote against the funded amount, authorize, let you store `awaiting_signature`, check state and expiry, sign once, submit, let you store `payout_submitted`, and create only then. |
 | Webhooks | `verifyWebhook` (Svix, raw bytes, timestamp window both ways, fails closed) and `parseWebhookEvent`. |
 | Adapter | `createBlindPayAdapter(config, options)` implements the core port. `BLINDPAY_CAPABILITIES` for routing. |
 | Amounts | `toBlindPayAmount` / `fromBlindPayAmount`: exact conversion to 2-decimal minor units. `floorToBlindPayAmount` for paying out a funded balance. |
@@ -39,7 +39,7 @@ const blindpay = createBlindPayAdapter(
   {
     network: 'stellar',
     assetIssuers: { USDC: usdcIssuer },  // G...: the USDC issuer you accept
-    webhookSecret: 'whsec_...',
+    webhookSecret: 'whsec_...',          // checked here: a malformed one throws InvalidConfigError
     partnerId: 'blindpay',               // default
   },
 );
@@ -62,7 +62,7 @@ A Stellar asset is its code plus its issuer. The adapter takes each token's issu
 
 - `baseUrl` must be `https`. Plain `http` is allowed only for loopback hosts (`localhost`, `127.0.0.0/8`, `::1`), for a local mock.
 - Redirects are never followed (`redirect: 'error'`): a followed redirect would send the body again to another URL. A 3xx from a custom fetch is an error too.
-- Errors keep the status, BlindPay's error code (only when it is code-shaped, like `idempotency_key_in_flight`), the idempotency key, the `retryable` flag and `retryAfterMs`. They keep no free text: no response body and no raw `cause`, because BlindPay may echo client data and a fetch error message can quote headers or the body. A network failure keeps only its system code in `causeCode` (e.g. `ECONNREFUSED`).
+- Errors keep the status, BlindPay's error code, the idempotency key (core's `PartnerHttpError.idempotencyKey`), the `retryable` flag and `retryAfterMs`. The code comes only from a code-shaped `code` or `error.code`, like `idempotency_key_in_flight`: never from `message` or other free text, even a single word, which could be a client's name. They keep no free text: no response body and no raw `cause`, because BlindPay may echo client data and a fetch error message can quote headers or the body. A network failure keeps only its system code in `causeCode` (e.g. `ECONNREFUSED`).
 - `includeErrorBodies: true` (debug only) adds a capped excerpt of BlindPay's error response in `bodySnippet`. It can hold client data such as names, tax ids or bank details: never turn it on where errors reach logs or error trackers.
 
 ## Idempotency and retries
@@ -78,23 +78,33 @@ import { createStellarSubmitter } from '@vindu/grid-stellar';
 
 const result = await runStellarPayout({
   adapter: blindpay,
-  signer,                                // your key holder; checks the XDR
-  submitter: createStellarSubmitter(...), // core's StellarSubmitter
-  context: { transferId, state: 'payout_quoted', quote, account, destination: blindpayAccount },
-  idempotencyKey,                         // stored before the call, reused on retries
-  onAuthorized: async () => (await moveTransfer('awaiting_signature', 'signed_payout_flow')).state,
-  onSigned: (xdr) => store(xdr),
+  context: { transferId, state: 'payout_quoted', quote, account },
+  funded,                                  // confirmed in the account; the quote may not move more
+  idempotencyKey,                          // stored before the call, reused on retries
+  signing: {
+    signer,                                // your key holder; checks the XDR
+    submitter: createStellarSubmitter(...), // core's StellarSubmitter, with its maxDurationMs
+    destination: blindpayAccount,          // the BlindPay account the payment must reach
+    // Compare-and-set: payout_quoted -> awaiting_signature, or throw.
+    onAuthorized: async () => (await moveIf('payout_quoted', 'awaiting_signature', 'signed_payout_flow')).state,
+    onSigned: (xdr) => store(xdr),
+    // The money moved: awaiting_signature -> payout_submitted, before BlindPay is told.
+    onSubmitted: (outcome) => moveIf('awaiting_signature', 'payout_submitted', 'signed_and_on_chain', outcome.hash),
+  },
 });
 ```
 
-It is core's `runSignedPayout`, so core's rules, and its table of which transition each error takes, apply:
+It is core's `runSignedPayout`, so core's rules, and its table of which transition each error takes, apply. BlindPay always returns a transaction to sign, so `signing` is required here; `submission` defaults to `client_submits`, which needs `submitter` and `onSubmitted`.
 
-- The transfer moves to `awaiting_signature` only in `onAuthorized`, after BlindPay's `authorize` answered with the XDR. A failed `authorize`, or an answer without the XDR, throws `PayoutAuthorizationError` while the transfer is still in `payout_quoted` (take `payout_quoted -> needs_attention`).
-- The signer is called once, after `onAuthorized` returned `awaiting_signature`. A quote with a minute or less left (`expiryMarginMs`, core's `DEFAULT_EXPIRY_MARGIN_MS`) throws `QuoteExpiredError`: with `stage: 'authorization'` before authorizing (take `payout_quoted -> funded`), with `stage: 'signing'` before signing or submitting (take `awaiting_signature -> funded`). Get a fresh quote and authorize again.
-- Only `{ status: 'success' }` from the submitter, with a valid hash, creates the payout. `rejected`, `unknown`, `expired_not_landed`, `failed`, a malformed outcome or a throw stop with `PayoutIncompleteError` (`stage: 'submit'`) carrying the outcome, and BlindPay is never told. Check the transaction on Stellar before anything else; never sign a replacement unless `canSignReplacement(outcome)` is true.
-- A failed create throws `PayoutIncompleteError` (`stage: 'create'`) with `pending`: the exact input and key. Retry with `retryStellarPayoutCreate(adapter, pending)` (core's `retryPayoutExecute`); with the same adapter options, BlindPay receives the same body and key. It never signs or submits again.
-- A clock or margin that is not a finite number throws.
-- `partner_submits` with an adapter set to `signedTransactionField: 'tx_hash'` is refused before any call: without a submit there is no hash. A quote from another partner id, or a non-Stellar account, is refused too.
+- Before any call, core checks that the quote is from this adapter's id and that `quote.source` is a positive amount of the funded asset, no more than `funded`. The adapter has already refused a quote whose `sender_amount` is not the requested amount.
+- The transfer moves to `awaiting_signature` only in `onAuthorized`, after BlindPay's `authorize` answered with the XDR. Make it a compare-and-set, so two runs for one transfer cannot both sign. A failed `authorize`, or an answer without the XDR, throws `PayoutAuthorizationError` while the transfer is still in `payout_quoted` (take `payout_quoted -> needs_attention` (`authorization_failed`)).
+- The signer is called once, after `onAuthorized` returned `awaiting_signature`. A quote with a minute or less left (`expiryMarginMs`, core's `DEFAULT_EXPIRY_MARGIN_MS`) throws `QuoteExpiredError` with `stage: 'authorization'` before authorizing (take `payout_quoted -> funded`). With `client_submits`, the quote must also outlive the submitter's `maxDurationMs`: otherwise `QuoteExpiredError` before `onAuthorized` (`stage: 'authorization'`), or before signing or submitting (`stage: 'signing'`, take `awaiting_signature -> funded`). Get a fresh quote and authorize again.
+- Anything the signer throws, or a result that is not a signed XDR, throws `SignerRefusedError` (take `awaiting_signature -> needs_attention` (`signer_refused`)). Nothing is submitted.
+- Only `{ status: 'success' }` from the submitter, with a valid hash, goes on. `rejected`, `unknown`, `expired_not_landed`, `failed`, a malformed outcome or a throw stop with `PayoutIncompleteError` (`stage: 'submit'`) carrying the outcome, and BlindPay is never told. Check the transaction on Stellar before anything else; never sign a replacement unless `canSignReplacement(outcome)` is true.
+- After a success, `onSubmitted` stores `payout_submitted` before BlindPay's create. If it throws, `PayoutIncompleteError` (`stage: 'record'`) carries `txHash` and `pending`: the money moved, so store `awaiting_signature -> payout_submitted`, then call `retryStellarPayoutCreate(adapter, pending)`. Never re-quote.
+- A failed create throws `PayoutIncompleteError` (`stage: 'create'`) with `pending`: the exact input and key. Retry with `retryStellarPayoutCreate(adapter, pending)` (core's `retryPayoutExecute`, which checks `pending`); with the same adapter options, BlindPay receives the same body and key. It never signs or submits again. If BlindPay never takes it: `payout_submitted -> needs_attention` (`partner_refused_or_unknown`) with `client_submits`, `awaiting_signature -> needs_attention` (`partner_submission_unknown`) with `partner_submits`.
+- A clock, margin or submit budget that is not a finite number throws.
+- `partner_submits` with an adapter set to `signedTransactionField: 'tx_hash'` is refused before any call: without a submit there is no hash. A non-Stellar account is refused too.
 
 ## Amounts
 
@@ -102,18 +112,21 @@ BlindPay sends every amount as an integer with 2 decimals, stablecoin included: 
 
 The one exception is the payout quote. A funded balance can carry Stellar's 7 decimals, so `quotePayout` rounds the amount **down** to the cent (`floorToBlindPayAmount`): `99.9876543` USDC is quoted as `99.98`, and the `0.0076543` rest stays in the account. The quote's `source` is what the transaction moves. Funding amounts still throw on sub-cent precision.
 
+Quotes are `sender` quotes: BlindPay's `sender_amount` must equal the `request_amount` sent, so BlindPay can never choose how much leaves the account. Every quote amount must be a positive integer, and `expires_at` must be epoch milliseconds (an epoch-seconds value would make a five-minute quote look expired in 1970). Anything else throws `BlindPayQuoteError` (`unexpected_partner_quote`, with the `field`).
+
 ## Leg status and events
 
 `readLeg` and `parseWebhook` report:
 
 - `status` from BlindPay's `status` field, never from the event name (the docs disagree on which event fires for which outcome). Anything unexpected is `unknown`.
 - `amount`: the stablecoin the leg moved on Stellar, as core's port defines it. Funding: `receiver_amount`, the stablecoin delivered to the account. Payout: `sender_amount`, the stablecoin taken from it. It is left out, never guessed, unless the token is known (BlindPay's `token` field, or USDC on `stellar`, the only token there) and its issuer is in `assetIssuers`, and the amount is a whole number of cents. The fiat side (a payout's `receiver_amount`, the fiat delivered) is on the raw resource: `adapter.client.stellarPayouts.getPayout(id)` or the parsed webhook.
+- `txHash`: the Stellar hash from `tracking_transaction.transaction_hash`, only when it is 64 hex characters; anything else is left out.
 - `occurredAt` (events) and `updatedAt` (reads): the resource's own change time, from `updated_at`, or for a completed leg `tracking_complete.completed_at`. Left out when BlindPay sends neither.
 - `deliveredAt` (events): the Svix timestamp. It is the delivery time; retries change it, so never order events by it.
 
 ## Webhooks
 
-`verifyWebhook` checks the Svix signature over the exact raw bytes (strict base64, any of several `v1` signatures) and the timestamp window both ways. It fails closed on a broken setup: a `toleranceSec` that is not a finite number above zero throws `InvalidConfigError`, a clock reading that is not finite throws `InvalidInputError`, and a secret shorter than 16 bytes is refused. The adapter checks `webhookToleranceSec` when it is built.
+`verifyWebhook` checks the Svix signature over the exact raw bytes (strict base64, any of several `v1` signatures) and the timestamp window both ways. A refused delivery throws `WebhookVerificationError`, which is core's `WebhookRejectedError` (code `webhook_rejected`) with a BlindPay `reason`. It fails closed on a broken setup: a secret that is not `whsec_` plus base64 of at least 16 bytes, or a `toleranceSec` that is not a finite number above zero, throws `InvalidConfigError`; a clock reading that is not finite throws `InvalidInputError`. The adapter checks `webhookSecret` and `webhookToleranceSec` when it is built.
 
 ## Development instances
 
@@ -126,7 +139,7 @@ The public docs leave these open. Each one lives in one place so a different ans
 - **`signed_transaction` content**: signed XDR or Stellar hash. Adapter option `signedTransactionField` (`signed_xdr` default, `tx_hash`).
 - **Who submits to Stellar**: `runStellarPayout` option `submission` (`client_submits` default, `partner_submits`).
 - **Reading one payout**: `GET /payouts/{po_id}` assumed, in one constant in `stellar-payouts.ts`.
-- **Error body format**: the code is read best-effort from `code`, `error` or `message`, and kept only when it is code-shaped.
+- **Error body format**: the code is read from `code` or `error.code`, and kept only when it is code-shaped. Free text never becomes the code.
 - **Leg fields**: `token`, `updated_at` and a payout's `sender_amount` are used when present, never required.
 - **Fee currency on quotes**: not stated, so `LegQuote.fees` is left empty rather than guessed.
 - **Webhook firing rules** conflict between pages: the adapter reads the `status` field, never the event name.
