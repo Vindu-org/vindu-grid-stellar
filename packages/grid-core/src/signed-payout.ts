@@ -30,7 +30,7 @@
  *   with {@link retryPayoutExecute}; it never signs or submits anything.
  * - A clock that returns a non-finite time, or a non-finite margin, fails closed.
  */
-import { isStellarAccountId } from './assets';
+import { assetKey, isStellarAccountId, sameAsset } from './assets';
 import {
   InvalidInputError,
   PayoutAuthorizationError,
@@ -40,6 +40,7 @@ import {
   type QuoteExpiredStage,
   SigningNotAllowedError,
 } from './errors';
+import { type Money, compare, isPositive, isValidAmount } from './money';
 import { type Logger, noopLogger } from './observability';
 import type {
   AccountRef,
@@ -120,6 +121,14 @@ export interface RunSignedPayoutInput {
   /** The partner adapter. Its `id` must be the quote's `partner`. */
   readonly adapter: Pick<PartnerAdapter, 'id' | 'preparePayout' | 'executePayout'>;
   readonly context: SignedPayoutContext;
+  /**
+   * The amount confirmed in the client's account for this transfer: what the
+   * funding leg delivered and the chain shows. The quote's `source` must be
+   * positive, in the same asset (code and issuer) and no more than this,
+   * before anything is authorized; only then is it what the signer expects.
+   * A partner can never pick an amount larger than the funds.
+   */
+  readonly funded: Money;
   /** Required when the partner may return a transaction to sign. See {@link SignedPayoutSigning}. */
   readonly signing?: SignedPayoutSigning;
   /** Clock in ms since epoch. A non-finite reading stops the run. */
@@ -264,7 +273,9 @@ export async function retryPayoutExecute(
 /**
  * The signing context the signer receives: everything it must compare with
  * the XDR, and the transfer's stored `state`, which must be
- * `awaiting_signature` for the signer to go ahead.
+ * `awaiting_signature` for the signer to go ahead. `expected.amount` is the
+ * quote's `source`; {@link runSignedPayout} checks it against the funded
+ * amount before it builds this.
  */
 export function signingContextFor(
   context: Omit<SignedPayoutContext, 'state'> & { readonly destination: string },
@@ -392,7 +403,35 @@ function checkInput(input: RunSignedPayoutInput, margin: number): void {
   if (typeof adapter.id !== 'string' || adapter.id === '' || context.quote.partner !== adapter.id) {
     throw new InvalidInputError(`Quote ${context.quote.id} is from ${String(context.quote.partner)}, not ${String(adapter.id)}`);
   }
+  checkFunded(context.quote, input.funded);
   if (input.signing !== undefined) checkSigning(input.signing);
+}
+
+/** The quote's source must be a positive amount of the funded asset, no more than the funds. */
+function checkFunded(quote: LegQuote, funded: Money): void {
+  if (!isMoney(funded)) throw new InvalidInputError('funded must be the amount confirmed in the account');
+  if (!isMoney(quote.source)) throw new InvalidInputError(`Quote ${quote.id} has no valid source amount`);
+  if (!sameAsset(quote.source.asset, funded.asset)) {
+    throw new InvalidInputError(
+      `Quote ${quote.id} moves ${assetKey(quote.source.asset)}, but the account was funded with ${assetKey(funded.asset)}`,
+    );
+  }
+  if (!isPositive(quote.source)) throw new InvalidInputError(`Quote ${quote.id} moves a non-positive amount: ${quote.source.amount}`);
+  if (compare(quote.source, funded) > 0) {
+    throw new InvalidInputError(`Quote ${quote.id} moves ${quote.source.amount}, more than the ${funded.amount} funded`);
+  }
+}
+
+function isMoney(value: unknown): value is Money {
+  if (typeof value !== 'object' || value === null) return false;
+  const { amount, asset } = value as { amount?: unknown; asset?: unknown };
+  return (
+    typeof amount === 'string' &&
+    isValidAmount(amount) &&
+    typeof asset === 'object' &&
+    asset !== null &&
+    typeof (asset as { code?: unknown }).code === 'string'
+  );
 }
 
 function checkSigning(signing: SignedPayoutSigning): void {

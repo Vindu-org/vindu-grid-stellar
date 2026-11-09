@@ -71,6 +71,7 @@ function setup(options: { auth?: PayoutAuthorization; outcome?: SubmitOutcome; c
   const input: RunSignedPayoutInput = {
     adapter: { id: 'p', preparePayout, executePayout },
     context: { transferId: 'tr_1', state: 'payout_quoted', quote, account },
+    funded: money('100', USDC),
     signing: { signer, submitter: { submit }, submission: 'client_submits', destination: DESTINATION, onAuthorized },
     now: options.clock ?? (() => NOW),
     idempotencyKey: KEY,
@@ -557,6 +558,42 @@ describe('signed payout', () => {
     const body = { quote, account, transferId: 'tr_1', idempotencyKey: 'other' };
     await expect(retryPayoutExecute(input.adapter, { body, idempotencyKey: KEY })).rejects.toThrow(InvalidInputError);
     expect(executePayout).not.toHaveBeenCalled();
+  });
+
+  describe('the amount is bounded by the funds', () => {
+    const withQuote = (i: RunSignedPayoutInput, source: LegQuote['source']): RunSignedPayoutInput => ({
+      ...i,
+      context: { ...i.context, quote: { ...quote, source } },
+    });
+
+    it('signs for a quote below the funded amount, expecting the quote amount', async () => {
+      const { input, signStellar } = setup();
+      await runSignedPayout({ ...input, funded: money('100.1234567', USDC), context: { ...input.context, quote } });
+      expect(signStellar).toHaveBeenCalledWith(
+        account,
+        UNSIGNED,
+        expect.objectContaining({ expected: expect.objectContaining({ amount: quote.source }) }),
+      );
+    });
+
+    // Review probe: a partner answering with twice the requested amount made the
+    // signer expect, and sign, the larger amount.
+    it.each<[string, (i: RunSignedPayoutInput) => RunSignedPayoutInput]>([
+      ['a quote above the funded amount', (i) => withQuote(i, money('200', USDC))],
+      ['a quote one stroop above the funded amount', (i) => withQuote(i, money('100.0000001', USDC))],
+      ['a negative quote amount', (i) => withQuote(i, money('-5', USDC))],
+      ['a zero quote amount', (i) => withQuote(i, money('0', USDC))],
+      ['a quote in another asset', (i) => withQuote(i, money('100', fiat('USD')))],
+      ['a quote for USDC from another issuer', (i) => withQuote(i, money('100', stellarAsset('USDC', DESTINATION)))],
+      ['a malformed quote amount', (i) => withQuote(i, { amount: '1e3', asset: USDC })],
+      ['no funded amount', (i) => ({ ...i, funded: undefined as unknown as RunSignedPayoutInput['funded'] })],
+      ['a malformed funded amount', (i) => ({ ...i, funded: { amount: 'lots', asset: USDC } })],
+    ])('refuses %s before any call', async (_name, change) => {
+      const { input, preparePayout, signStellar } = setup();
+      await expect(runSignedPayout(change(input))).rejects.toThrow(InvalidInputError);
+      expect(preparePayout).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+    });
   });
 
   it.each<[string, (i: RunSignedPayoutInput) => RunSignedPayoutInput]>([
