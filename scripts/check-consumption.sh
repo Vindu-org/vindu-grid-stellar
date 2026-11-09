@@ -178,7 +178,9 @@ money(1, stellarAsset('USDC', 'G'));
 // @ts-expect-error 'paid' is not a transfer state
 export const wrong: TransferState = 'paid';
 // @ts-expect-error a submitter must return a SubmitOutcome, not a bare hash
-export const notASubmitter: StellarSubmitter = { submit: async () => ({ hash: 'x' }) };
+export const notASubmitter: StellarSubmitter = { maxDurationMs: 0, submit: async () => ({ hash: 'x' }) };
+// @ts-expect-error a submitter must say how long one submit can take
+export const noBudget: StellarSubmitter = { submit: async () => ({ status: 'success', hash: 'x' }) };
 EOF
 for resolution in node node16; do
   module=commonjs
