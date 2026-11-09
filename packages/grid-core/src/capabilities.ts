@@ -45,14 +45,28 @@ export interface Corridor {
 
 /** The account model a partner uses on `chain`, or `undefined` when it does not settle there. */
 export function accountModelFor(caps: PartnerCapabilities, chain: Chain): AccountModel | undefined {
-  return caps.chains.includes(chain) ? caps.accounts[chain] : undefined;
+  return caps.chains.includes(chain) ? own(caps.accounts, chain) : undefined;
 }
 
 /** True when the partner settles on `chain` and offers both rails of the corridor. */
 export function supportsCorridor(caps: PartnerCapabilities, chain: Chain, corridor: Corridor): boolean {
   return (
     accountModelFor(caps, chain) !== undefined &&
-    (caps.onRamp[corridor.sourceCurrency] ?? []).includes(corridor.fundingRail) &&
-    (caps.offRamp[corridor.targetCurrency] ?? []).includes(corridor.payoutRail)
+    railsIn(caps.onRamp, corridor.sourceCurrency).includes(corridor.fundingRail) &&
+    railsIn(caps.offRamp, corridor.targetCurrency).includes(corridor.payoutRail)
   );
+}
+
+/**
+ * The registry is plain data keyed by currency, chain and partner. Read only
+ * its own keys, so a key such as `constructor` or `__proto__` finds nothing
+ * instead of a built-in.
+ */
+function own<V>(record: Readonly<Record<string, V>>, key: string): V | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function railsIn<R extends string>(rails: Readonly<Record<string, readonly R[]>>, currency: string): readonly R[] {
+  const list = own(rails, currency);
+  return Array.isArray(list) ? list : [];
 }
