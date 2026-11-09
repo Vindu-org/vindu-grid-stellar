@@ -15,6 +15,7 @@ describe('index exports', () => {
     'PayoutXdrMismatchError',
     'DEFAULT_MAX_FEE_STROOPS',
     'DEFAULT_HORIZON_REQUEST_TIMEOUT_MS',
+    'DEFAULT_HORIZON_MAX_RESPONSE_BYTES',
     'toSubmitOutcome',
     'assessReceiveReadiness',
     'checkReceiveReadiness',
