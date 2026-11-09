@@ -70,7 +70,7 @@ function setup(replies: MockReply[], opts: { clock?: () => number; field?: Signe
     adapter,
     context,
     funded: FUNDED,
-    signing: { signer, submitter: { submit }, destination: TREASURY, onAuthorized, onSubmitted },
+    signing: { signer, submitter: { submit, maxDurationMs: 0 }, destination: TREASURY, onAuthorized, onSubmitted },
     idempotencyKey: KEY,
     now: opts.clock ?? (() => NOW),
   };
@@ -169,6 +169,16 @@ describe('stellar payout flow', () => {
     expect(calls).toHaveLength(2);
     expect(signStellar).toHaveBeenCalledTimes(1);
     expect(submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('retry refuses a pending create whose quote is from another partner, before any call', async () => {
+    const { calls, adapter, onSubmitted, base } = setup([AUTHORIZED]);
+    onSubmitted.mockRejectedValueOnce(new Error('db down'));
+    const e = (await caught(runStellarPayout(base))) as PayoutIncompleteError<ExecutePayoutInput>;
+    const pending = e.pending!;
+    const other = { ...pending, body: { ...pending.body, quote: { ...pending.body.quote, partner: 'other' } } };
+    await expect(retryStellarPayoutCreate(adapter, other)).rejects.toThrow(InvalidInputError);
+    expect(calls).toHaveLength(1);
   });
 
   it.each([
@@ -285,7 +295,7 @@ describe('stellar payout flow', () => {
     it.each(outcomes)('%s', async (_name, submit) => {
       for (const field of ['signed_xdr', 'tx_hash'] as const) {
         const { paths, signStellar, base } = setup([AUTHORIZED, CREATED], { field });
-        const e = (await caught(runStellarPayout(withSigning(base, { submitter: { submit } })))) as PayoutIncompleteError;
+        const e = (await caught(runStellarPayout(withSigning(base, { submitter: { submit, maxDurationMs: 0 } })))) as PayoutIncompleteError;
         expect(e).toBeInstanceOf(PayoutIncompleteError);
         expect(e).toMatchObject({ stage: 'submit', code: 'payout_incomplete', signedXdr: SIGNED, pending: undefined });
         expect(e.message).toMatch(/check the transaction on Stellar/);
@@ -297,7 +307,7 @@ describe('stellar payout flow', () => {
     it('keeps the outcome and hash for the operator', async () => {
       const { base } = setup([AUTHORIZED]);
       const outcome: SubmitOutcome = { status: 'unknown', hash: HASH };
-      const run = withSigning(base, { submitter: { submit: async () => outcome } });
+      const run = withSigning(base, { submitter: { submit: async () => outcome, maxDurationMs: 0 } });
       const e = (await caught(runStellarPayout(run))) as PayoutIncompleteError;
       expect(e).toMatchObject({ txHash: HASH, outcome });
     });

@@ -125,13 +125,22 @@ export async function runStellarPayout(input: RunStellarPayoutInput): Promise<Si
   });
 }
 /**
- * Sends BlindPay's create again with exactly the pending input and key, after
- * `PayoutIncompleteError` with `stage: 'create'`. Use the same adapter
- * configuration, so the body is byte for byte the same. Never signs or submits.
- * BlindPay keeps idempotency keys for 24 hours.
+ * Sends BlindPay's create again with exactly the pending input and key. A
+ * thin alias of core's `retryPayoutExecute`, which checks `pending` first,
+ * including that its quote is from this adapter's id. Use it after
+ * `PayoutIncompleteError` with:
+ * - `stage: 'create'`: BlindPay's create failed; retry as is.
+ * - `stage: 'record'`: the transaction is on the ledger but `onSubmitted`
+ *   threw. Store `awaiting_signature -> payout_submitted`
+ *   (`signed_and_on_chain`) first; if the transfer is already in
+ *   `payout_submitted`, the store is done, so retry straight away. Never
+ *   re-quote.
+ *
+ * Use the same adapter configuration, so the body is byte for byte the
+ * same. Never signs or submits. BlindPay keeps idempotency keys for 24 hours.
  */
 export async function retryStellarPayoutCreate(
-  adapter: Pick<BlindPayAdapter, 'executePayout'>,
+  adapter: Pick<BlindPayAdapter, 'id' | 'executePayout'>,
   pending: PendingPayout<ExecutePayoutInput>,
   logger?: Logger,
 ): Promise<SignedPayoutResult> {
