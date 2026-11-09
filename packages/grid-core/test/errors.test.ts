@@ -99,6 +99,15 @@ describe('shared errors', () => {
     expect(e.message).toMatch(/same body and idempotency key/);
   });
 
+  it('an unrecorded success says the money moved and carries the hash and pending create', () => {
+    const pending = { body: { quote: 'q_1' }, idempotencyKey: 'k1' };
+    const hash = 'ab'.repeat(32);
+    const e = new PayoutIncompleteError({ stage: 'record', signedXdr: 'XDR', txHash: hash, pending });
+    expect(e).toMatchObject({ code: 'payout_not_recorded', stage: 'record', txHash: hash, pending });
+    expect(e.message).toMatch(/money has moved/);
+    expect(e.message).toMatch(/never re-quote/);
+  });
+
   it('an authorization failure keeps the cause code, never its message or the error', () => {
     const cause = new PartnerHttpError({ ...base, status: 400, bodySnippet: 'customer Jane Doe 123' });
     const e = new PayoutAuthorizationError('threw', cause);

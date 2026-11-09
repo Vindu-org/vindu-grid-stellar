@@ -41,6 +41,7 @@ export {
   type PayoutAuthorizationFailure,
   PayoutIncompleteError,
   type PayoutIncompleteInit,
+  type PayoutIncompleteStage,
   type PendingPayout,
   QuoteExpiredError,
   type QuoteExpiredStage,

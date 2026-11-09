@@ -358,8 +358,16 @@ export interface PendingPayout<TBody = unknown> {
   readonly idempotencyKey: string;
 }
 
+/**
+ * Where a payout stopped after something may have moved:
+ * - `submit`: the submit did not reach a confirmed success.
+ * - `record`: the submit succeeded, but storing that failed.
+ * - `create`: the partner payout call failed.
+ */
+export type PayoutIncompleteStage = 'submit' | 'record' | 'create';
+
 export interface PayoutIncompleteInit<TBody = unknown> {
-  readonly stage: 'submit' | 'create';
+  readonly stage: PayoutIncompleteStage;
   readonly signedXdr?: string;
   readonly txHash?: string;
   /** What the submitter reported, for `stage: 'submit'`. Absent when it threw. */
@@ -376,12 +384,18 @@ export interface PayoutIncompleteInit<TBody = unknown> {
  *   success. `outcome` says what is known. Never sign a replacement unless
  *   `canSignReplacement(outcome)` is true; with `unknown` or `rejected` the
  *   first transaction could still land. The partner payout was not created.
+ * - `stage: 'record'`: the transaction is on the ledger as a success (the
+ *   money has moved), but `onSubmitted` threw, so the transfer may still be
+ *   stored in `awaiting_signature`. Store
+ *   `awaiting_signature -> payout_submitted` (`signed_and_on_chain`) with
+ *   `txHash`, then create the payout with `pending` through
+ *   `retryPayoutExecute`. Never re-quote and never sign again.
  * - `stage: 'create'`: the partner call failed after the transaction was
  *   signed (and submitted, when we submit). Retry it with `pending`: the same
  *   body and the same idempotency key.
  */
 export class PayoutIncompleteError<TBody = unknown> extends GridError {
-  readonly stage: 'submit' | 'create';
+  readonly stage: PayoutIncompleteStage;
   readonly signedXdr: string | undefined;
   readonly txHash: string | undefined;
   readonly outcome: SubmitOutcome | undefined;
@@ -392,7 +406,9 @@ export class PayoutIncompleteError<TBody = unknown> extends GridError {
       'payout_not_recorded',
       init.stage === 'submit'
         ? `Stellar submit ended ${init.outcome?.status ?? 'without an outcome'}: check the transaction on Stellar before anything else; do not sign again`
-        : 'Payout create failed: retry it with the same body and idempotency key',
+        : init.stage === 'record'
+          ? 'The payout transaction is on Stellar but storing payout_submitted failed: the money has moved; store it, then retry the create with the pending body and key; never re-quote'
+          : 'Payout create failed: retry it with the same body and idempotency key',
       { cause: init.cause },
     );
     this.stage = init.stage;
