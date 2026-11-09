@@ -19,6 +19,7 @@ import {
   sameAsset,
 } from '@vindu/grid-core';
 
+import { short } from './format';
 import { type StellarSdk, Transaction, TransactionBuilder } from './sdk';
 import { decodePayment } from './stellar-tx';
 
@@ -39,7 +40,7 @@ export class TestKeySigner implements Signer {
   async signStellar(account: AccountRef, unsignedXdr: string, context: SigningContext): Promise<string> {
     assertSigningAllowed(context, new Date(this.now()));
     if (account.chain !== 'stellar' || account.address !== this.address) {
-      throw new SigningNotAllowedError(`This signer holds no key for ${account.address}`);
+      throw new SigningNotAllowedError(`This signer holds no key for ${short(account.address)}`);
     }
 
     let tx;
@@ -51,7 +52,7 @@ export class TestKeySigner implements Signer {
     const { expected } = context;
     if (tx.source !== account.address) throw new SigningNotAllowedError('Source account does not match');
     if (tx.destination !== expected.destination) {
-      throw new SigningNotAllowedError(`Destination ${tx.destination} is not the expected ${expected.destination}`);
+      throw new SigningNotAllowedError(`Destination ${short(tx.destination)} is not the expected ${short(expected.destination)}`);
     }
     if (!sameAsset(tx.amount.asset, expected.amount.asset)) {
       throw new SigningNotAllowedError(`Asset ${assetKey(tx.amount.asset)} is not the expected asset`);
