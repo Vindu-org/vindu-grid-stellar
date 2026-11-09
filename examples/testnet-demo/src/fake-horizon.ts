@@ -9,7 +9,8 @@
  *
  * `timeOutNextSubmission()` makes the next submission land on the ledger but
  * answer like a Horizon 504, to show what the submitter does when it does
- * not know whether a transaction landed.
+ * not know whether a transaction landed. `rejectNextSubmission()` makes the
+ * next submission fail without touching the ledger, like a Horizon 400.
  */
 import type {
   HorizonAccount,
@@ -35,6 +36,7 @@ export class FakeHorizon implements HorizonGateway {
   private readonly transactions = new Map<string, HorizonTransactionFound>();
   private ledger = 1000;
   private timeoutNext = false;
+  private rejectNext: string | undefined;
   /** Every envelope submitted, in order. */
   readonly submissions: string[] = [];
   /** Every hash looked up, in order. */
@@ -53,6 +55,11 @@ export class FakeHorizon implements HorizonGateway {
   /** The next submission lands on the ledger, but Horizon answers 504. */
   timeOutNextSubmission(): void {
     this.timeoutNext = true;
+  }
+
+  /** The next submission is refused with `transactionCode` and never applied. */
+  rejectNextSubmission(transactionCode = 'tx_insufficient_fee'): void {
+    this.rejectNext = transactionCode;
   }
 
   /** The newest ledger, closed at the demo clock's current second. */
@@ -74,6 +81,11 @@ export class FakeHorizon implements HorizonGateway {
 
   async submitTransaction(signedXdr: string): Promise<HorizonSubmitResponse> {
     this.submissions.push(signedXdr);
+    if (this.rejectNext !== undefined) {
+      const code = this.rejectNext;
+      this.rejectNext = undefined;
+      return reject(code);
+    }
     const applied = this.apply(signedXdr);
     if (applied.kind === 'rejected') return applied;
     if (this.timeoutNext) {
