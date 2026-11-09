@@ -1,0 +1,35 @@
+{
+  "name": "@vindu/grid-stellar",
+  "version": "0.1.0",
+  "description": "Horizon read layer, payment matching, account checks and safe submission of signed transactions for two-leg transfers settled on Stellar.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vindu-org/vindu-grid-stellar.git",
+    "directory": "packages/grid-stellar"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.4.0",
+    "@vindu/grid-core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/jest": "^29",
+    "@types/node": "^22",
+    "jest": "^29",
+    "ts-jest": "^29",
+    "typescript": "^5.5"
+  }
+}
