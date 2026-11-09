@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "jest"],
+    // The demo runs from the package sources (tsx and Jest both read these
+    // paths), so it needs no build of the packages first.
+    "paths": {
+      "@vindu/grid-core": ["../../packages/grid-core/src"],
+      "@vindu/grid-stellar": ["../../packages/grid-stellar/src"],
+      "@vindu/grid-blindpay": ["../../packages/grid-blindpay/src"]
+    }
+  },
+  "include": ["src", "test"]
+}
