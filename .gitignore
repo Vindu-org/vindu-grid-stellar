@@ -28,3 +28,6 @@ target/
 .DS_Store
 .idea/
 .vscode/
+
+# Copied from the root LICENSE by each package prepack (see scripts/prepack-package.cjs)
+packages/*/LICENSE
