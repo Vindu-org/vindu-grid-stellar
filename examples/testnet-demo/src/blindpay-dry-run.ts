@@ -9,7 +9,7 @@
  */
 import { createBlindPayAdapter, runStellarPayout } from '@vindu/grid-blindpay';
 import { type AccountRef, money } from '@vindu/grid-core';
-import { submitSignedTransaction } from '@vindu/grid-stellar';
+import { createStellarSubmitter } from '@vindu/grid-stellar';
 
 import { fmt, short } from './format';
 import { buildPaymentXdr } from './stellar-tx';
@@ -31,6 +31,8 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
   const account: AccountRef = { chain: 'stellar', address: world.clientAddress, partnerAccountId: WALLET_ID };
   const expiresAt = now() + 5 * 60 * 1000;
   const usdc = (amount: string) => money(amount, world.usdc);
+  const usdcIssuer = world.usdc.issuer;
+  if (usdcIssuer === undefined) throw new Error('The demo USDC has an issuer');
   const requests: string[] = [];
 
   // Answers BlindPay might give, keyed by path. The authorize answer is a
@@ -78,7 +80,8 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
   log('BlindPay dry run: @vindu/grid-blindpay against a mocked fetch (no network, placeholder credentials)');
   const adapter = createBlindPayAdapter(
     { apiKey: 'dry-run-placeholder', instanceId: 'in_demo', baseUrl: 'https://blindpay.invalid', fetch, now },
-    { network: 'stellar_testnet' },
+    // The USDC issuer this demo accepts: the throwaway issuer of the run.
+    { network: 'stellar_testnet', assetIssuers: { USDC: usdcIssuer } },
   );
 
   const fundingQuote = await adapter.quoteFunding({
@@ -108,37 +111,23 @@ export async function runBlindPayDryRun(log: Log, now: () => number = Date.now):
   });
   log(`  payout quote ${payoutQuote.id}: ${fmt(payoutQuote.source)} -> ${fmt(payoutQuote.target)}`);
 
-  // authorize -> sign (with checks) -> submit (hash checked) -> create
+  // authorize -> check quote and state -> sign once -> submit (hash checked) -> create
   const result = await runStellarPayout({
-    client: adapter.client,
-    quoteId: payoutQuote.id,
-    senderAddress: world.clientAddress,
-    walletId: WALLET_ID,
+    adapter,
     signer: world.signer,
-    signingContext: {
+    submitter: createStellarSubmitter({ gateway: world.ledger, networkPassphrase: world.networkPassphrase, now }),
+    context: {
       transferId: 'demo-transfer-2',
       state: 'awaiting_signature',
-      quoteId: payoutQuote.id,
-      expiresAt: payoutQuote.expiresAt,
-      expected: { source: world.clientAddress, destination: world.partner.treasuryAddress, amount: payoutQuote.source },
-    },
-    submitter: {
-      async submit(signedXdr) {
-        const submitted = await submitSignedTransaction({
-          gateway: world.ledger,
-          signedXdr,
-          networkPassphrase: world.networkPassphrase,
-          now,
-        });
-        if (submitted.status !== 'success') throw new Error(`Submit ended ${submitted.status}`);
-        return { hash: submitted.hash };
-      },
+      quote: payoutQuote,
+      account,
+      destination: world.partner.treasuryAddress,
     },
     idempotencyKey: 'demo-transfer-2-payout',
     now,
   });
-  log(`  payout ${result.payout.id} ${result.payout.status}, tx ${short(result.txHash ?? '')}`);
-  return { requests, payoutId: result.payout.id, txHash: result.txHash };
+  log(`  payout ${result.leg.id} created after a confirmed submit, tx ${short(result.txHash ?? '')}`);
+  return { requests, payoutId: result.leg.id, txHash: result.txHash };
 }
 
 /** The JSON body with long values (XDR, addresses) shortened. */
