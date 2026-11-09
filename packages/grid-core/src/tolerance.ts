@@ -29,6 +29,7 @@ export type ToleranceResult =
  * Checks a fresh payout quote against the estimate shown to the client.
  * Within means at most `toleranceBps` away; exactly on the boundary passes.
  * The decision is exact decimal arithmetic; `deviationBps` is for display.
+ * A quote of zero or less is never within tolerance, whatever the tolerance.
  *
  * @param toleranceBps integer basis points, e.g. 30 for 0.30%.
  * @throws {AssetMismatchError} when the two amounts are in different assets.
@@ -44,7 +45,7 @@ export function checkPayoutTolerance(
     throw new InvalidMoneyError('Estimated payout amount must be positive');
   }
   const deviationBps = relativeDifferenceBps(quotedTarget, estimatedTarget);
-  if (exceedsBps(quotedTarget, estimatedTarget, toleranceBps)) {
+  if (!isPositive(quotedTarget) || exceedsBps(quotedTarget, estimatedTarget, toleranceBps)) {
     return { ok: false, deviationBps, nextState: 'needs_attention', reason: 'quote_outside_tolerance' };
   }
   return { ok: true, deviationBps };

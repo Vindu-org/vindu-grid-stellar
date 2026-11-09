@@ -49,6 +49,12 @@ describe('tolerance', () => {
     expect(() => checkPayoutTolerance(money('1', usdc1), money('1', usdc2), 30)).toThrow(AssetMismatchError);
   });
 
+  it('never accepts a zero or negative quote, even with a huge tolerance', () => {
+    expect(checkPayoutTolerance(usd('1'), usd('0'), 30)).toMatchObject({ ok: false, nextState: 'needs_attention' });
+    expect(checkPayoutTolerance(usd('1'), usd('-1'), 30_000)).toMatchObject({ ok: false, deviationBps: 20000 });
+    expect(checkPayoutTolerance(usd('1'), usd('0'), 1_000_000)).toMatchObject({ ok: false });
+  });
+
   it('rejects a non-positive estimate and a bad tolerance', () => {
     expect(() => checkPayoutTolerance(usd('0'), usd('1'), 30)).toThrow(InvalidMoneyError);
     expect(() => checkPayoutTolerance(usd('1'), usd('1'), -1)).toThrow(RangeError);
