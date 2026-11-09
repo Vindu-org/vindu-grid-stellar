@@ -9,10 +9,11 @@
  * The fresh payout quote must be within the price tolerance of the estimate
  * the client saw. The flow runs from `payout_quoted`: the partner authorizes
  * and returns an unsigned transaction, and only then does the transfer move
- * to `awaiting_signature` (in `onAuthorized`). The signer checks the
- * transaction before signing, once; the signed transaction is submitted with
- * the hash checked before any retry; only a confirmed success lets the
- * partner payout be created.
+ * to `awaiting_signature` (in `onAuthorized`, a compare-and-set). The signer
+ * checks the transaction before signing, once; the signed transaction is
+ * submitted with the hash checked before any retry; only a confirmed
+ * success is stored as `payout_submitted` (in `onSubmitted`), and only then
+ * is the partner payout created.
  *
  * Where the flow can stop, the transfer takes the failure edge from core's
  * table, and nothing is re-signed, refunded or rerouted automatically:
@@ -170,9 +171,15 @@ export async function runPayoutLeg(
         submitter,
         submission: 'client_submits',
         destination,
-        // The partner authorized: store awaiting_signature before anything is signed.
+        // The partner authorized: store awaiting_signature before anything is
+        // signed, as a compare-and-set, so a second run for this transfer fails here.
         onAuthorized: async () => {
-          transfer.move('awaiting_signature', `${partner.id} pays out from the client's own account, so the client's key holder signs`);
+          transfer.compareAndMove(
+            'payout_quoted',
+            'awaiting_signature',
+            `${partner.id} pays out from the client's own account, so the client's key holder signs; stored as a compare-and-set`,
+            'signed_payout_flow',
+          );
           // A transaction that pays someone other than the partner is refused.
           await expectRefusal(log, 'XDR that pays another account', () =>
             signer.signStellar(ctx.account, stranger, signingContextFor({ ...payoutContext, destination }, transfer.state)),
@@ -187,7 +194,12 @@ export async function runPayoutLeg(
           ),
         // The money moved: the transfer is payout_submitted before the partner hears about it.
         onSubmitted: (outcome) => {
-          transfer.move('payout_submitted', `tx ${short(outcome.hash)} confirmed on the ledger`);
+          transfer.compareAndMove(
+            'awaiting_signature',
+            'payout_submitted',
+            `tx ${short(outcome.hash)} confirmed on the ledger, stored before ${partner.id} is told`,
+            'signed_and_on_chain',
+          );
         },
       },
     });
