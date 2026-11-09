@@ -186,6 +186,24 @@ describe('adapter payout corridor', () => {
   });
 });
 
+describe('adapter payout of a funded balance', () => {
+  it('floors a sub-cent funded amount to cents and quotes what will move', async () => {
+    const { adapter, calls } = setup();
+    const quote = await adapter.quotePayout({
+      customerId: CUSTOMER_ID, account, source: money('99.9876543', usdb), targetAsset: usd, rail: 'wire', beneficiaryId: BANK_ACCOUNT_ID,
+    });
+    expect(calls[0]?.body).toMatchObject({ request_amount: 9_998 });
+    expect(quote.source).toEqual(money('99.98', usdb));
+  });
+
+  it('still refuses a sub-cent funding amount instead of rounding it', async () => {
+    const { adapter } = setup();
+    await expect(
+      adapter.quoteFunding({ customerId: CUSTOMER_ID, account, source: money('10.005', brl), targetAsset: usdb, rail: 'pix' }),
+    ).rejects.toThrow(/sub-cent/);
+  });
+});
+
 describe('adapter stablecoins', () => {
   const fundingInput = { customerId: CUSTOMER_ID, account, source: money('100', brl), rail: 'pix' } as const;
   const payoutInput = { customerId: CUSTOMER_ID, account, targetAsset: usd, rail: 'wire', beneficiaryId: BANK_ACCOUNT_ID } as const;

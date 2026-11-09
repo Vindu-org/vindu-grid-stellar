@@ -22,7 +22,7 @@ import {
   type PartnerAdapter,
 } from '@vindu/grid-core';
 
-import { fromBlindPayAmount, toBlindPayAmount } from './amounts';
+import { floorToBlindPayAmount, fromBlindPayAmount, toBlindPayAmount } from './amounts';
 import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
@@ -140,7 +140,9 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         bank_account_id: input.beneficiaryId,
         currency_type: 'sender',
         cover_fees: coverFees,
-        request_amount: toBlindPayAmount(input.source),
+        // A funded balance can have sub-cent digits; BlindPay takes cents. Round
+        // down: the rest stays in the account. The quote's source is what moves.
+        request_amount: floorToBlindPayAmount(input.source),
         network: options.network,
         token: coins.tokenFor(input.source.asset),
         ...feeId('payout', undefined),
