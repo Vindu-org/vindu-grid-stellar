@@ -53,7 +53,9 @@ const layer = createReadLayer({
 await layer.pollAccount(registeredAccount);
 ```
 
-A record the layer cannot read (for example an amount that is not a valid decimal, or no string `id`, `paging_token` or `transaction_hash`) never blocks the cursor. It goes to `onMalformed(record, error)` and the poll moves on; by default that logs a warning with the operation id and transaction hash only. Throw from `onMalformed` to stop instead, with the cursor left before that record. Positions past skipped records are stored once per page, not once per record. The cursor only ever moves to a record's own paging token: a record without one never clears it or sends the next page back to the start.
+A record the layer cannot read (for example an amount that is not a valid decimal, no string `id` or `transaction_hash`, or a `paging_token` that is not decimal digits, such as an empty one) never blocks the cursor. It goes to `onMalformed(record, error)` and the poll moves on; by default that logs a warning with the operation id and transaction hash only. Throw from `onMalformed` to stop instead, with the cursor left before that record. Positions past skipped records are stored once per page, not once per record.
+
+The cursor only ever moves to a record's own position: its paging token when that is decimal digits, or else, for a malformed record, its operation id when that is (Horizon uses the same number for both). So a page made only of malformed records still moves the cursor past them, and a record with neither never clears the cursor or sends the next page back to the start. A full page that does not move the position at all cannot be passed: `pollAccount` and `reconcile` then throw instead of reading the same page again with `hasMore` set.
 
 Follow the accounts you registered for your clients, not a partner's shared treasury address. Transactions a partner builds for you may not carry a memo, so the registered account is what ties a payment to a client.
 
