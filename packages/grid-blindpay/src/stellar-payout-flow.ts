@@ -24,6 +24,7 @@ import {
   InvalidInputError,
   type Logger,
   PayoutIncompleteError,
+  type PayoutSubmission,
   QuoteExpiredError,
   type Signer,
   type SigningContext,
@@ -34,7 +35,8 @@ import {
 import type { BlindPayClient } from './client';
 import type { CreateStellarPayoutRequest, Payout } from './types';
 
-export type PayoutSubmission = 'client_submits' | 'partner_submits';
+/** Core's submission modes, re-exported so existing imports keep working. */
+export type { PayoutSubmission };
 export type SignedTransactionField = 'signed_xdr' | 'tx_hash';
 
 /** Puts a signed transaction on Stellar. `@vindu/grid-stellar` provides one; any object of this shape works. */
