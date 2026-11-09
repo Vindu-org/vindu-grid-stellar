@@ -68,6 +68,17 @@ describe('client endpoints', () => {
     expect(calls[3]?.headers['Idempotency-Key']).toBe(del.idempotencyKey);
   });
 
+  it('partner fees: create and delete send the caller Idempotency-Key and return it', async () => {
+    const { client, calls } = setup([{ body: { id: 'pf_1' } }, { body: { id: 'pf_1' }, headers: { 'Idempotency-Replayed': 'true' } }, {}]);
+    const fee = { name: 'spread', payin_percentage_fee: 50, payin_flat_fee: 0, payout_percentage_fee: 0, payout_flat_fee: 0 };
+    const first = await client.partnerFees.create(fee, { idempotencyKey: 'fee-spread-50' });
+    const again = await client.partnerFees.create(fee, { idempotencyKey: 'fee-spread-50' });
+    const del = await client.partnerFees.delete('pf_1', { idempotencyKey: 'fee-delete-1' });
+    expect([first.idempotencyKey, again.idempotencyKey, del.idempotencyKey]).toEqual(['fee-spread-50', 'fee-spread-50', 'fee-delete-1']);
+    expect(calls.map((c) => c.headers['Idempotency-Key'])).toEqual(['fee-spread-50', 'fee-spread-50', 'fee-delete-1']);
+    expect(again.replayed).toBe(true);
+  });
+
   it('stellar payouts: create requires an Idempotency-Key; the read path is isolated', async () => {
     const { client, calls } = setup([]);
     const body = { quote_id: 'qu_1', signed_transaction: 'AAAA', sender_wallet_address: STELLAR_ADDRESS };

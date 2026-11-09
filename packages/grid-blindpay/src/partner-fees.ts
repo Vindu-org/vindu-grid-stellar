@@ -4,6 +4,11 @@ import { assertId } from './ids';
 import type { CreatePartnerFeeRequest, ListParams, Page, PartnerFee } from './types';
 
 export interface PartnerFeesApi {
+  /**
+   * Pass your own `idempotencyKey` and store it, so a retry after a timeout
+   * replays the first create instead of making a second fee. Generated (and
+   * returned) when absent.
+   */
   create(input: CreatePartnerFeeRequest, opts?: IdempotencyOptions): Promise<Created<PartnerFee>>;
   list(params?: ListParams): Promise<Page<PartnerFee>>;
   get(partnerFeeId: string): Promise<PartnerFee>;
