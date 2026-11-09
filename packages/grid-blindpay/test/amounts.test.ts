@@ -1,6 +1,6 @@
 import { InvalidInputError, fiat, money } from '@vindu/grid-core';
 
-import { DEV_SENTINEL_AMOUNTS, fromBlindPayAmount, toBlindPayAmount } from '../src/amounts';
+import { DEV_SENTINEL_AMOUNTS, floorToBlindPayAmount, fromBlindPayAmount, toBlindPayAmount } from '../src/amounts';
 
 const usdc = fiat('USDC');
 const brl = fiat('BRL');
@@ -43,5 +43,24 @@ describe('amounts', () => {
 
   it.each([1.5, Number.NaN, 2 ** 53])('refuses %p minor units from the API', (minor) => {
     expect(() => fromBlindPayAmount(minor, usdc)).toThrow(InvalidInputError);
+  });
+
+  it.each([
+    ['100.1234567', 10_012],
+    ['100.1299999', 10_012],
+    ['100.12', 10_012],
+    ['0.01', 1],
+    ['0.0199999', 1],
+    ['90071992547409.919', Number.MAX_SAFE_INTEGER],
+  ])('floors %s to %d cents for a payout, never up', (amount, minor) => {
+    expect(floorToBlindPayAmount(money(amount, usdc))).toBe(minor);
+  });
+
+  it.each(['0.0099999', '0', '-1'])('refuses to floor %s to nothing', (amount) => {
+    expect(() => floorToBlindPayAmount(money(amount, usdc))).toThrow(InvalidInputError);
+  });
+
+  it('refuses to floor an amount beyond a safe integer', () => {
+    expect(() => floorToBlindPayAmount(money('90071992547409.92', usdc))).toThrow(/too large/);
   });
 });
