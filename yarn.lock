@@ -1074,6 +1074,12 @@ __metadata:
 "@vindu/grid-core@workspace:packages/grid-core":
   version: 0.0.0-use.local
   resolution: "@vindu/grid-core@workspace:packages/grid-core"
+  dependencies:
+    "@types/jest": "npm:^29"
+    "@types/node": "npm:^22"
+    jest: "npm:^29"
+    ts-jest: "npm:^29"
+    typescript: "npm:^5.5"
   languageName: unknown
   linkType: soft
 
