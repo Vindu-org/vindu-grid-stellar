@@ -1,0 +1,59 @@
+# testnet-demo
+
+A full two-leg transfer, from BRL by PIX to USDC on Stellar to USD by wire, run offline. It uses the real code paths from `@vindu/grid-core`, `@vindu/grid-stellar` and `@vindu/grid-blindpay`. Only the outside world is simulated: the partners, the Horizon server and the keys.
+
+It needs no network, no credentials and no environment variables. Every key is a throwaway made with `Keypair.random()` for the run.
+
+## Run it
+
+```sh
+corepack enable
+yarn install
+yarn workspace testnet-demo start
+```
+
+The demo runs from the package sources with `tsx`, so it needs no `yarn build` first. It prints one line per transfer state change and exits 0 when the transfer reaches `completed`.
+
+Add `--blindpay-dry-run` to also run the flow through the BlindPay client against a mocked `fetch`. It prints each request BlindPay would receive (method, path and body, never headers):
+
+```sh
+yarn workspace testnet-demo start --blindpay-dry-run
+```
+
+`yarn workspace testnet-demo test` runs the same demo as a Jest smoke test.
+
+## What it shows
+
+| Step | What runs |
+|---|---|
+| Account check | `checkReceiveReadiness`: the client's account has a USDC trustline and enough XLM for its reserve. |
+| Routing | `selectRoute` over two mock partners. `mock-partner` settles on Stellar with external accounts; `mock-offchain` has no Stellar and a slightly better price. The Stellar route wins with reason `stellar_priority`, and the price gap is printed. |
+| States | The transfer moves `quoted -> awaiting_pix -> funding -> funded -> payout_quoted -> awaiting_signature -> payout_submitted -> payout_processing -> completed`, each step through core's `transition`. |
+| Funding | The mock partner returns a fake PIX code, then sends USDC from its treasury on the in-memory ledger. The read layer (`createReadLayer` with `InMemoryCursorStore`) sees the payment, `matchPaymentToLeg` matches it, and `partnerAndChainAgree` confirms the partner's figure and the chain agree before `funded`. |
+| Tolerance | `checkPayoutTolerance` compares the fresh payout quote with the estimate the client saw before `payout_quoted`. |
+| Signing | The mock partner returns a real unsigned testnet transaction. The test-key signer (`custody: 'test_key'`) calls `assertSigningAllowed`, decodes the XDR and checks source, destination, asset and amount before it signs. The demo shows it refusing twice: once when asked too early, once for a transaction that pays another account. |
+| Submit | `submitSignedTransaction` against the in-memory Horizon. Horizon is set to time out once after the transaction lands, so the submitter checks the hash, finds it and returns `success` without a second signature. |
+| Payout | The partner gets the signed transaction and its hash. The read layer resumes from its cursor and matches the outgoing payment on hash and memo. |
+
+## Files
+
+| File | Contents |
+|---|---|
+| `src/demo.ts` | `runDemo`: setup, routing, then the two legs. |
+| `src/funding-leg.ts`, `src/payout-leg.ts` | The two legs, step by step. |
+| `src/mock-partner.ts` | `MockPartner`, a core `PartnerAdapter`, and both partners' capabilities as data. |
+| `src/test-key-signer.ts` | `TestKeySigner`, a core `Signer` with a throwaway key. |
+| `src/fake-horizon.ts` | `FakeHorizon`, an in-memory `HorizonGateway` that checks signatures, sequence numbers and time bounds. |
+| `src/chain-watch.ts` | The read layer over the client's account, and leg matching. |
+| `src/blindpay-dry-run.ts` | The `--blindpay-dry-run` flow. |
+
+## Pointing it at real testnet
+
+This example stays offline on purpose. To run the same flow against real testnet, your application swaps the simulated pieces for real ones and passes every key and URL as an argument:
+
+- **Partner:** `createBlindPayAdapter` with the API key and instance id of a BlindPay development instance, and `{ network: 'stellar_testnet' }`. Development instances settle `USDB` instead of `USDC`; see the `@vindu/grid-blindpay` README.
+- **Horizon:** `createHorizonGateway(STELLAR_TESTNET)` in place of `FakeHorizon`.
+- **Accounts:** a funded testnet account with a trustline for the instance's token, registered with BlindPay as the client's wallet.
+- **Signer:** a `Signer` your application provides, holding the account's key. The test-key signer here is for demos only.
+
+Your application reads its secrets and passes them in. Nothing in this repository reads environment variables or key files.
