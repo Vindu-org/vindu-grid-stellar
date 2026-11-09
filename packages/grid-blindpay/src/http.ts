@@ -7,6 +7,8 @@
  *   it and retry with the same key and body.
  * - One `onCall` report per request with metadata only: method, templated path,
  *   status, duration and the ids found in the path. Never the key or a body.
+ * - Redirects are never followed (`redirect: 'error'`): a redirect would send
+ *   the body again to a URL BlindPay did not choose for us.
  * - Non-2xx becomes a {@link BlindPayHttpError}. There is no retry loop here:
  *   whether and when to retry is the caller's decision.
  */
@@ -113,6 +115,8 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
         headers,
         ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
         signal: controller.signal,
+        // A redirect would re-send the body (and maybe the key) to another URL.
+        redirect: 'error',
       });
       text = await response.text();
     } catch (cause) {

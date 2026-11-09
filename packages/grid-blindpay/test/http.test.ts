@@ -1,3 +1,6 @@
+import { type AddressInfo } from 'node:net';
+import { type IncomingMessage, type Server, type ServerResponse, createServer } from 'node:http';
+
 import { InvalidConfigError, PartnerHttpError } from '@vindu/grid-core';
 
 import { resolveConfig } from '../src/config';
@@ -133,6 +136,52 @@ describe('client http', () => {
     expect(configErrors.every((e) => e instanceof InvalidConfigError)).toBe(true);
     expect(everything).not.toContain(API_KEY);
     expect(everything).not.toContain('SECRET_KEY');
+  });
+});
+
+describe('client redirects', () => {
+  const servers: Server[] = [];
+  const listen = (handler: (req: IncomingMessage, res: ServerResponse) => void) =>
+    new Promise<number>((resolve) => {
+      const server = createServer(handler);
+      servers.push(server);
+      server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port));
+    });
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
+  });
+
+  it('does not follow a 307, so the body is never sent to the new location', async () => {
+    const stolen: string[] = [];
+    const evilPort = await listen((req, res) => {
+      let body = '';
+      req.on('data', (d: Buffer) => (body += d.toString()));
+      req.on('end', () => {
+        stolen.push(`${req.method} ${String(req.headers.authorization)} ${body}`);
+        res.end('{"id":"re_1"}');
+      });
+    });
+    const apiPort = await listen((req, res) => {
+      req.resume();
+      res.writeHead(307, { location: `http://127.0.0.1:${evilPort}/steal` });
+      res.end();
+    });
+    const sent: RequestInit[] = [];
+    const fetchSpy = (url: string, init: RequestInit) => {
+      sent.push(init);
+      return fetch(url, init);
+    };
+    const http = createBlindPayHttp({ apiKey: API_KEY, instanceId: INSTANCE_ID, baseUrl: `http://127.0.0.1:${apiPort}`, fetch: fetchSpy });
+    const e = await caught(http.request({ method: 'POST', path: '/customers', body: { tax_id: '000.000.000-00' }, idempotencyKey: 'k' }));
+    expect(e).toBeInstanceOf(PartnerHttpError);
+    expect(sent[0]?.redirect).toBe('error');
+    expect(stolen).toEqual([]);
+  });
+
+  it('treats a 3xx from a fetch that ignores the redirect option as a failure', async () => {
+    const { fetch } = mockFetch([{ status: 307, headers: { location: 'https://elsewhere.example/x' } }]);
+    const e = await caught(createBlindPayHttp(config(fetch)).request({ method: 'GET', path: '/x' }));
+    expect(e).toMatchObject({ status: 307 });
   });
 });
 
