@@ -12,6 +12,7 @@ import type { ExecutePayoutInput, LegQuote, LegRef, PayoutAuthorization } from '
 import {
   DEFAULT_EXPIRY_MARGIN_MS,
   type RunSignedPayoutInput,
+  type SignedPayoutSigning,
   retryPayoutExecute,
   runSignedPayout,
 } from '../src/signed-payout';
@@ -68,16 +69,21 @@ function setup(options: { auth?: PayoutAuthorization; outcome?: SubmitOutcome; c
   });
   const signer: Signer = { custody: 'test_key', signStellar };
   const input: RunSignedPayoutInput = {
-    adapter: { preparePayout, executePayout },
-    signer,
-    submitter: { submit },
-    submission: 'client_submits',
-    context: { transferId: 'tr_1', state: 'payout_quoted', quote, account, destination: DESTINATION },
+    adapter: { id: 'p', preparePayout, executePayout },
+    context: { transferId: 'tr_1', state: 'payout_quoted', quote, account },
+    signing: { signer, submitter: { submit }, submission: 'client_submits', destination: DESTINATION, onAuthorized },
     now: options.clock ?? (() => NOW),
     idempotencyKey: KEY,
-    onAuthorized,
   };
   return { input, order, store, preparePayout, onAuthorized, executePayout, signStellar, submit };
+}
+
+/** The input with some signing fields changed. */
+function withSigning(
+  input: RunSignedPayoutInput,
+  change: { [K in keyof SignedPayoutSigning]?: SignedPayoutSigning[K] | undefined },
+): RunSignedPayoutInput {
+  return { ...input, signing: { ...input.signing, ...change } as SignedPayoutSigning };
 }
 
 async function caught(p: Promise<unknown>): Promise<unknown> {
@@ -119,7 +125,7 @@ describe('signed payout', () => {
 
   it('with partner_submits, hands the signed XDR to the partner and never submits', async () => {
     const { input, order, executePayout } = setup();
-    const res = await runSignedPayout({ ...input, submission: 'partner_submits' });
+    const res = await runSignedPayout(withSigning(input, { submission: 'partner_submits' }));
     expect(order).toEqual(['prepare', 'authorized', 'sign', 'execute']);
     expect(executePayout).toHaveBeenCalledWith({ quote, account, transferId: 'tr_1', idempotencyKey: KEY, signedXdr: SIGNED });
     expect(res.txHash).toBeUndefined();
@@ -135,7 +141,36 @@ describe('signed payout', () => {
     expect(res).toMatchObject({ leg: LEG, authorization: 'none' });
   });
 
+  it('needs no signing inputs when the partner needs no signature', async () => {
+    const { input, order, executePayout } = setup({ auth: { kind: 'none' } });
+    const { signing: _s, ...noSigning } = input;
+    const res = await runSignedPayout(noSigning);
+    expect(order).toEqual(['prepare', 'execute']);
+    expect(executePayout).toHaveBeenCalledWith({ quote, account, transferId: 'tr_1', idempotencyKey: KEY });
+    expect(res).toMatchObject({ leg: LEG, authorization: 'none' });
+  });
+
   describe('authorization failures', () => {
+    it('refuses a transaction to sign when the run has no signing inputs, still in payout_quoted', async () => {
+      const { input, store, executePayout } = setup();
+      const { signing: _s, ...noSigning } = input;
+      const e = await caught(runSignedPayout(noSigning));
+      expect(e).toBeInstanceOf(PayoutAuthorizationError);
+      expect(e).toMatchObject({ failure: 'invalid_authorization' });
+      expect(store.state).toBe('payout_quoted');
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it('refuses a Stellar transaction for an account on another chain, before onAuthorized', async () => {
+      const { input, onAuthorized, signStellar } = setup();
+      const other = { ...input, context: { ...input.context, account: { chain: 'other-chain', address: SOURCE } } };
+      const e = await caught(runSignedPayout(other));
+      expect(e).toBeInstanceOf(PayoutAuthorizationError);
+      expect(e).toMatchObject({ failure: 'invalid_authorization' });
+      expect(onAuthorized).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+    });
+
     it.each<[string, unknown]>([
       ['another kind', { kind: 'evm_tx' }],
       ['an empty XDR', { kind: 'stellar_xdr', unsignedXdr: '' }],
@@ -274,7 +309,7 @@ describe('signed payout', () => {
         'a failed create with partner_submits',
         (s) => {
           s.executePayout.mockRejectedValueOnce(new Error('503'));
-          return { ...s.input, submission: 'partner_submits' };
+          return withSigning(s.input, { submission: 'partner_submits' });
         },
         { type: PayoutIncompleteError, stage: 'create' },
         ['awaiting_signature', 'needs_attention', 'submission_rejected_or_unknown'],
@@ -316,7 +351,7 @@ describe('signed payout', () => {
 
     it('may return the state synchronously', async () => {
       const { input, signStellar } = setup();
-      await runSignedPayout({ ...input, onAuthorized: () => 'awaiting_signature' });
+      await runSignedPayout(withSigning(input, { onAuthorized: () => 'awaiting_signature' }));
       expect(signStellar).toHaveBeenCalledTimes(1);
     });
   });
@@ -475,12 +510,12 @@ describe('signed payout', () => {
     const onSigned = jest.fn(async (xdr: string) => {
       ok.order.push(`stored ${xdr}`);
     });
-    await runSignedPayout({ ...ok.input, onSigned });
+    await runSignedPayout(withSigning(ok.input, { onSigned }));
     expect(ok.order).toEqual(['prepare', 'authorized', 'sign', `stored ${SIGNED}`, 'submit', 'execute']);
 
     const failing = setup();
     await expect(
-      runSignedPayout({ ...failing.input, onSigned: () => Promise.reject(new Error('db down')) }),
+      runSignedPayout(withSigning(failing.input, { onSigned: () => Promise.reject(new Error('db down')) })),
     ).rejects.toThrow('db down');
     expect(failing.submit).not.toHaveBeenCalled();
     expect(failing.executePayout).not.toHaveBeenCalled();
@@ -525,11 +560,15 @@ describe('signed payout', () => {
   });
 
   it.each<[string, (i: RunSignedPayoutInput) => RunSignedPayoutInput]>([
-    ['client_submits without a submitter', ({ submitter: _s, ...rest }) => rest],
+    ['client_submits without a submitter', (i) => withSigning(i, { submitter: undefined })],
     ['an empty idempotency key', (i) => ({ ...i, idempotencyKey: '' })],
-    ['an unknown submission mode', (i) => ({ ...i, submission: 'nobody' as RunSignedPayoutInput['submission'] })],
+    ['an unknown submission mode', (i) => withSigning(i, { submission: 'nobody' as SignedPayoutSigning['submission'] })],
     ['a funding quote', (i) => ({ ...i, context: { ...i.context, quote: { ...quote, kind: 'funding' } } })],
-    ['no onAuthorized', ({ onAuthorized: _a, ...rest }) => rest as RunSignedPayoutInput],
+    ['no onAuthorized', (i) => withSigning(i, { onAuthorized: undefined })],
+    ['a signer without signStellar', (i) => withSigning(i, { signer: {} as Signer })],
+    ['a destination that is not a Stellar account', (i) => withSigning(i, { destination: 'nowhere' })],
+    ['a quote from another partner', (i) => ({ ...i, context: { ...i.context, quote: { ...quote, partner: 'other' } } })],
+    ['an adapter without an id', (i) => ({ ...i, adapter: { ...i.adapter, id: '' } })],
   ])('refuses %s before any call', async (_name, change) => {
     const { input, preparePayout } = setup();
     await expect(runSignedPayout(change(input))).rejects.toThrow(InvalidInputError);

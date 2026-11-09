@@ -129,6 +129,7 @@ export {
   type RunSignedPayoutInput,
   type SignedPayoutContext,
   type SignedPayoutResult,
+  type SignedPayoutSigning,
   signingContextFor,
   type StellarXdrAuthorization,
 } from './signed-payout';

@@ -30,6 +30,7 @@
  *   with {@link retryPayoutExecute}; it never signs or submits anything.
  * - A clock that returns a non-finite time, or a non-finite margin, fails closed.
  */
+import { isStellarAccountId } from './assets';
 import {
   InvalidInputError,
   PayoutAuthorizationError,
@@ -68,36 +69,31 @@ export interface SignedPayoutContext {
   /**
    * The transfer's stored state when the run starts. It must be
    * `payout_quoted`: the run moves on to `awaiting_signature` only through
-   * {@link RunSignedPayoutInput.onAuthorized}.
+   * {@link SignedPayoutSigning.onAuthorized}.
    */
   readonly state: 'payout_quoted';
   /** The fresh payout quote, within tolerance. `quote.source` is what the transaction must move. */
   readonly quote: LegQuote;
   /** The client's account the payout leaves from. Also the transaction's expected source. */
   readonly account: AccountRef;
-  /** The partner's account the transaction must pay (G...). */
-  readonly destination: string;
 }
 
 /** The partner's authorization when a key holder must sign. */
 export type StellarXdrAuthorization = Extract<PayoutAuthorization, { kind: 'stellar_xdr' }>;
 
-export interface RunSignedPayoutInput {
-  readonly adapter: Pick<PartnerAdapter, 'preparePayout' | 'executePayout'>;
+/**
+ * What the run needs when the partner returns a transaction to sign. Leave
+ * it out for a partner that moves the funds itself (`authorization: none`);
+ * a run without it that gets a `stellar_xdr` authorization stops with
+ * {@link PayoutAuthorizationError} while the transfer is in `payout_quoted`.
+ */
+export interface SignedPayoutSigning {
   readonly signer: Signer;
+  readonly submission: PayoutSubmission;
   /** Required for `client_submits`. */
   readonly submitter?: StellarSubmitter;
-  readonly submission: PayoutSubmission;
-  readonly context: SignedPayoutContext;
-  /** Clock in ms since epoch. A non-finite reading stops the run. */
-  readonly now: () => number;
-  /**
-   * Refuse to sign or submit when no more than this is left on the quote.
-   * Default {@link DEFAULT_EXPIRY_MARGIN_MS}. Must be a finite number >= 0.
-   */
-  readonly expiryMarginMs?: number;
-  /** Key for `executePayout`. Store it before calling, and reuse it on every retry. */
-  readonly idempotencyKey: string;
+  /** The partner's account the transaction must pay (G...). */
+  readonly destination: string;
   /**
    * Called once, after the partner returned a transaction to sign and the
    * quote was checked again, and before the signer. Store
@@ -118,6 +114,23 @@ export interface RunSignedPayoutInput {
    * submitted and the error propagates.
    */
   readonly onSigned?: (signedXdr: string) => void | Promise<void>;
+}
+
+export interface RunSignedPayoutInput {
+  /** The partner adapter. Its `id` must be the quote's `partner`. */
+  readonly adapter: Pick<PartnerAdapter, 'id' | 'preparePayout' | 'executePayout'>;
+  readonly context: SignedPayoutContext;
+  /** Required when the partner may return a transaction to sign. See {@link SignedPayoutSigning}. */
+  readonly signing?: SignedPayoutSigning;
+  /** Clock in ms since epoch. A non-finite reading stops the run. */
+  readonly now: () => number;
+  /**
+   * Refuse to sign or submit when no more than this is left on the quote.
+   * Default {@link DEFAULT_EXPIRY_MARGIN_MS}. Must be a finite number >= 0.
+   */
+  readonly expiryMarginMs?: number;
+  /** Key for `executePayout`. Store it before calling, and reuse it on every retry. */
+  readonly idempotencyKey: string;
   readonly logger?: Logger;
 }
 
@@ -165,7 +178,7 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
 export async function runSignedPayout(input: RunSignedPayoutInput): Promise<SignedPayoutResult> {
   const margin = input.expiryMarginMs ?? DEFAULT_EXPIRY_MARGIN_MS;
   checkInput(input, margin);
-  const { adapter, signer, context } = input;
+  const { adapter, context, signing } = input;
   const { quote, account, transferId } = context;
   const logger = input.logger ?? noopLogger;
   const assertFresh = (stage: QuoteExpiredStage): number => assertQuoteFresh(quote, input.now(), margin, stage);
@@ -179,10 +192,20 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
     return execute(adapter, { body: base, idempotencyKey: input.idempotencyKey }, logger);
   }
 
+  if (signing === undefined) {
+    logger.warn('payout needs a signature but the run has no signing inputs', { transferId, quoteId: quote.id });
+    throw new PayoutAuthorizationError('invalid_authorization');
+  }
+  if (account.chain !== 'stellar') {
+    logger.warn('payout authorization is a Stellar transaction for a non-Stellar account', { transferId, quoteId: quote.id });
+    throw new PayoutAuthorizationError('invalid_authorization');
+  }
+  const { signer } = signing;
+
   // Authorized but not yet handed over: the transfer is still in payout_quoted.
   assertFresh('authorization');
-  const state = await input.onAuthorized(auth);
-  const signingContext = signingContextFor(context, state);
+  const state = await signing.onAuthorized(auth);
+  const signingContext = signingContextFor({ ...context, destination: signing.destination }, state);
   const at = assertFresh('signing');
   assertSigningAllowed(signingContext, new Date(at));
   const signedXdr = await signer.signStellar(account, auth.unsignedXdr, signingContext);
@@ -190,14 +213,14 @@ export async function runSignedPayout(input: RunSignedPayoutInput): Promise<Sign
     throw new SigningNotAllowedError('The signer returned an empty transaction');
   }
   logger.info('payout signed', { transferId, quoteId: quote.id, custody: signer.custody });
-  await input.onSigned?.(signedXdr);
+  await signing.onSigned?.(signedXdr);
 
   // Still unsubmitted: an expired quote here is safe to abandon, and the signed XDR is dropped.
   assertFresh('signing');
 
   let txHash: string | undefined;
-  if (input.submission === 'client_submits') {
-    const submitter = input.submitter as StellarSubmitter;
+  if (signing.submission === 'client_submits') {
+    const submitter = signing.submitter as StellarSubmitter;
     let outcome: SubmitOutcome;
     try {
       outcome = await submitter.submit(signedXdr);
@@ -243,7 +266,10 @@ export async function retryPayoutExecute(
  * the XDR, and the transfer's stored `state`, which must be
  * `awaiting_signature` for the signer to go ahead.
  */
-export function signingContextFor(context: Omit<SignedPayoutContext, 'state'>, state: TransferState): SigningContext {
+export function signingContextFor(
+  context: Omit<SignedPayoutContext, 'state'> & { readonly destination: string },
+  state: TransferState,
+): SigningContext {
   return {
     transferId: context.transferId,
     state,
@@ -345,12 +371,6 @@ function statusOf(outcome: unknown): string {
 }
 
 function checkInput(input: RunSignedPayoutInput, margin: number): void {
-  if (input.submission !== 'client_submits' && input.submission !== 'partner_submits') {
-    throw new InvalidInputError(`Unknown submission mode: ${String(input.submission)}`);
-  }
-  if (input.submission === 'client_submits' && input.submitter === undefined) {
-    throw new InvalidInputError('client_submits needs a submitter');
-  }
   if (typeof input.idempotencyKey !== 'string' || input.idempotencyKey === '') {
     throw new InvalidInputError('idempotencyKey is required and must be reused on every retry');
   }
@@ -360,15 +380,38 @@ function checkInput(input: RunSignedPayoutInput, margin: number): void {
   if (typeof input.now !== 'function') {
     throw new InvalidInputError('now must be a clock function');
   }
-  if (typeof input.onAuthorized !== 'function') {
-    throw new InvalidInputError('onAuthorized is required: store awaiting_signature there before signing');
-  }
-  if (input.context.state !== 'payout_quoted') {
+  const { context, adapter } = input;
+  if (context.state !== 'payout_quoted') {
     throw new InvalidInputError(
-      `Transfer ${input.context.transferId} is in ${String(input.context.state)}: the payout runs from payout_quoted`,
+      `Transfer ${context.transferId} is in ${String(context.state)}: the payout runs from payout_quoted`,
     );
   }
-  if (input.context.quote.kind !== 'payout') {
-    throw new InvalidInputError(`Quote ${input.context.quote.id} is a ${input.context.quote.kind} quote, not a payout quote`);
+  if (context.quote.kind !== 'payout') {
+    throw new InvalidInputError(`Quote ${context.quote.id} is a ${context.quote.kind} quote, not a payout quote`);
+  }
+  if (typeof adapter.id !== 'string' || adapter.id === '' || context.quote.partner !== adapter.id) {
+    throw new InvalidInputError(`Quote ${context.quote.id} is from ${String(context.quote.partner)}, not ${String(adapter.id)}`);
+  }
+  if (input.signing !== undefined) checkSigning(input.signing);
+}
+
+function checkSigning(signing: SignedPayoutSigning): void {
+  if (signing.submission !== 'client_submits' && signing.submission !== 'partner_submits') {
+    throw new InvalidInputError(`Unknown submission mode: ${String(signing.submission)}`);
+  }
+  if (typeof signing.signer?.signStellar !== 'function') {
+    throw new InvalidInputError('signing.signer must have signStellar');
+  }
+  if (typeof signing.destination !== 'string' || !isStellarAccountId(signing.destination)) {
+    throw new InvalidInputError('signing.destination must be the Stellar account (G...) the transaction pays');
+  }
+  if (typeof signing.onAuthorized !== 'function') {
+    throw new InvalidInputError('onAuthorized is required: store awaiting_signature there before signing');
+  }
+  if (signing.onSigned !== undefined && typeof signing.onSigned !== 'function') {
+    throw new InvalidInputError('onSigned must be a function');
+  }
+  if (signing.submission === 'client_submits' && typeof signing.submitter?.submit !== 'function') {
+    throw new InvalidInputError('client_submits needs a submitter');
   }
 }
