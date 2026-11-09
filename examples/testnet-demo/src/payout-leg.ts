@@ -25,6 +25,7 @@
  * - the quote gets too close to expiry after that, before the transaction
  *   leaves: `awaiting_signature -> funded` (quote_expired_before_signing),
  *   nothing was submitted;
+ * - the signer refuses or fails: `awaiting_signature -> needs_attention` (signer_refused);
  * - the submit outcome is anything but `success`: `awaiting_signature -> needs_attention`;
  * - the partner does not take the payout: `payout_submitted -> needs_attention`;
  * - the payout is not on chain as signed, or does not land:
@@ -40,6 +41,7 @@ import {
   QuoteExpiredError,
   type SignedPayoutContext,
   type SignedPayoutResult,
+  SignerRefusedError,
   SigningNotAllowedError,
   type StellarSubmitter,
   checkPayoutTolerance,
@@ -251,6 +253,15 @@ function stopPayout(transfer: Transfer, e: unknown): void {
   }
   if (e instanceof QuoteExpiredError && e.stage === 'signing' && from === 'awaiting_signature') {
     transfer.move('funded', `${e.message}; nothing was submitted, get a fresh quote`, 'quote_expired_before_signing');
+    return;
+  }
+  if (e instanceof SignerRefusedError && from === 'awaiting_signature') {
+    transfer.move('needs_attention', `${e.message}; the USDC stays in the account`, 'signer_refused');
+    return;
+  }
+  if (e instanceof PayoutIncompleteError && e.stage === 'record' && from === 'awaiting_signature') {
+    // The money moved but was not recorded: record it now, then the create is retried, never re-quoted.
+    transfer.move('payout_submitted', `tx ${short(e.txHash ?? '')} is on the ledger; retry the create with the stored body and key`, 'signed_and_on_chain');
     return;
   }
   if (e instanceof PayoutIncompleteError && e.stage === 'submit' && from === 'awaiting_signature') {
