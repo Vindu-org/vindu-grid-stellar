@@ -78,6 +78,19 @@ export interface BlindPayAdapterOptions {
    * adapter is built: anything but a G account throws `InvalidConfigError`.
    */
   readonly payoutDestination?: string;
+  /**
+   * The longest quote lifetime accepted, in milliseconds: a quote whose
+   * `expires_at` is more than this after now is refused with
+   * `BlindPayQuoteError`, as is one already expired. Default
+   * {@link DEFAULT_MAX_QUOTE_TTL_MS} (one hour). Must be a finite number > 0.
+   */
+  readonly maxQuoteTtlMs?: number;
+  /**
+   * Clock in epoch milliseconds, for quote expiries and webhook timestamps.
+   * Defaults to the config's `now`, then `Date.now`. A reading that is not a
+   * finite number throws `InvalidInputError`.
+   */
+  readonly now?: () => number;
   /** Reuse an existing client instead of building one from the config. Its `partnerId` must match. */
   readonly client?: BlindPayClient;
 }
@@ -89,6 +102,9 @@ export interface BlindPayAdapter extends PartnerAdapter {
   /** The `payoutDestination` option: the account BlindPay payouts pay, when configured. */
   readonly payoutDestination: string | undefined;
 }
+
+/** Default longest quote lifetime the adapter accepts: one hour. */
+export const DEFAULT_MAX_QUOTE_TTL_MS = 3_600_000;
 
 export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayAdapterOptions): BlindPayAdapter {
   if (options.network !== 'stellar' && options.network !== 'stellar_testnet') {
@@ -102,7 +118,20 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   if (client.http.config.partnerId !== partnerId) {
     throw new InvalidConfigError('options.client was built with another partnerId');
   }
-  const now = config.now ?? Date.now;
+  const now = options.now ?? config.now ?? Date.now;
+  if (typeof now !== 'function') throw new InvalidConfigError('now must be a clock function');
+  const maxQuoteTtlMs = options.maxQuoteTtlMs ?? DEFAULT_MAX_QUOTE_TTL_MS;
+  if (typeof maxQuoteTtlMs !== 'number' || !Number.isFinite(maxQuoteTtlMs) || maxQuoteTtlMs <= 0) {
+    throw new InvalidConfigError(`maxQuoteTtlMs must be a finite number of ms > 0: ${String(maxQuoteTtlMs)}`);
+  }
+  /** The window a quote's `expires_at` must fall in, read from the clock now. */
+  const quoteWindow = (): QuoteWindow => {
+    const at: unknown = now();
+    if (typeof at !== 'number' || !Number.isFinite(at)) {
+      throw new InvalidInputError('The clock gave an invalid time: refusing to read the quote');
+    }
+    return { now: at, maxTtlMs: maxQuoteTtlMs };
+  };
   const coverFees = options.coverFees ?? false;
   const field = options.signedTransactionField ?? 'signed_xdr';
   if (field !== 'signed_xdr' && field !== 'tx_hash') {
@@ -146,7 +175,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         ...(input.allowedPayerTaxIds === undefined ? {} : { payer_rules: { pix_allowed_tax_ids: input.allowedPayerTaxIds } }),
         ...feeId('funding', input.spreadBps),
       });
-      return legQuote(partnerId, 'funding', res.data, input.source.asset, input.targetAsset);
+      return legQuote(partnerId, 'funding', res.data, input.source.asset, input.targetAsset, quoteWindow());
     },
 
     async createFunding(input) {
@@ -183,7 +212,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
         ...feeId('payout', undefined),
       });
       // A sender quote moves exactly what was asked: never an amount BlindPay picked.
-      return legQuote(partnerId, 'payout', res.data, input.source.asset, input.targetAsset, requested);
+      return legQuote(partnerId, 'payout', res.data, input.source.asset, input.targetAsset, quoteWindow(), requested);
     },
 
     async preparePayout(input) {
@@ -263,42 +292,69 @@ function offersPayout(currency: string, rail: string): boolean {
 /** Below this, an `expires_at` is not epoch milliseconds (1e12 ms is September 2001). */
 const MIN_EPOCH_MS = 1e12;
 
+/** When the quote was read, and the longest lifetime accepted. */
+interface QuoteWindow {
+  readonly now: number;
+  readonly maxTtlMs: number;
+}
+
 /**
- * Core's quote from BlindPay's answer. Refuses, with {@link BlindPayQuoteError},
- * an `expires_at` that is not epoch milliseconds (e.g. epoch seconds), an
- * amount that is not a positive integer, and, when `requestedSender` is
- * given, a `sender_amount` that differs from it.
+ * Core's quote from BlindPay's answer. Refuses, with {@link BlindPayQuoteError}
+ * and never a raw `RangeError`:
+ * - a missing or empty `id`;
+ * - an `expires_at` that is not epoch milliseconds (e.g. epoch seconds), is
+ *   not after `now`, or is more than `maxTtlMs` after it;
+ * - an amount that is not a positive safe integer;
+ * - when `requestedSender` is given, a `sender_amount` that differs from it.
  */
 function legQuote(
   partner: string,
   kind: LegKind,
-  q: { id: string; expires_at: number; sender_amount: number; receiver_amount: number },
+  answer: unknown,
   sourceAsset: Asset,
   targetAsset: Asset,
+  window: QuoteWindow,
   requestedSender?: number,
 ): LegQuote {
-  if (!Number.isSafeInteger(q.expires_at) || q.expires_at <= MIN_EPOCH_MS) {
-    throw new BlindPayQuoteError('expires_at', `Quote ${String(q.id)} has an expires_at that is not epoch milliseconds`);
+  const q = (typeof answer === 'object' && answer !== null ? answer : {}) as Record<string, unknown>;
+  const id = q['id'];
+  if (typeof id !== 'string' || id === '') {
+    throw new BlindPayQuoteError('id', 'The quote has no id');
   }
+  const expiresAt = q['expires_at'];
+  if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= MIN_EPOCH_MS) {
+    throw new BlindPayQuoteError('expires_at', `Quote ${id} has an expires_at that is not epoch milliseconds`);
+  }
+  if (expiresAt <= window.now) {
+    throw new BlindPayQuoteError('expires_at', `Quote ${id} has already expired`);
+  }
+  if (expiresAt - window.now > window.maxTtlMs) {
+    throw new BlindPayQuoteError(
+      'expires_at',
+      `Quote ${id} expires more than ${window.maxTtlMs} ms from now: not a quote this adapter accepts`,
+    );
+  }
+  const minor = { sender_amount: q['sender_amount'], receiver_amount: q['receiver_amount'] };
   for (const field of ['sender_amount', 'receiver_amount'] as const) {
-    const minor = q[field];
-    if (!Number.isSafeInteger(minor) || minor <= 0) {
-      throw new BlindPayQuoteError(field, `Quote ${String(q.id)} has a ${field} that is not a positive integer: ${String(minor)}`);
+    const value = minor[field];
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+      throw new BlindPayQuoteError(field, `Quote ${id} has a ${field} that is not a positive integer: ${String(value)}`);
     }
   }
-  if (requestedSender !== undefined && q.sender_amount !== requestedSender) {
+  const sender = minor.sender_amount as number;
+  if (requestedSender !== undefined && sender !== requestedSender) {
     throw new BlindPayQuoteError(
       'sender_amount',
-      `Quote ${String(q.id)} moves ${q.sender_amount} minor units, not the ${requestedSender} requested`,
+      `Quote ${id} moves ${sender} minor units, not the ${requestedSender} requested`,
     );
   }
   return {
-    id: q.id,
+    id,
     partner,
     kind,
-    expiresAt: new Date(q.expires_at).toISOString(),
-    source: fromBlindPayAmount(q.sender_amount, sourceAsset),
-    target: fromBlindPayAmount(q.receiver_amount, targetAsset),
+    expiresAt: new Date(expiresAt).toISOString(),
+    source: fromBlindPayAmount(sender, sourceAsset),
+    target: fromBlindPayAmount(minor.receiver_amount as number, targetAsset),
     fees: [],
   };
 }

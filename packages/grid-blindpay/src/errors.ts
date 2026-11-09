@@ -25,13 +25,15 @@ export class BlindPayHttpError extends PartnerHttpError {
 }
 
 /** The quote field BlindPay answered with an unusable value. */
-export type BlindPayQuoteField = 'expires_at' | 'sender_amount' | 'receiver_amount';
+export type BlindPayQuoteField = 'id' | 'expires_at' | 'sender_amount' | 'receiver_amount';
 
 /**
- * BlindPay answered with a quote this adapter will not use: an `expires_at`
- * that is not epoch milliseconds, an amount that is not a positive integer
- * in minor units, or (for a `sender` quote) a `sender_amount` other than the
- * `request_amount` sent. Nothing was created at BlindPay; ask for a new quote.
+ * BlindPay answered with a quote this adapter will not use: no `id`, an
+ * `expires_at` that is not epoch milliseconds or falls outside the accepted
+ * window (after now, at most `maxQuoteTtlMs` ahead), an amount that is not a
+ * positive integer in minor units, or (for a `sender` quote) a
+ * `sender_amount` other than the `request_amount` sent. Nothing was created
+ * at BlindPay; ask for a new quote.
  */
 export class BlindPayQuoteError extends GridError {
   constructor(

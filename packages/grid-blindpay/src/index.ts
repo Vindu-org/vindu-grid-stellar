@@ -8,7 +8,12 @@
  * The exports are listed one by one: helpers and constants used inside the
  * package are not part of the public surface.
  */
-export { type BlindPayAdapter, type BlindPayAdapterOptions, createBlindPayAdapter } from './adapter';
+export {
+  type BlindPayAdapter,
+  type BlindPayAdapterOptions,
+  createBlindPayAdapter,
+  DEFAULT_MAX_QUOTE_TTL_MS,
+} from './adapter';
 export {
   BLINDPAY_DECIMALS,
   DEV_SENTINEL_AMOUNTS,

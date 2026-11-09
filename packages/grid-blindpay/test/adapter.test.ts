@@ -3,7 +3,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { type AccountRef, InvalidConfigError, InvalidInputError, type LegQuote, fiat, money, stellarAsset } from '@vindu/grid-core';
 
 import { DEV_SENTINEL_AMOUNTS } from '../src/amounts';
-import { type BlindPayAdapterOptions, createBlindPayAdapter } from '../src/adapter';
+import { type BlindPayAdapterOptions, DEFAULT_MAX_QUOTE_TTL_MS, createBlindPayAdapter } from '../src/adapter';
 import { BlindPayQuoteError } from '../src/errors';
 import { toLegStatus } from '../src/legs';
 import { WebhookVerificationError } from '../src/webhooks';
@@ -253,6 +253,75 @@ describe('adapter quote answers', () => {
     ['an expires_at in epoch seconds', { sender_amount: 10_000, receiver_amount: 2_000, expires_at: 1_893_456_300 }, 'expires_at'],
   ])('refuses a funding quote with %s', async (_name, body, field) => {
     await expect(answering(body).quoteFunding(fundingInput)).rejects.toMatchObject({ code: 'unexpected_partner_quote', field });
+  });
+
+  // Review probe: a quote without an id was accepted, an expires_at far in the
+  // future set no bound, and 9e15 escaped as a raw RangeError.
+  const ok = { sender_amount: 10_000, receiver_amount: 9_900 };
+  it.each<[string, Record<string, unknown>, string]>([
+    ['no id', { ...ok, id: undefined }, 'id'],
+    ['an empty id', { ...ok, id: '' }, 'id'],
+    ['a numeric id', { ...ok, id: 42 }, 'id'],
+    ['an expires_at of 9e15', { ...ok, expires_at: 9e15 }, 'expires_at'],
+    ['an expires_at in microseconds', { ...ok, expires_at: NOW * 1000 }, 'expires_at'],
+    ['an expires_at in 2200', { ...ok, expires_at: Date.parse('2200-01-01T00:00:00Z') }, 'expires_at'],
+    ['an expires_at one ms past an hour', { ...ok, expires_at: NOW + 3_600_001 }, 'expires_at'],
+    ['an expires_at now', { ...ok, expires_at: NOW }, 'expires_at'],
+    ['an expires_at in the past', { ...ok, expires_at: NOW - 1_000 }, 'expires_at'],
+    ['an expires_at of Infinity', { ...ok, expires_at: Number.POSITIVE_INFINITY }, 'expires_at'],
+    ['an expires_at of NaN', { ...ok, expires_at: Number.NaN }, 'expires_at'],
+    ['a sender_amount above the safe range', { ...ok, sender_amount: 9e15 * 10 }, 'sender_amount'],
+  ])('refuses a quote with %s, as BlindPayQuoteError', async (_name, body, field) => {
+    for (const quote of [(a: ReturnType<typeof answering>) => a.quotePayout(payoutInput), (a: ReturnType<typeof answering>) => a.quoteFunding(fundingInput)]) {
+      const e = await caught(quote(answering(body)));
+      expect(e).toBeInstanceOf(BlindPayQuoteError);
+      expect(e).toMatchObject({ code: 'unexpected_partner_quote', field });
+    }
+  });
+
+  it('refuses an answer that is not an object, as BlindPayQuoteError', async () => {
+    const { fetch } = mockFetch([{ body: 'qu_1' }]);
+    const adapter = createBlindPayAdapter(config(fetch, { now: () => NOW }), { network: 'stellar_testnet', assetIssuers: ISSUERS });
+    await expect(adapter.quotePayout(payoutInput)).rejects.toMatchObject({ code: 'unexpected_partner_quote', field: 'id' });
+  });
+
+  it('accepts an expires_at of exactly one hour, the default window', async () => {
+    const quote = await answering({ ...ok, expires_at: NOW + DEFAULT_MAX_QUOTE_TTL_MS }).quotePayout(payoutInput);
+    expect(DEFAULT_MAX_QUOTE_TTL_MS).toBe(3_600_000);
+    expect(quote.expiresAt).toBe(new Date(NOW + 3_600_000).toISOString());
+  });
+
+  it('takes maxQuoteTtlMs and its own now as options', async () => {
+    const at = NOW + 1_000_000;
+    const build = (body: Record<string, unknown>) =>
+      createBlindPayAdapter(config(mockFetch([{ body: { id: 'qu_000000000009', ...ok, ...body } }]).fetch), {
+        network: 'stellar_testnet',
+        assetIssuers: ISSUERS,
+        maxQuoteTtlMs: 60_000,
+        now: () => at,
+      });
+    await expect(build({ expires_at: at + 60_000 }).quotePayout(payoutInput)).resolves.toMatchObject({ id: 'qu_000000000009' });
+    await expect(build({ expires_at: at + 60_001 }).quotePayout(payoutInput)).rejects.toMatchObject({ field: 'expires_at' });
+    // NOW + 300 s is in the past for this adapter's clock.
+    await expect(build({ expires_at: NOW + 300_000 }).quotePayout(payoutInput)).rejects.toMatchObject({ field: 'expires_at' });
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, '60000'])('refuses a maxQuoteTtlMs of %p when built', (maxQuoteTtlMs) => {
+    expect(() =>
+      createBlindPayAdapter(config(mockFetch([]).fetch), {
+        network: 'stellar_testnet',
+        maxQuoteTtlMs: maxQuoteTtlMs as number,
+      }),
+    ).toThrow(InvalidConfigError);
+  });
+
+  it('refuses to read a quote with a clock that is not finite', async () => {
+    const adapter = createBlindPayAdapter(config(mockFetch([{ body: { id: 'qu_1', expires_at: NOW + 1, ...ok } }]).fetch), {
+      network: 'stellar_testnet',
+      assetIssuers: ISSUERS,
+      now: () => Number.NaN,
+    });
+    await expect(adapter.quotePayout(payoutInput)).rejects.toThrow(InvalidInputError);
   });
 });
 
