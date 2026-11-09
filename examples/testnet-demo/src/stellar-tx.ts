@@ -43,7 +43,11 @@ export function buildPaymentXdr(input: PaymentTxInput): string {
 export interface DecodedPayment {
   readonly hash: string;
   readonly source: string;
+  /** The payment operation's own source account, when it sets one. */
+  readonly operationSource: string | undefined;
   readonly sequence: string;
+  /** Total fee the transaction may charge, in stroops. */
+  readonly fee: string;
   readonly destination: string;
   readonly amount: Money;
   readonly maxTime: number | undefined;
@@ -69,7 +73,9 @@ export function decodePayment(xdr: string, networkPassphrase: string): DecodedPa
   return {
     hash: Buffer.from(tx.hash()).toString('hex'),
     source: tx.source,
+    operationSource: op.source,
     sequence: tx.sequence,
+    fee: tx.fee,
     destination: op.destination,
     amount: money(op.amount, asset),
     maxTime: maxTime > 0 ? maxTime : undefined,
