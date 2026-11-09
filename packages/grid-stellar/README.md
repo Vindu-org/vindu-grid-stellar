@@ -1,6 +1,6 @@
 # @vindu/grid-stellar
 
-The Stellar layer for two-leg transfers: follow registered accounts on Horizon, match on-chain payments to transfer legs, check that an account can receive USDC, and submit signed transactions without ever paying twice.
+The Stellar layer for two-leg transfers: follow registered accounts on Horizon, match on-chain payments to transfer legs, check that an account can receive USDC, and decode, submit and look up signed transactions without ever paying twice. It does not build transactions: the partner builds them and your signer signs them.
 
 No environment reads, no keys, no signing. Your signer signs; the network passphrase and the Horizon URL are arguments. `TESTNET_*` and `MAINNET_*` constants hold the public values for convenience.
 
@@ -74,7 +74,7 @@ Only `failed` and `expired_not_landed` allow a replacement (core's `canSignRepla
 
 **Fee bumps.** Anyone can wrap a signed transaction in a fee bump of their own. For a fee bump both the outer hash and the inner transaction hash are looked up; either found means landed. The result says which (`foundBy`), carries `innerHash`, and `submittedHash` when what landed is another envelope.
 
-Resubmitting the same signed envelope is always safe. Build transactions with a maxTime: without one a lost transaction stays `unknown` forever.
+Resubmitting the same signed envelope is always safe. This package does not build transactions: the partner does, and your signer refuses one without a maxTime (core's `assertMaxTimeWithinQuote`). Without a maxTime a lost transaction would stay `unknown` forever.
 
 ### With the core payout flow
 
