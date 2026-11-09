@@ -12,7 +12,12 @@ export type GridErrorCode =
   | 'route_immutable'
   | 'tolerance_exceeded'
   | 'signing_not_allowed'
-  | 'partner_http';
+  | 'partner_http'
+  | 'invalid_config'
+  | 'invalid_input'
+  | 'webhook_rejected'
+  | 'quote_expired'
+  | 'payout_not_recorded';
 
 export class GridError extends Error {
   readonly code: GridErrorCode;
@@ -122,6 +127,13 @@ export interface PartnerHttpErrorInit {
    * error message here, never request bodies, keys or client data.
    */
   readonly bodySnippet?: string;
+  /**
+   * Overrides the status-based default of {@link PartnerHttpError.retryable},
+   * for partner-specific cases such as a 409 that means "original still running".
+   */
+  readonly retryable?: boolean;
+  /** Wait the partner asked for (from `Retry-After`), in milliseconds. Information only. */
+  readonly retryAfterMs?: number;
   readonly cause?: unknown;
 }
 
@@ -133,6 +145,9 @@ export class PartnerHttpError extends GridError {
   readonly status: number | null;
   readonly partnerCode: string | undefined;
   readonly bodySnippet: string | undefined;
+  /** Wait the partner asked for before a retry, in milliseconds. The library never retries on its own. */
+  readonly retryAfterMs: number | undefined;
+  private readonly retryableOverride: boolean | undefined;
 
   constructor(init: PartnerHttpErrorInit) {
     const status = init.status === null ? 'no response' : `HTTP ${init.status}`;
@@ -146,10 +161,16 @@ export class PartnerHttpError extends GridError {
     this.partnerCode = init.code;
     this.bodySnippet =
       init.bodySnippet === undefined ? undefined : capSnippet(init.bodySnippet);
+    this.retryAfterMs = init.retryAfterMs;
+    this.retryableOverride = init.retryable;
   }
 
-  /** True for statuses where repeating the same idempotent request is safe and useful. */
+  /**
+   * True when repeating the same idempotent request is safe and useful: no
+   * response, 408, 429 or 5xx, unless the adapter set `retryable` explicitly.
+   */
   get retryable(): boolean {
+    if (this.retryableOverride !== undefined) return this.retryableOverride;
     return this.status === null || this.status === 408 || this.status === 429 || this.status >= 500;
   }
 }
