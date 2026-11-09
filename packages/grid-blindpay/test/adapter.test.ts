@@ -3,7 +3,8 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { type AccountRef, InvalidConfigError, InvalidInputError, type LegQuote, fiat, money, stellarAsset } from '@vindu/grid-core';
 
 import { DEV_SENTINEL_AMOUNTS } from '../src/amounts';
-import { type BlindPayAdapterOptions, createBlindPayAdapter, toLegStatus } from '../src/adapter';
+import { type BlindPayAdapterOptions, createBlindPayAdapter } from '../src/adapter';
+import { toLegStatus } from '../src/legs';
 import { WebhookVerificationError } from '../src/webhooks';
 import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, USDB_ISSUER, USDC_ISSUER, WALLET_ID, config, mockFetch } from './helpers';
 
@@ -243,6 +244,69 @@ describe('adapter stablecoins', () => {
 
   it('refuses an issuer that is not a Stellar account id', () => {
     expect(() => setup({ assetIssuers: { USDC: 'not-an-issuer' } })).toThrow(InvalidConfigError);
+  });
+});
+
+describe('adapter leg amounts and times', () => {
+  function reading(resource: Record<string, unknown>, extra: Partial<BlindPayAdapterOptions> = {}) {
+    const { fetch } = mockFetch(() => ({ body: resource }));
+    return createBlindPayAdapter(config(fetch, { now: () => NOW }), {
+      network: 'stellar_testnet', webhookSecret: SECRET, assetIssuers: ISSUERS, ...extra,
+    });
+  }
+  const payin = { id: 'pi_000000000001', status: 'completed', token: 'USDB', sender_amount: 50_000, receiver_amount: 9_512 };
+  const payout = { id: 'po_000000000001', status: 'processing', token: 'USDB', sender_amount: 10_001, receiver_amount: 51_234 };
+
+  it('reports the stablecoin received on a funding leg and taken on a payout leg, exactly', async () => {
+    expect((await reading(payin).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id })).amount).toEqual(money('95.12', usdb));
+    expect((await reading(payout).readLeg({ partner: 'blindpay', kind: 'payout', id: payout.id })).amount).toEqual(money('100.01', usdb));
+  });
+
+  it('takes USDC on mainnet when BlindPay sends no token, with the configured issuer', async () => {
+    const adapter = reading({ ...payin, token: undefined }, { network: 'stellar', assetIssuers: { USDC: USDC_ISSUER } });
+    expect((await adapter.readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id })).amount).toEqual(money('95.12', usdc));
+  });
+
+  it.each<[string, Record<string, unknown>, Partial<BlindPayAdapterOptions>]>([
+    ['no token on testnet', { token: undefined }, {}],
+    ['an unknown token', { token: 'EURC' }, {}],
+    ['USDB on mainnet', {}, { network: 'stellar', assetIssuers: { USDC: USDC_ISSUER } }],
+    ['no issuer configured for the token', {}, { assetIssuers: { USDC: USDC_ISSUER } }],
+    ['a fractional amount', { receiver_amount: 95.5 }, {}],
+    ['a missing amount', { receiver_amount: undefined }, {}],
+    ['an amount as a string', { receiver_amount: '9512' }, {}],
+  ])('leaves the amount out for %s', async (_name, change, extra) => {
+    const leg = await reading({ ...payin, ...change }, extra).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id });
+    expect(leg.amount).toBeUndefined();
+    expect(leg.status).toBe('completed');
+  });
+
+  it('takes the change time from the resource, never from the clock', async () => {
+    const read = (r: Record<string, unknown>) => reading(r).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id });
+    expect((await read({ ...payin, updated_at: '2029-12-31T23:59:01.5+00:00' })).updatedAt).toBe('2029-12-31T23:59:01.500Z');
+    expect((await read({ ...payin, tracking_complete: { step: 'completed', completed_at: '2029-12-31T23:58:00Z' } })).updatedAt).toBe('2029-12-31T23:58:00.000Z');
+    expect((await read({ ...payin, status: 'failed', tracking_complete: { completed_at: '2029-12-31T23:58:00Z' } })).updatedAt).toBeUndefined();
+    expect((await read({ ...payin, updated_at: 'yesterday' })).updatedAt).toBeUndefined();
+    expect((await read(payin)).updatedAt).toBeUndefined();
+  });
+
+  it('puts amount and resource time on webhook events, and the Svix time in deliveredAt only', async () => {
+    const ts = String(NOW / 1000 - 10);
+    const sign = (body: string) => ({
+      'svix-id': 'msg_9', 'svix-timestamp': ts,
+      'svix-signature': `v1,${createHmac('sha256', WEBHOOK_KEY).update(`msg_9.${ts}.${body}`).digest('base64')}`,
+    });
+    const adapter = reading({});
+    const withTime = JSON.stringify({ webhook_event: 'payout.update', ...payout, updated_at: '2029-12-31T23:50:00Z' });
+    await expect(adapter.parseWebhook(withTime, sign(withTime))).resolves.toEqual({
+      eventId: 'msg_9', ref: { partner: 'blindpay', kind: 'payout', id: payout.id }, status: 'processing',
+      amount: money('100.01', usdb), occurredAt: '2029-12-31T23:50:00.000Z', deliveredAt: '2029-12-31T23:59:50.000Z',
+    });
+    const noTime = JSON.stringify({ webhook_event: 'payin.complete', ...payin, token: 'USDT' });
+    const event = await adapter.parseWebhook(noTime, sign(noTime));
+    expect(event).toEqual({
+      eventId: 'msg_9', ref: { partner: 'blindpay', kind: 'funding', id: payin.id }, status: 'completed', deliveredAt: '2029-12-31T23:59:50.000Z',
+    });
   });
 });
 

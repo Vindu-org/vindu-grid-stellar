@@ -11,7 +11,6 @@ describe('package index', () => {
     'parseWebhookEvent',
     'toBlindPayAmount',
     'fromBlindPayAmount',
-    'toLegStatus',
     'BLINDPAY_CAPABILITIES',
     'BLINDPAY_PARTNER_ID',
     'DEV_SENTINEL_AMOUNTS',

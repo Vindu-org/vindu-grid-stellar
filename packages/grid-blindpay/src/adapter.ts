@@ -18,7 +18,6 @@ import {
   type LegKind,
   type LegQuote,
   type LegRef,
-  type LegStatusValue,
   type PartnerAdapter,
 } from '@vindu/grid-core';
 
@@ -28,7 +27,8 @@ import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
 import type { SignedTransactionField } from './stellar-payout-flow';
 import { type StablecoinIssuers, stablecoins } from './tokens';
-import type { BlindPayNetwork, Tracking } from './types';
+import type { BlindPayNetwork } from './types';
+import { legAmount, legChangedAt, legTxHash, toLegStatus } from './legs';
 import { assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
 export interface BlindPayAdapterOptions {
@@ -176,8 +176,16 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
     async readLeg(leg) {
       if (leg.partner !== partnerId) throw new InvalidInputError(`Leg ${leg.id} belongs to ${leg.partner}, not ${partnerId}`);
       const resource = leg.kind === 'funding' ? await client.payins.get(leg.id) : await client.stellarPayouts.getPayout(leg.id);
-      const txHash = hashOf(resource.tracking_transaction);
-      return { ref: ref(leg.kind, resource.id), status: toLegStatus(resource.status), ...(txHash === undefined ? {} : { txHash }) };
+      const amount = legAmount(leg.kind, resource, options.network, coins);
+      const updatedAt = legChangedAt(resource);
+      const txHash = legTxHash(resource);
+      return {
+        ref: ref(leg.kind, resource.id),
+        status: toLegStatus(resource.status),
+        ...(updatedAt === undefined ? {} : { updatedAt }),
+        ...(amount === undefined ? {} : { amount }),
+        ...(txHash === undefined ? {} : { txHash }),
+      };
     },
 
     async parseWebhook(rawBody, headers) {
@@ -192,15 +200,19 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
       const event = parseWebhookEvent(rawBody);
       if (event.kind !== 'payin' && event.kind !== 'payout') return null;
       const resource = event.kind === 'payin' ? event.payin : event.payout;
-      const txHash = hashOf(resource.tracking_transaction);
+      const kind: LegKind = event.kind === 'payin' ? 'funding' : 'payout';
+      const amount = legAmount(kind, resource, options.network, coins);
+      const occurredAt = legChangedAt(resource);
+      const txHash = legTxHash(resource);
       return {
         eventId: verified.eventId,
-        ref: ref(event.kind === 'payin' ? 'funding' : 'payout', resource.id),
+        ref: ref(kind, resource.id),
         // The status field decides the outcome, never the event name.
         status: toLegStatus(resource.status),
-        // The Svix timestamp is when the message was sent, not when the payin
-        // or payout changed, so it is the delivery time. BlindPay's resource
-        // carries no change time of its own, so occurredAt stays empty.
+        ...(amount === undefined ? {} : { amount }),
+        // The resource's own change time, when BlindPay gives one. Never the Svix time.
+        ...(occurredAt === undefined ? {} : { occurredAt }),
+        // The Svix timestamp is when the message was sent: delivery time, not for ordering.
         deliveredAt: new Date(verified.timestamp * 1000).toISOString(),
         ...(txHash === undefined ? {} : { txHash }),
       };
@@ -208,30 +220,11 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
   };
 }
 
-/** BlindPay payin or payout status to core's leg status. Anything unexpected is `unknown`. */
-export function toLegStatus(status: unknown): LegStatusValue {
-  switch (status) {
-    case 'processing':
-    case 'on_hold':
-    case 'completed':
-    case 'failed':
-    case 'refunded':
-      return status;
-    default:
-      return 'unknown';
-  }
-}
-
 /** True when BlindPay pays out `currency` by `rail`. Reads own keys only. */
 function offersPayout(currency: string, rail: string): boolean {
   const { offRamp } = BLINDPAY_CAPABILITIES;
   const rails = Object.hasOwn(offRamp, currency) ? offRamp[currency] : undefined;
   return Array.isArray(rails) && rails.includes(rail);
-}
-
-function hashOf(tracking: Tracking | undefined): string | undefined {
-  const h = tracking?.transaction_hash;
-  return typeof h === 'string' && h !== '' ? h : undefined;
 }
 
 function legQuote(
