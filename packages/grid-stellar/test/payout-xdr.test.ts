@@ -28,6 +28,7 @@ interface Shape {
   readonly txSource?: string;
   readonly fee?: string;
   readonly maxTime?: number;
+  readonly minTime?: number;
   readonly passphrase?: string;
   readonly operations?: ReadonlyArray<ReturnType<typeof Operation.payment>>;
   readonly tweak?: (builder: Builder) => Builder;
@@ -40,7 +41,7 @@ function payout(shape: Shape = {}): string {
   let builder = new TransactionBuilder(account, {
     fee: shape.fee ?? '100',
     networkPassphrase: shape.passphrase ?? Networks.TESTNET,
-    timebounds: { minTime: 0, maxTime: shape.maxTime ?? MAX_TIME },
+    timebounds: { minTime: shape.minTime ?? 0, maxTime: shape.maxTime ?? MAX_TIME },
   });
   for (const op of shape.operations ?? [payment()]) builder = builder.addOperation(op);
   if (shape.tweak !== undefined) builder = shape.tweak(builder);
@@ -51,11 +52,13 @@ function payment(overrides: Partial<Parameters<typeof Operation.payment>[0]> = {
   return Operation.payment({ destination, asset: USDC, amount: '25.5', ...overrides });
 }
 
-const check = (xdr: string, ctx: SigningContext = context, extra: { maxFeeStroops?: number } = {}) =>
+type Extra = { maxFeeStroops?: number; now?: () => number };
+
+const check = (xdr: string, ctx: SigningContext = context, extra: Extra = {}) =>
   assertPayoutXdrMatches(xdr, ctx, { networkPassphrase: TESTNET_NETWORK_PASSPHRASE, ...extra });
 
 /** The check that refused `xdr`, or `null` when it was accepted. */
-function refusal(xdr: string, ctx: SigningContext = context, extra: { maxFeeStroops?: number } = {}): string | null {
+function refusal(xdr: string, ctx: SigningContext = context, extra: Extra = {}): string | null {
   try {
     check(xdr, ctx, extra);
     return null;
@@ -210,6 +213,33 @@ describe('assertPayoutXdrMatches', () => {
     // it signs under. An empty passphrase is a configuration error.
     expect(refusal(payout({ passphrase: Networks.PUBLIC }))).toBeNull();
     expect(() => assertPayoutXdrMatches(payout(), context, { networkPassphrase: '' })).toThrow(InvalidConfigError);
+  });
+
+  it('refuses a minTime later than now, and accepts one at or before now', () => {
+    // Review probe: a minTime just before maxTime was accepted, so the
+    // payout could land only at the end of the quote.
+    const now = () => T0;
+    expect(refusal(payout({ minTime: T0 / 1000 + 1 }), context, { now })).toBe('min_time');
+    expect(refusal(payout({ minTime: MAX_TIME - 1 }), context, { now })).toBe('min_time');
+    expect(refusal(payout({ minTime: T0 / 1000 }), context, { now })).toBeNull();
+    expect(refusal(payout({ minTime: T0 / 1000 - 60 }), context, { now })).toBeNull();
+  });
+
+  it('accepts a zero minTime without reading the clock', () => {
+    const now = jest.fn(() => Number.NaN);
+    expect(refusal(payout({ minTime: 0 }), context, { now })).toBeNull();
+    expect(now).not.toHaveBeenCalled();
+  });
+
+  it('refuses a clock that is not a finite number when a minTime needs it', () => {
+    const xdr = payout({ minTime: T0 / 1000 });
+    for (const now of [() => Number.NaN, () => Number.POSITIVE_INFINITY, () => '1' as unknown as number]) {
+      expect(() => check(xdr, context, { now })).toThrow(InvalidConfigError);
+    }
+    const broken = () => {
+      throw new Error('clock gone');
+    };
+    expect(() => check(xdr, context, { now: broken })).toThrow(InvalidConfigError);
   });
 
   it('honours a lower fee cap and refuses a bad one', () => {
