@@ -102,7 +102,34 @@ Then run the demo, a full two-leg transfer with mock partners and an in-memory H
 yarn workspace testnet-demo start
 ```
 
-Packages are versioned by git tags in this repository. They are not on npm yet.
+## Install from a git tag
+
+The packages are not on npm yet. Install them from the repository's git tag (`v0.1.0`) with Yarn 4. Add both blocks to your `package.json`:
+
+```json
+{
+  "dependencies": {
+    "@vindu/grid-core": "https://github.com/Vindu-org/vindu-grid-stellar.git#workspace=@vindu/grid-core&tag=v0.1.0",
+    "@vindu/grid-blindpay": "https://github.com/Vindu-org/vindu-grid-stellar.git#workspace=@vindu/grid-blindpay&tag=v0.1.0",
+    "@vindu/grid-stellar": "https://github.com/Vindu-org/vindu-grid-stellar.git#workspace=@vindu/grid-stellar&tag=v0.1.0"
+  },
+  "resolutions": {
+    "@vindu/grid-core": "https://github.com/Vindu-org/vindu-grid-stellar.git#workspace=@vindu/grid-core&tag=v0.1.0"
+  }
+}
+```
+
+- Yarn clones the repository at the tag and packs each workspace; packing builds it, so you get the compiled `dist/`, the README and the license.
+- Keep the `resolutions` entry. `grid-blindpay` and `grid-stellar` depend on `@vindu/grid-core@^0.1.0`, and without it Yarn would look that name up on the npm registry, where it does not exist (or could belong to someone else). The resolution also keeps a single copy of core, so its error classes work with `instanceof` across packages.
+- Use the same tag on every line. Leave out the packages you do not need, but keep `grid-core` and the resolution.
+- npm and pnpm cannot install one workspace from a git URL. Pack the packages instead (`yarn workspace @vindu/grid-core pack`, and so on) and install the tarballs, pinning `@vindu/grid-core` to its tarball with `overrides`.
+
+Requirements:
+
+- Node 22.12 or later for `grid-stellar`: the Stellar SDK it loads needs `require()` of ES modules. `grid-core` and `grid-blindpay` run on Node 22 or later.
+- The packages are CommonJS with type declarations, and each has one entry point (an `exports` map): import from the package name only. Files under `dist/` are internal and cannot be imported directly.
+
+CI checks this path on every change: `scripts/check-consumption.sh` packs the three packages, installs the tarballs into a clean project with the resolution above, loads each one with `require()` and type-checks a file that imports them, with TypeScript `moduleResolution` set to `node` and to `node16`.
 
 ## Roadmap
 
