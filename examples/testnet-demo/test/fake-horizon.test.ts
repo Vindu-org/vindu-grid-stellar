@@ -47,6 +47,16 @@ describe('FakeHorizon', () => {
     expect(await ledger.transaction('ab'.repeat(32))).toEqual({ found: false, latestLedger: 1000 });
   });
 
+  it('lets the submitter prove a lost transaction expired, with the full ingestion evidence', async () => {
+    const { ledger, signed, submitter } = setup();
+    ledger.loseNextSubmission();
+    const outcome = await submitter.submit(signed(Math.floor(T0 / 1000) + 1));
+    expect(outcome).toMatchObject({
+      status: 'expired_not_landed',
+      detail: { checkedLedger: { sequence: 1000, elderLedger: 1 }, ledgerBeforeSubmission: 1000 },
+    });
+  });
+
   it('finds a transaction that landed behind a 504, with the latest ledger it had ingested', async () => {
     const { ledger, signed, submitter } = setup();
     ledger.timeOutNextSubmission();

@@ -16,8 +16,10 @@
  *
  * `timeOutNextSubmission()` makes the next submission land on the ledger but
  * answer like a Horizon 504, to show what the submitter does when it does
- * not know whether a transaction landed. `rejectNextSubmission()` makes the
- * next submission fail without touching the ledger, like a Horizon 400.
+ * not know whether a transaction landed. `loseNextSubmission()` answers 504
+ * too, but the transaction never reaches the ledger. `rejectNextSubmission()`
+ * makes the next submission fail without touching the ledger, like a
+ * Horizon 400.
  */
 import type {
   HorizonAccount,
@@ -45,6 +47,7 @@ export class FakeHorizon implements HorizonGateway {
   /** The oldest ledger this instance keeps history for. */
   private readonly elderLedger = 1;
   private timeoutNext = false;
+  private loseNext = false;
   private rejectNext: string | undefined;
   /** Every envelope submitted, in order. */
   readonly submissions: string[] = [];
@@ -64,6 +67,11 @@ export class FakeHorizon implements HorizonGateway {
   /** The next submission lands on the ledger, but Horizon answers 504. */
   timeOutNextSubmission(): void {
     this.timeoutNext = true;
+  }
+
+  /** The next submission answers 504 and never reaches the ledger. */
+  loseNextSubmission(): void {
+    this.loseNext = true;
   }
 
   /** The next submission is refused with `transactionCode` and never applied. */
@@ -99,6 +107,10 @@ export class FakeHorizon implements HorizonGateway {
       const code = this.rejectNext;
       this.rejectNext = undefined;
       return reject(code);
+    }
+    if (this.loseNext) {
+      this.loseNext = false;
+      return { kind: 'timeout', status: 504 };
     }
     const applied = this.apply(signedXdr);
     if (applied.kind === 'rejected') return applied;
