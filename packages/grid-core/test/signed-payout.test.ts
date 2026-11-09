@@ -1,3 +1,9 @@
+// The test reads the module's own doc comment to walk its error table; the package code stays pure.
+// eslint-disable-next-line no-restricted-imports
+import { readFileSync } from 'node:fs';
+// eslint-disable-next-line no-restricted-imports
+import { join } from 'node:path';
+
 import { fiat, stellarAsset } from '../src/assets';
 import {
   InvalidInputError,
@@ -106,6 +112,39 @@ function withSigning(
   change: { [K in keyof SignedPayoutSigning]?: SignedPayoutSigning[K] | undefined },
 ): RunSignedPayoutInput {
   return { ...input, signing: { ...input.signing, ...change } as SignedPayoutSigning };
+}
+
+const SOURCE_DOC = readFileSync(join(__dirname, '../src/signed-payout.ts'), 'utf8');
+
+interface DocumentedEdge {
+  readonly error: string;
+  readonly state: TransferState;
+  readonly from: TransferState;
+  readonly to: TransferState;
+  readonly reason: TransitionReason;
+}
+
+/**
+ * The rows of the error table (the one headed `| Error |`) in `text`. Each
+ * row must have its "Transfer is in" cell as one state and exactly one
+ * `` `from -> to` (`reason`) `` edge; anything else fails the test.
+ */
+function documentedEdges(text: string): DocumentedEdge[] {
+  const lines = text.split('\n').map((l) => l.replace(/^\s*\*\s?/, '').trim());
+  const start = lines.findIndex((l) => l.startsWith('| Error |'));
+  if (start < 0) throw new Error('no error table');
+  const rows: DocumentedEdge[] = [];
+  for (const line of lines.slice(start + 2)) {
+    if (!line.startsWith('|')) break;
+    const cells = line.split('|').slice(1, -1).map((c) => c.trim());
+    const [error = '', , stateCell = '', takes = ''] = cells;
+    const state = /^`([a-z_]+)`$/.exec(stateCell)?.[1];
+    const found = [...takes.matchAll(/`([a-z_]+) -> ([a-z_]+)` \(`([a-z_]+)`\)/g)];
+    if (state === undefined || found.length !== 1) throw new Error(`row without one state and one edge: ${line}`);
+    const [, from, to, reason] = found[0] as unknown as [string, TransferState, TransferState, TransitionReason];
+    rows.push({ error, state: state as TransferState, from, to, reason });
+  }
+  return rows;
 }
 
 async function caught(p: Promise<unknown>): Promise<unknown> {
@@ -328,7 +367,41 @@ describe('signed payout', () => {
           return withSigning(s.input, { submission: 'partner_submits' });
         },
         { type: PayoutIncompleteError, stage: 'create' },
-        ['awaiting_signature', 'needs_attention', 'submission_rejected_or_unknown'],
+        ['awaiting_signature', 'needs_attention', 'partner_submission_unknown'],
+      ],
+      [
+        'a failed create when the partner needs no signature',
+        (s) => {
+          s.preparePayout.mockResolvedValueOnce({ kind: 'none' });
+          s.executePayout.mockRejectedValueOnce(new Error('503'));
+          return withoutSigning(s.input);
+        },
+        { type: PayoutIncompleteError, stage: 'create' },
+        ['payout_quoted', 'needs_attention', 'payout_create_failed'],
+      ],
+      [
+        'a transaction to sign when the run has no signing inputs',
+        (s) => withoutSigning(s.input),
+        { type: PayoutAuthorizationError },
+        ['payout_quoted', 'needs_attention', 'authorization_failed'],
+      ],
+      [
+        'a signer that throws a plain error',
+        (s) => {
+          s.signStellar.mockRejectedValueOnce(new Error('custodian timeout'));
+          return s.input;
+        },
+        { type: SignerRefusedError },
+        ['awaiting_signature', 'needs_attention', 'signer_refused'],
+      ],
+      [
+        'an onSubmitted that throws after a confirmed submit',
+        (s) => {
+          s.onSubmitted.mockRejectedValueOnce(new Error('db down'));
+          return s.input;
+        },
+        { type: PayoutIncompleteError, stage: 'record' },
+        ['awaiting_signature', 'payout_submitted', 'signed_and_on_chain'],
       ],
     ];
     let t = NOW;
@@ -345,6 +418,27 @@ describe('signed payout', () => {
       expect(transition(from, to, reason)).toMatchObject({ from, to, reason });
       expect(s.signStellar.mock.calls.length).toBeLessThanOrEqual(1);
       expect(s.onAuthorized).toHaveBeenCalledTimes(from === 'payout_quoted' ? 0 : 1);
+    });
+
+    it('covers every row of the documented table, and nothing else', () => {
+      const tested = new Set(rows.map(([, , , edge]) => edge.join(' ')));
+      const documented = new Set(documentedEdges(SOURCE_DOC).map((e) => [e.from, e.to, e.reason].join(' ')));
+      expect([...tested].sort()).toEqual([...documented].sort());
+    });
+  });
+
+  // Every row of the table in runSignedPayout's doc names exactly one edge, in
+  // the state the row says the transfer is in, and the table has that edge.
+  describe('the documented error table', () => {
+    const edges = documentedEdges(SOURCE_DOC);
+
+    it('has a row for each error the run maps to an edge', () => {
+      expect(edges).toHaveLength(9);
+    });
+
+    it.each(edges)('$error: $from -> $to ($reason) is a transition', ({ from, to, reason, state }) => {
+      expect(state).toBe(from);
+      expect(transition(from, to, reason)).toMatchObject({ from, to, reason });
     });
   });
 
