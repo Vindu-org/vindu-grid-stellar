@@ -11,6 +11,7 @@ export * from './money';
 export * from './observability';
 export * from './ports';
 export * from './routing';
+export * from './signed-payout';
 export * from './signer';
 export * from './submission';
 export * from './tolerance';
