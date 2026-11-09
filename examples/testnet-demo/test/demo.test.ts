@@ -1,3 +1,4 @@
+import { runBlindPayDryRun } from '../src/blindpay-dry-run';
 import { runDemo } from '../src/demo';
 
 const FULL_PATH = [
@@ -37,5 +38,23 @@ describe('testnet demo', () => {
 
     expect(result.finalState).toBe('completed');
     expect(lines.join('\n')).toContain('1 submission(s), 0 hash lookup(s)');
+  });
+});
+
+describe('BlindPay dry run', () => {
+  it('runs the BlindPay client against a mocked fetch, with no network', async () => {
+    const lines: string[] = [];
+    const result = await runBlindPayDryRun((line) => lines.push(line));
+
+    expect(result.requests).toEqual([
+      'POST /payin-quotes',
+      'POST /payins/evm',
+      'POST /quotes',
+      'POST /payouts/stellar/authorize',
+      'POST /payouts/stellar',
+    ]);
+    expect(result.payoutId).toBe('po_demo1');
+    expect(result.txHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(lines.join('\n')).not.toContain('dry-run-placeholder');
   });
 });
