@@ -68,6 +68,7 @@ For a payout that needs a signature, the partner builds the unsigned transaction
 
 These rules decide when money may move. The packages enforce them where they can, and your application must follow them where it decides.
 
+- **Never pay out more than was funded.** `runSignedPayout` takes `funded`, the amount confirmed in the client's account. The quote must move a positive amount of that same asset (code and issuer), no more than `funded`, before anything is authorized; only then is it the amount the signer expects.
 - **Authorize before the transfer waits for a signature.** The payout runs from `payout_quoted`, and the transfer moves to `awaiting_signature` only once the partner's authorization exists. A failed authorization goes `payout_quoted -> needs_attention`, and a quote that runs out first goes back to `funded`; nothing was signed either way.
 - **Store `awaiting_signature` as a compare-and-set.** `onAuthorized` moves `payout_quoted -> awaiting_signature` only if the transfer is still in `payout_quoted` (for example `UPDATE ... WHERE id = ? AND state = 'payout_quoted'`), and throws when another run got there first. Two runs for one transfer then cannot both sign. A store that cannot compare and set must lock the transfer for the whole run.
 - **Sign once.** For a payout quote the signer is called at most once. If the quote gets too close to its expiry before the signed transaction leaves, the transaction is dropped unsubmitted: get a fresh quote and a new transaction. An old transaction is never signed again.
