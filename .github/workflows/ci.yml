@@ -46,7 +46,8 @@ jobs:
       - run: yarn install --immutable
       - run: yarn build
       # Packs each package (prepack builds it), installs the tarballs into a
-      # temp project with a grid-core resolution, requires them and type-checks.
+      # temp project with a grid-core resolution and install scripts off,
+      # requires them and type-checks.
       - run: bash scripts/check-consumption.sh
 
   gitleaks:

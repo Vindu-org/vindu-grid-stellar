@@ -8,6 +8,8 @@
 # 2. Creates a project outside the repository (nodeLinker: node-modules)
 #    that installs the three tarballs, with `resolutions` pinning
 #    @vindu/grid-core to the core tarball, as the README asks of consumers.
+#    Install scripts are off (enableScripts: false): no dependency's
+#    postinstall runs, and the packages must work without one.
 # 3. Requires each package from that project, checks that internals cannot
 #    be deep-imported and that there is a single copy of grid-core.
 # 4. Type-checks a small file importing each package's main types, with
@@ -73,14 +75,15 @@ cat >"$consumer/package.json" <<EOF
   }
 }
 EOF
-printf 'nodeLinker: node-modules\nenableTelemetry: false\n' >"$consumer/.yarnrc.yml"
+printf 'nodeLinker: node-modules\nenableTelemetry: false\nenableScripts: false\n' >"$consumer/.yarnrc.yml"
 # An empty lockfile makes this directory its own project, whatever is above it.
 : >"$consumer/yarn.lock"
 (cd "$consumer" && YARN_ENABLE_IMMUTABLE_INSTALLS=false yarn install >"$work/install.log" 2>&1) || {
   cat "$work/install.log"
   fail "installing the tarballs failed"
 }
-echo "installed with yarn $(cd "$consumer" && yarn --version), TypeScript $typescript"
+[ "$(cd "$consumer" && yarn config get enableScripts)" = false ] || fail "the consumer project runs install scripts"
+echo "installed with yarn $(cd "$consumer" && yarn --version), TypeScript $typescript, install scripts off"
 
 echo "== require()"
 (cd "$consumer" && node - <<'EOF'
