@@ -43,6 +43,10 @@ const EXPECTED: ReadonlyArray<[TransferState, TransferState, TransitionReason, s
   // The payout create failing on the paths that have no payout_submitted yet.
   ['payout_quoted', 'needs_attention', 'payout_create_failed', 'payout create failed'],
   ['awaiting_signature', 'needs_attention', 'partner_submission_unknown', 'signed XDR sent, partner did not confirm'],
+  // partner_submits success: the partner has the signed XDR, nobody saw it on chain yet.
+  ['awaiting_signature', 'payout_submitted', 'sent_to_partner', 'signed XDR handed to the partner'],
+  // Anything that stops a run after onAuthorized and has no edge of its own.
+  ['awaiting_signature', 'needs_attention', 'run_interrupted', 'payout run interrupted after authorization'],
 ];
 
 const EXPECTED_STATES = [

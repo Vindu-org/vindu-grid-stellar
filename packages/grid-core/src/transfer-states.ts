@@ -9,11 +9,19 @@
  *   payout_processing --> completed
  * ```
  *
+ * `awaiting_signature -> payout_submitted` has two reasons:
+ * `signed_and_on_chain` when we submitted and the transaction is on the
+ * ledger (`client_submits`), and `sent_to_partner` when the partner took the
+ * signed XDR to submit it (`partner_submits`): nobody has seen that one on
+ * chain yet.
+ *
  * Failure edges: a quote that lapses before signing goes back to `funded` for
  * a fresh quote. A payout quote that keeps failing, an authorization that
  * fails, a payout create that fails when no signature was needed, a signer
- * that refuses, a submission that is rejected or has an unknown outcome, or
- * a signed XDR the partner did not confirm taking goes to `needs_attention`.
+ * that refuses, a submission that is rejected or has an unknown outcome, a
+ * signed XDR the partner did not confirm taking, or a payout run interrupted
+ * after the move to `awaiting_signature` (a hook that throws, a clock that
+ * breaks) goes to `needs_attention`.
  *
  * `needs_attention` alerts the operators and stops the transfer. Nothing in this
  * table leaves it: the platform never refunds, reroutes or re-signs on its own.
@@ -68,9 +76,11 @@ export type TransitionReason =
   | 'payout_create_failed'
   | 'quote_expired_before_signing'
   | 'signed_and_on_chain'
+  | 'sent_to_partner'
   | 'submission_rejected_or_unknown'
   | 'signer_refused'
   | 'partner_submission_unknown'
+  | 'run_interrupted'
   | 'partner_accepted'
   | 'partner_refused_or_unknown'
   | 'fiat_landed'
@@ -109,6 +119,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
   rule('payout_quoted', 'needs_attention', 'payout_create_failed', 'payout create failed'),
   rule('awaiting_signature', 'funded', 'quote_expired_before_signing', 'quote expired before signing'),
   rule('awaiting_signature', 'payout_submitted', 'signed_and_on_chain', 'signed and on chain'),
+  rule('awaiting_signature', 'payout_submitted', 'sent_to_partner', 'signed XDR handed to the partner'),
   rule(
     'awaiting_signature',
     'needs_attention',
@@ -122,6 +133,7 @@ export const TRANSITIONS: readonly TransitionRule[] = [
     'partner_submission_unknown',
     'signed XDR sent, partner did not confirm',
   ),
+  rule('awaiting_signature', 'needs_attention', 'run_interrupted', 'payout run interrupted after authorization'),
   rule('payout_submitted', 'payout_processing', 'partner_accepted', 'partner accepted'),
   rule('payout_submitted', 'needs_attention', 'partner_refused_or_unknown', 'partner refused or unknown'),
   rule('payout_processing', 'completed', 'fiat_landed', 'fiat landed'),
