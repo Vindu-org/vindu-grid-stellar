@@ -55,7 +55,7 @@ import {
 } from '@vindu/grid-core';
 import type { HorizonGateway, HorizonLedger, HorizonSubmitResponse, HorizonTransactionFound } from './horizon';
 import { type SubmitError, mapResultCodes } from './result-codes';
-import { FeeBumpTransaction, TransactionBuilder } from './sdk';
+import { FeeBumpTransaction, TransactionBuilder, stellarSdk } from './sdk';
 
 /** Which locally computed hash found the transaction on Horizon. */
 export type FoundBy = 'hash' | 'inner_hash';
@@ -188,11 +188,20 @@ export interface SignedTransactionInfo {
   readonly innerHash?: string;
   /** maxTime in unix seconds, or `undefined` when the transaction has no upper time bound. */
   readonly maxTime: number | undefined;
+  /**
+   * The account whose sequence number the transaction uses: the source of
+   * the inner transaction for a fee bump, as a `G...` account (a muxed
+   * `M...` source gives its base account).
+   */
+  readonly source: string;
+  /** The transaction's sequence number, a decimal string. */
+  readonly sequence: string;
 }
 
 /**
- * Hashes and maxTime of a signed envelope, computed locally. For a fee bump,
- * maxTime is the inner transaction's.
+ * Hashes, maxTime, source account and sequence number of a signed envelope,
+ * computed locally. For a fee bump, maxTime, source and sequence are the
+ * inner transaction's.
  *
  * @throws {InvalidInputError} when the envelope cannot be decoded.
  */
@@ -210,6 +219,8 @@ export function inspectSignedTransaction(signedXdr: string, networkPassphrase: s
     hash: hex(tx.hash()),
     ...(inner === tx ? {} : { innerHash: hex(inner.hash()) }),
     maxTime: maxTime > 0 ? maxTime : undefined,
+    source: inner.source.startsWith('M') ? stellarSdk.extractBaseAddress(inner.source) : inner.source,
+    sequence: inner.sequence,
   };
 }
 

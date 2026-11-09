@@ -78,8 +78,13 @@ const ledgerAt = (seconds: number, sequence = 100) => ({ sequence, closedAt: new
 
 describe('submit', () => {
   it('computes the hash locally, equal to the SDK hash and the returned hash', async () => {
-    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
-    expect(inspectSignedTransaction(xdr, TESTNET_NETWORK_PASSPHRASE)).toEqual({ hash, maxTime: IN_ONE_HOUR });
+    const { xdr, hash, tx } = signedPayment(IN_ONE_HOUR);
+    expect(inspectSignedTransaction(xdr, TESTNET_NETWORK_PASSPHRASE)).toEqual({
+      hash,
+      maxTime: IN_ONE_HOUR,
+      source: tx.source,
+      sequence: '101',
+    });
     const gateway = new FakeGateway();
     gateway.submitResponses = [{ kind: 'accepted', hash, ledger: 7, successful: true }];
     const result = await run(gateway, xdr);
@@ -446,6 +451,27 @@ describe('submit: fee bumps', () => {
       hash: ours.hash,
       innerHash: inner.hash,
       maxTime: IN_ONE_HOUR,
+      // The inner transaction's: the fee source spends no sequence number.
+      source: inner.tx.source,
+      sequence: '101',
+    });
+  });
+
+  it('reads the base account of a muxed source', () => {
+    const source = Keypair.random();
+    const muxed = new stellarSdk.MuxedAccount(new Account(source.publicKey(), '41'), '7');
+    const tx = new TransactionBuilder(muxed, {
+      fee: '100',
+      networkPassphrase: Networks.TESTNET,
+      timebounds: { minTime: 0, maxTime: IN_ONE_HOUR },
+    })
+      .addOperation(Operation.bumpSequence({ bumpTo: '50' }))
+      .build();
+    tx.sign(source);
+    expect(tx.source.startsWith('M')).toBe(true);
+    expect(inspectSignedTransaction(tx.toXDR(), TESTNET_NETWORK_PASSPHRASE)).toMatchObject({
+      source: source.publicKey(),
+      sequence: '42',
     });
   });
 
