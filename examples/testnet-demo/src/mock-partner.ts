@@ -77,8 +77,10 @@ export interface MockPartnerOptions {
   readonly capabilities: PartnerCapabilities;
   /** BRL the client pays per unit of stablecoin. */
   readonly brlPerUsdc: string;
-  /** USD the beneficiary gets per unit of stablecoin. */
+  /** USD the beneficiary gets per unit of stablecoin, as shown when the client confirms. */
   readonly usdPerUsdc: string;
+  /** Rate the payout quote gives later, once the market has moved. Defaults to `usdPerUsdc`. */
+  readonly payoutUsdPerUsdc?: string;
   readonly now: () => number;
   /** Required when `chain` is `stellar`. */
   readonly stellar?: MockStellarSettings;
@@ -139,8 +141,8 @@ export class MockPartner implements PartnerAdapter {
     this.assertChain(input.account);
     const rails = this.options.capabilities.offRamp[input.targetAsset.code] ?? [];
     if (!rails.includes(input.rail)) throw new GridError('invalid_input', `${this.id} has no ${input.rail} payout`);
-    const target = multiply(input.source, this.options.usdPerUsdc, input.targetAsset);
-    return this.quote('payout', input.source, target);
+    const rate = this.options.payoutUsdPerUsdc ?? this.options.usdPerUsdc;
+    return this.quote('payout', input.source, multiply(input.source, rate, input.targetAsset));
   }
 
   async preparePayout(input: PreparePayoutInput): Promise<PayoutAuthorization> {
