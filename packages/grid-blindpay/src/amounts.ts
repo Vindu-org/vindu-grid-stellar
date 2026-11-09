@@ -27,9 +27,10 @@ import {
 export const BLINDPAY_DECIMALS = 2;
 
 /**
- * Development instances decide the outcome from `request_amount`: `66600`
- * (666.00) ends `failed`, `77700` (777.00) ends `refunded`, anything else
- * `completed`. Production ignores them.
+ * Test aid, not for production code. Development instances decide the outcome
+ * from `request_amount`: `66600` (666.00) ends `failed`, `77700` (777.00)
+ * ends `refunded`, anything else `completed`. Production ignores them. Use it
+ * to drive a failure or refund on a development instance, or in a mock.
  */
 export const DEV_SENTINEL_AMOUNTS = { failed: 66_600, refunded: 77_700 } as const;
 
