@@ -12,5 +12,6 @@ export * from './observability';
 export * from './ports';
 export * from './routing';
 export * from './signer';
+export * from './submission';
 export * from './tolerance';
 export * from './transfer-states';
