@@ -12,4 +12,6 @@ import type * as StellarSdk from '@stellar/stellar-sdk' with { 'resolution-mode'
 const sdk = require('@stellar/stellar-sdk') as typeof StellarSdk;
 
 export type { StellarSdk };
+/** The whole SDK, for tests and internal use. Not re-exported from the package index. */
+export const stellarSdk = sdk;
 export const { Horizon, NotFoundError, TransactionBuilder, FeeBumpTransaction } = sdk;
