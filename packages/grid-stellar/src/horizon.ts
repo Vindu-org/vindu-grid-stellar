@@ -95,7 +95,25 @@ export interface HorizonAccount {
   readonly balances: readonly HorizonBalanceLine[];
 }
 
+/** A ledger as Horizon has ingested it. */
+export interface HorizonLedger {
+  readonly sequence: number;
+  /** Close time of the ledger, as the network recorded it (whole seconds). */
+  readonly closedAt: Date;
+}
+
 export interface HorizonGateway {
+  /**
+   * Passphrase of the network this gateway talks to. Submission refuses to
+   * run when it differs from the passphrase the envelope was signed for.
+   */
+  readonly networkPassphrase: string;
+  /**
+   * The latest ledger Horizon has ingested. Horizon ingests ledgers in order,
+   * so every transaction in this ledger or an earlier one can be looked up.
+   * Network errors throw.
+   */
+  latestLedger(): Promise<HorizonLedger>;
   /** Payments (payment, path payment, create account, merge) that touch `account`. Successful transactions only. */
   paymentsForAccount(account: string, query: PaymentsQuery): Promise<readonly HorizonPaymentRecord[]>;
   /** Looks a transaction up by hash. Not found is a result; network errors throw. */
@@ -109,7 +127,11 @@ export interface HorizonGateway {
 export interface HorizonGatewayOptions {
   /** Horizon base URL, e.g. `TESTNET_HORIZON_URL`. */
   readonly horizonUrl: string;
-  /** Needed to decode the envelope before submitting it. */
+  /**
+   * Passphrase of the network behind `horizonUrl`. Needed to decode the
+   * envelope before submitting it, and checked against the passphrase given
+   * to `submitSignedTransaction`.
+   */
   readonly networkPassphrase: string;
   /** Allow `http://` URLs, for a local Horizon. Default false. */
   readonly allowHttp?: boolean;
@@ -154,6 +176,7 @@ export interface HorizonPaymentsCall extends HorizonCollectionCall {
  */
 export interface HorizonServer {
   payments(): HorizonPaymentsCall;
+  ledgers(): HorizonCollectionCall;
   transactions(): { transaction(hash: string): HorizonCall<unknown> };
   accounts(): { accountId(accountId: string): HorizonCall<unknown> };
   /** Receives the decoded envelope (an SDK `Transaction` or `FeeBumpTransaction`). */
@@ -166,6 +189,19 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
     options.server ?? new Horizon.Server(options.horizonUrl, { allowHttp: options.allowHttp ?? false });
 
   return {
+    networkPassphrase: options.networkPassphrase,
+
+    async latestLedger() {
+      const page = await server.ledgers().order('desc').limit(1).call();
+      const ledger = asObject(page.records[0]);
+      const sequence = ledger['sequence'];
+      const closedAt = typeof ledger['closed_at'] === 'string' ? new Date(ledger['closed_at']) : null;
+      if (typeof sequence !== 'number' || !Number.isInteger(sequence) || closedAt === null || Number.isNaN(closedAt.getTime())) {
+        throw new Error('Horizon returned no usable latest ledger');
+      }
+      return { sequence, closedAt };
+    },
+
     async paymentsForAccount(account, query) {
       let builder = server.payments().forAccount(account).order(query.order).limit(query.limit).join('transactions');
       if (query.cursor !== undefined) builder = builder.cursor(query.cursor);

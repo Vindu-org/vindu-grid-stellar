@@ -15,7 +15,12 @@ function signedXdr(): string {
 }
 
 /** A stand-in for Horizon.Server with only the calls the gateway makes. No network. */
-function fakeServer(overrides: { submit?: () => Promise<unknown>; tx?: () => Promise<unknown>; page?: unknown[] }) {
+function fakeServer(overrides: {
+  submit?: () => Promise<unknown>;
+  tx?: () => Promise<unknown>;
+  page?: unknown[];
+  ledgers?: unknown[];
+}) {
   const cursor = jest.fn();
   const chain: Record<string, unknown> = {
     call: async () => ({ records: overrides.page ?? [] }),
@@ -25,18 +30,31 @@ function fakeServer(overrides: { submit?: () => Promise<unknown>; tx?: () => Pro
     cursor(c);
     return chain;
   };
+  const ledgerQuery: Array<[string, unknown]> = [];
+  const ledgers: Record<string, unknown> = { call: async () => ({ records: overrides.ledgers ?? [] }) };
+  for (const step of ['order', 'limit', 'cursor']) {
+    ledgers[step] = (v: unknown) => {
+      ledgerQuery.push([step, v]);
+      return ledgers;
+    };
+  }
   const server = {
     payments: () => chain,
+    ledgers: () => ledgers,
     transactions: () => ({ transaction: () => ({ call: overrides.tx ?? (async () => ({})) }) }),
     submitTransaction: overrides.submit ?? (async () => ({})),
     accounts: () => ({ accountId: () => ({ call: async () => Promise.reject(new NotFoundError('nf', { status: 404 })) }) }),
   };
-  return { server: server as unknown as HorizonServer, cursor };
+  return { server: server as unknown as HorizonServer, cursor, ledgerQuery };
 }
 
 function gatewayWith(overrides: Parameters<typeof fakeServer>[0]) {
-  const { server, cursor } = fakeServer(overrides);
-  return { gateway: createHorizonGateway({ horizonUrl: TESTNET_HORIZON_URL, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, server }), cursor };
+  const { server, cursor, ledgerQuery } = fakeServer(overrides);
+  return {
+    gateway: createHorizonGateway({ horizonUrl: TESTNET_HORIZON_URL, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, server }),
+    cursor,
+    ledgerQuery,
+  };
 }
 
 const httpError = (status: number, data?: unknown) => Object.assign(new Error('http'), { response: { status, data } });
@@ -46,6 +64,27 @@ describe('horizon gateway', () => {
     // Compile-time check: the structural type fits the SDK's server.
     const server: HorizonServer = new Horizon.Server(TESTNET_HORIZON_URL);
     expect(typeof server.payments).toBe('function');
+  });
+
+  it('exposes its network passphrase', () => {
+    expect(gatewayWith({}).gateway.networkPassphrase).toBe(TESTNET_NETWORK_PASSPHRASE);
+  });
+
+  it('reads the latest ingested ledger, newest first', async () => {
+    const { gateway, ledgerQuery } = gatewayWith({
+      ledgers: [{ sequence: 51, closed_at: '2026-11-09T12:00:05Z', _links: {} }],
+    });
+    expect(await gateway.latestLedger()).toEqual({ sequence: 51, closedAt: new Date('2026-11-09T12:00:05Z') });
+    expect(ledgerQuery).toEqual([
+      ['order', 'desc'],
+      ['limit', 1],
+    ]);
+  });
+
+  it('fails latestLedger when Horizon returns no usable ledger', async () => {
+    for (const ledgers of [[], [{ sequence: 51 }], [{ sequence: '51', closed_at: '2026-11-09T12:00:05Z' }], [{ sequence: 51, closed_at: 'soon' }]]) {
+      await expect(gatewayWith({ ledgers }).gateway.latestLedger()).rejects.toThrow('no usable latest ledger');
+    }
   });
 
   it('treats a submit answer without a hash or result as unavailable', async () => {
