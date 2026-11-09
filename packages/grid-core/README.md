@@ -60,7 +60,7 @@ Store `decision.route` on the transfer. It never changes after the funding leg i
 Payouts that need a signature come back from `preparePayout` as an unsigned Stellar transaction. Your signer holds the key, and it must check what it signs, because the partner built the transaction. It refuses (throws) unless:
 
 1. `assertSigningAllowed(context, now)` passes: the transfer is in `awaiting_signature`, the quote has not expired, and the clock is sane;
-2. the XDR decodes for the signer's own network;
+2. it signs for its own network passphrase, never one the partner names. The network cannot be checked from an unsigned envelope: the signature binds it, so a transaction signed for another network is invalid on this one;
 3. the envelope is a plain transaction, not a fee bump;
 4. it has exactly one operation, a payment;
 5. the transaction source is `context.expected.source`;
@@ -69,10 +69,10 @@ Payouts that need a signature come back from `preparePayout` as an unsigned Stel
 8. in `expected.amount.asset`, code and issuer;
 9. for exactly `expected.amount.amount`;
 10. the total fee is within the signer's own cap;
-11. `assertMaxTimeWithinQuote(maxTime, context)` passes: the transaction has a `maxTime`, no later than the quote expiry;
+11. `assertMaxTimeWithinQuote(maxTime, context)` passes: the transaction has a `maxTime`, no later than the quote expiry; and its `minTime`, if any, is no later than the signing time;
 12. it has no v2 preconditions: no minimum account sequence, sequence age or ledger gap, no extra signers, no ledger bounds.
 
-`@vindu/grid-stellar` exports `assertPayoutXdrMatches`, a key-free check of this whole list; a signer calls it before signing. Whatever a signer throws, the payout run reports `SignerRefusedError` with only a code-shaped cause code, so refusal messages never leak into the run's error.
+`@vindu/grid-stellar` exports `assertPayoutXdrMatches`, a key-free check of the transaction rules (3 to 12, the `minTime` against its `now` option); a signer calls it before signing, and signs with its own network passphrase (2). Whatever a signer throws, the payout run reports `SignerRefusedError` with only a cause code that `causeCodeOf` accepts, so refusal messages never leak into the run's error.
 
 ## Payout flow
 

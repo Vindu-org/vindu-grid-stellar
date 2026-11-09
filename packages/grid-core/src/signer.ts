@@ -12,8 +12,11 @@
  *
  * 1. State and time: {@link assertSigningAllowed} passes: the transfer is in
  *    `awaiting_signature`, the quote has not expired, and the clock is sane.
- * 2. Network: the XDR decodes for the network passphrase the signer is
- *    configured for, and no other.
+ * 2. Network: sign with the network passphrase the signer is configured
+ *    for, never one the partner names. An unsigned envelope does not say
+ *    which network it is for, so this cannot be checked from the XDR: the
+ *    signature binds it, because the signed hash includes the passphrase,
+ *    and a transaction signed for another network is invalid on this one.
  * 3. Envelope: a plain transaction, not a fee bump (whose inner transaction
  *    and fee payer the signer did not choose).
  * 4. Operations: exactly one operation, and it is a payment.
@@ -28,19 +31,22 @@
  * 10. Fee: no more than the signer's own cap, in stroops.
  * 11. Time bounds: {@link assertMaxTimeWithinQuote} passes: the transaction
  *     has a `maxTime`, no later than the quote expiry, so it can never land
- *     after the quote is gone.
+ *     after the quote is gone. Its `minTime`, if any, is no later than the
+ *     signing time, so it cannot be held back to land later.
  * 12. No v2 preconditions: no minimum account sequence, no minimum sequence
  *     age or ledger gap, no extra signers and no ledger bounds. Each lets
  *     the transaction wait or land in ways the time bounds do not limit.
  *
  * This package has no Stellar SDK, so decoding is the signer's job; steps 1
  * and 11 are helpers here. `@vindu/grid-stellar` exports
- * `assertPayoutXdrMatches`, a key-free check that implements this whole list
- * with the Stellar SDK; a signer can call it before it signs.
+ * `assertPayoutXdrMatches`, a key-free check of the transaction rules
+ * (steps 3 to 12, the `minTime` against its `now` option) with the Stellar
+ * SDK; a signer calls it before it signs, and signs with its own network
+ * passphrase (step 2).
  *
  * Whatever a signer throws, the payout run turns into `SignerRefusedError`
- * (keeping only a code-shaped `code`), so a refusal message may be specific:
- * it never reaches the run's error.
+ * (keeping only a cause code that `causeCodeOf` accepts), so a refusal
+ * message may be specific: it never reaches the run's error.
  */
 import { SigningNotAllowedError } from './errors';
 import { parseInstantMs } from './instant';
