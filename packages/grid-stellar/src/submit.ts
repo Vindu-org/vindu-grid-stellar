@@ -5,24 +5,29 @@
  * sent, so the transaction can always be looked up. For a fee bump both the
  * outer hash and the inner transaction's hash are computed: anyone can wrap
  * a signed transaction in a fee bump of their own, and the payment it
- * carries lands under that envelope's hash. Lookups use every hash; any one
- * found means the transaction landed. When the submission times out or the
- * network fails, the hashes are checked on Horizon before anything else. Resubmitting the same signed envelope is safe (Stellar
- * applies a transaction once); asking for a new signature is never done here.
+ * carries lands under that envelope's hash. Lookups use every hash. When the
+ * submission times out or the network fails, the hashes are checked on
+ * Horizon before anything else. Resubmitting the same signed envelope is
+ * safe (Stellar applies a transaction once); asking for a new signature is
+ * never done here.
  *
  * Whether a transaction expired is decided by the network, never by the
  * local clock. `expired_not_landed` needs all three: the transaction has a
  * maxTime; Horizon's latest ingested ledger closed after that maxTime (no
  * later ledger can include it, and Horizon ingests ledgers in order, so
  * every ledger that could is already ingested); and a successful lookup
- * made after reading that ledger finds nothing by any hash. A failed ledger
- * read or lookup never counts. Point the gateway at one Horizon instance:
- * behind a load balancer the ledger read and the lookup may hit instances
- * that have ingested different ledgers.
+ * made after reading that ledger finds nothing by any hash. A failed or
+ * timed-out ledger read or lookup never counts. Point the gateway at one
+ * Horizon instance: behind a load balancer the ledger read and the lookup
+ * may hit instances that have ingested different ledgers.
  *
- * Horizon's answer is checked too: an accepted submission whose hash is not
- * the locally computed envelope hash is `rejected` with reason
- * `hash_mismatch`, never `success`.
+ * Horizon's answer to the submission is checked too: an accepted submission
+ * whose hash is not the locally computed envelope hash is `rejected` with
+ * reason `hash_mismatch`, never `success`.
+ *
+ * Everything runs within `timeoutMs + maxWaitMs` from the start: every
+ * Horizon read is aborted at `requestTimeoutMs` or at that deadline,
+ * whichever comes first.
  *
  * **Do not sign a replacement unless the status is `expired_not_landed`**
  * (the transaction's maxTime has passed and it is not on the ledger, so it
@@ -89,7 +94,7 @@ export type SubmitResult =
       /** The hash Horizon answered with. */
       readonly returnedHash: string;
     }
-  /** Not found, and it could still land (maxTime not passed, or no maxTime). Check again later; do not re-sign. */
+  /** Not known to be on the ledger, and not proven unable to land. Check again later; do not re-sign. */
   | { readonly status: 'unknown'; readonly hash: string; readonly innerHash?: string; readonly lastError?: SubmitError }
   /**
    * A ledger Horizon had ingested closed after maxTime, and a later lookup
@@ -120,14 +125,22 @@ export interface SubmitOptions {
   readonly timeoutMs?: number;
   /** Pause between hash checks after a timeout. Default 5 s. */
   readonly pollIntervalMs?: number;
-  /** Longest total wait after a timeout before returning `unknown`. Default 2 min. */
+  /** Longest extra wait, after `timeoutMs`, before returning `unknown`. Default 2 min. */
   readonly maxWaitMs?: number;
+  /**
+   * Longest wait for one Horizon read (a ledger read or a lookup). A read
+   * that takes longer is abandoned and counts as an error, never as "not
+   * found". Default 10 s.
+   */
+  readonly requestTimeoutMs?: number;
   /** Resubmit the same signed envelope while waiting. Default true. */
   readonly resubmit?: boolean;
   readonly logger?: Logger;
   /**
-   * Clock in ms since epoch, for the `maxWaitMs` budget only. Never decides
-   * whether the transaction expired. Default `Date.now`.
+   * Clock in ms since epoch, for the time budget only. Never decides whether
+   * the transaction expired. Read once before sending to fix the deadline;
+   * a later reading that is not a finite number ends the run with
+   * `unknown`. Default `Date.now`.
    */
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -171,6 +184,14 @@ function hex(bytes: Uint8Array): string {
 
 const TIMED_OUT = Symbol('timed out');
 
+/** Result of looking the transaction up by every local hash. */
+type Lookup =
+  | { readonly kind: 'found'; readonly record: HorizonTransactionFound; readonly by: FoundBy }
+  /** Every lookup answered "not found". */
+  | { readonly kind: 'not_found' }
+  /** A lookup failed or timed out, and none found it: proves nothing. */
+  | { readonly kind: 'error' };
+
 /**
  * Submits `signedXdr` and returns what is known about it. Never throws for
  * network or Horizon errors. Throws, before anything is sent, only for
@@ -179,19 +200,29 @@ const TIMED_OUT = Symbol('timed out');
  * @throws {InvalidConfigError} when the gateway's network passphrase is not
  * `networkPassphrase`: the locally computed hash would never be found.
  * @throws {InvalidInputError} when a duration is not a finite number in
- * range, the clock does not return a finite number, or the envelope cannot
- * be decoded.
+ * range, the clock does not return a finite number before sending, or the
+ * envelope cannot be decoded.
  */
 export async function submitSignedTransaction(options: SubmitOptions): Promise<SubmitResult> {
   const { gateway, signedXdr } = options;
   assertSameNetwork(gateway, options.networkPassphrase);
-  const { timeoutMs, pollIntervalMs, maxWaitMs } = durations(options);
+  const { timeoutMs, pollIntervalMs, maxWaitMs, requestTimeoutMs } = durations(options);
   const resubmit = options.resubmit ?? true;
   const logger = options.logger ?? noopLogger;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const readClock = (): number => {
+    try {
+      const t = now();
+      return typeof t === 'number' ? t : Number.NaN;
+    } catch {
+      return Number.NaN;
+    }
+  };
 
-  if (!Number.isFinite(now())) throw new InvalidInputError('now() must return a finite number of milliseconds');
+  // The deadline is fixed once, before anything is sent.
+  const deadline = readClock() + timeoutMs + maxWaitMs;
+  if (!Number.isFinite(deadline)) throw new InvalidInputError('now() must return a finite number of milliseconds');
 
   const { hash, innerHash, maxTime } = inspectSignedTransaction(signedXdr, options.networkPassphrase);
   const inner = innerHash === undefined ? {} : { innerHash };
@@ -202,45 +233,71 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     logger.info('stellar submission settled', { hash, status: result.status });
     return result;
   };
+  const unknown = (lastError: SubmitError | undefined): SubmitResult =>
+    done({ status: 'unknown', hash, ...inner, ...(lastError === undefined ? {} : { lastError }) });
 
-  async function attempt(): Promise<HorizonSubmitResponse> {
+  /**
+   * Runs `call` for at most `limitMs`, and never past the deadline unless
+   * `ignoreDeadline`. On time out the signal aborts and the result is
+   * `TIMED_OUT`. A broken clock leaves no time. Rejects when `call` does.
+   */
+  async function bounded<T>(
+    limitMs: number,
+    call: (signal: AbortSignal) => Promise<T>,
+    ignoreDeadline = false,
+  ): Promise<T | typeof TIMED_OUT> {
+    const ms = ignoreDeadline ? limitMs : Math.min(limitMs, deadline - readClock());
+    if (!(ms > 0)) return TIMED_OUT;
+    const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
-    const pending = Promise.resolve().then(() => gateway.submitTransaction(signedXdr));
+    const pending = Promise.resolve().then(() => call(controller.signal));
     pending.catch(() => undefined); // a late rejection after the timeout is not an error here
     try {
-      const raced = await Promise.race([
+      return await Promise.race([
         pending,
         new Promise<typeof TIMED_OUT>((r) => {
-          timer = setTimeout(() => r(TIMED_OUT), timeoutMs);
+          timer = setTimeout(() => {
+            controller.abort();
+            r(TIMED_OUT);
+          }, ms);
         }),
       ]);
-      return raced === TIMED_OUT ? { kind: 'timeout' } : raced;
-    } catch (e) {
-      logger.warn('stellar submission threw', { hash, error: e instanceof Error ? e.name : typeof e });
-      return { kind: 'unavailable', status: null };
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /**
-   * Looks the transaction up by every local hash. `null` when a lookup failed
-   * and none found it: a failed lookup never counts as not found.
-   */
-  async function lookup(): Promise<{ found: HorizonTransactionFound; by: FoundBy } | { found: false } | null> {
+  /** One submission. The first always gets the full `timeoutMs`; resubmissions only what is left. */
+  async function attempt(first: boolean): Promise<HorizonSubmitResponse> {
+    try {
+      const raced = await bounded(timeoutMs, () => gateway.submitTransaction(signedXdr), first);
+      return raced === TIMED_OUT ? { kind: 'timeout' } : raced;
+    } catch (e) {
+      logger.warn('stellar submission threw', { hash, error: errorName(e) });
+      return { kind: 'unavailable', status: null };
+    }
+  }
+
+  /** Looks the transaction up by every local hash. A failed or timed-out lookup never counts as not found. */
+  async function lookup(): Promise<Lookup> {
     let failed = false;
     for (const [h, by] of lookups) {
       try {
-        const result = await gateway.transaction(h);
+        const result = await bounded(requestTimeoutMs, (signal) => gateway.transaction(h, { signal }));
+        if (result === TIMED_OUT) {
+          failed = true;
+          logger.warn('transaction lookup timed out', { hash: h });
+          continue;
+        }
         if (!result.found) continue;
         if (!HASH.test(result.hash)) throw new Error('Horizon returned a transaction with an invalid hash');
-        return { found: result, by };
+        return { kind: 'found', record: result, by };
       } catch (e) {
         failed = true;
-        logger.warn('transaction lookup failed', { hash: h, error: e instanceof Error ? e.name : typeof e });
+        logger.warn('transaction lookup failed', { hash: h, error: errorName(e) });
       }
     }
-    return failed ? null : { found: false };
+    return failed ? { kind: 'error' } : { kind: 'not_found' };
   }
 
   const fromLookup = (found: HorizonTransactionFound, by: FoundBy, error?: SubmitError): SubmitResult => {
@@ -268,15 +325,19 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     return { status: accepted.successful ? 'success' : 'failed', hash, ...inner, ...ledger };
   };
 
-  /** Horizon's latest ingested ledger, or `null` when it cannot be read or makes no sense. */
-  async function latestLedger(): Promise<HorizonLedger | null> {
+  /** Horizon's latest ingested ledger, or `null` when it cannot be read in time or makes no sense. */
+  async function latestLedger(limitMs: number): Promise<HorizonLedger | null> {
     try {
-      const ledger = await gateway.latestLedger();
+      const ledger = await bounded(limitMs, (signal) => gateway.latestLedger({ signal }));
+      if (ledger === TIMED_OUT) {
+        logger.warn('latest ledger read timed out', { hash });
+        return null;
+      }
       const closedAt = ledger.closedAt instanceof Date ? ledger.closedAt.getTime() : Number.NaN;
-      if (Number.isInteger(ledger.sequence) && Number.isFinite(closedAt)) return ledger;
+      if (isLedgerNumber(ledger.sequence) && Number.isFinite(closedAt)) return ledger;
       logger.warn('latest ledger unusable', { hash });
     } catch (e) {
-      logger.warn('latest ledger read failed', { hash, error: e instanceof Error ? e.name : typeof e });
+      logger.warn('latest ledger read failed', { hash, error: errorName(e) });
     }
     return null;
   }
@@ -285,24 +346,25 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
    * Reads the ledger first (only when there is a maxTime), then looks the
    * transaction up, so the lookup is made after that ledger was ingested.
    * Settles on a landing, or on expiry when the ledger closed after maxTime
-   * and the lookup succeeded and found nothing. `null`: not settled.
+   * and the lookup succeeded and found nothing.
+   * `null`: not settled.
    */
   async function probe(error?: SubmitError): Promise<SubmitResult | null> {
-    const ledger = maxTime === undefined ? null : await latestLedger();
+    const checked = maxTime === undefined ? null : await latestLedger(requestTimeoutMs);
     const look = await lookup();
-    if (look?.found) return fromLookup(look.found, look.by, error);
-    if (look === null || ledger === null || maxTime === undefined) return null;
-    if (Math.floor(ledger.closedAt.getTime() / 1000) <= maxTime) return null;
+    if (look.kind === 'found') return fromLookup(look.record, look.by, error);
+    if (look.kind === 'error' || checked === null || maxTime === undefined) return null;
+    if (Math.floor(checked.closedAt.getTime() / 1000) <= maxTime) return null;
     return {
       status: 'expired_not_landed',
       hash,
       ...inner,
       maxTime,
-      checkedLedger: { sequence: ledger.sequence, closedAt: ledger.closedAt.toISOString() },
+      checkedLedger: { sequence: checked.sequence, closedAt: checked.closedAt.toISOString() },
     };
   }
 
-  const first = await attempt();
+  const first = await attempt(true);
   if (first.kind === 'accepted') return done(fromAccepted(first));
   if (first.kind === 'rejected') {
     const error = mapResultCodes(first.transactionCode, first.operationCodes);
@@ -316,22 +378,20 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
   }
 
   // Timed out or no answer: the transaction may be on its way. Check the
-  // hashes before anything else, and keep checking.
+  // hashes before anything else, and keep checking. The number of rounds is
+  // bounded too, so a clock that stops moving cannot keep the loop alive.
   logger.warn('stellar submission without answer; checking the hash', { hash, kind: first.kind });
-  const deadline = now() + maxWaitMs;
+  const rounds = Math.floor(maxWaitMs / pollIntervalMs) + 1;
   let lastError: SubmitError | undefined;
-  for (;;) {
+  for (let round = 1; ; round += 1) {
     const settled = await probe(lastError);
     if (settled !== null) return done(settled);
-    const t = now();
-    // A clock that stops returning numbers ends the wait instead of looping forever.
-    if (!Number.isFinite(t) || t >= deadline) {
-      return done({ status: 'unknown', hash, ...inner, ...(lastError === undefined ? {} : { lastError }) });
-    }
-    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - t)));
+    const t = readClock();
+    if (!Number.isFinite(t) || round >= rounds || t + pollIntervalMs >= deadline) return unknown(lastError);
+    await sleep(pollIntervalMs);
     // Resubmitting after maxTime is harmless: the network refuses it as too late.
     if (resubmit) {
-      const again = await attempt();
+      const again = await attempt(false);
       if (again.kind === 'accepted') return done(fromAccepted(again));
       if (again.kind === 'rejected') lastError = mapResultCodes(again.transactionCode, again.operationCodes);
     }
@@ -339,6 +399,14 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
 }
 
 const HASH = /^[0-9a-f]{64}$/i;
+
+function isLedgerNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function errorName(e: unknown): string {
+  return e instanceof Error ? e.name : typeof e;
+}
 
 /**
  * Throws unless the gateway talks to the network the envelope is signed for.
@@ -359,6 +427,7 @@ function durations(options: Omit<SubmitOptions, 'signedXdr'>) {
     timeoutMs: duration(options.timeoutMs ?? 30_000, 'timeoutMs', 1),
     pollIntervalMs: duration(options.pollIntervalMs ?? 5_000, 'pollIntervalMs', 1),
     maxWaitMs: duration(options.maxWaitMs ?? 120_000, 'maxWaitMs', 0),
+    requestTimeoutMs: duration(options.requestTimeoutMs ?? 10_000, 'requestTimeoutMs', 1),
   };
 }
 

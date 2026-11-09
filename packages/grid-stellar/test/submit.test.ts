@@ -583,3 +583,102 @@ describe('submit result code mapping', () => {
     expect(mapResultCodes('<html>', [])).toEqual({ code: 'other', operationCodes: [] });
   });
 });
+
+describe('submit: Horizon reads time out', () => {
+  const maxTime = T0 / 1000 - 60;
+  const hang = () => new Promise<never>(() => undefined);
+
+  it('a hanging lookup counts as an error, never as not found', async () => {
+    const { xdr, hash } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.ledger = ledgerAt(T0 / 1000);
+    gateway.transaction = hang;
+    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    expect(result).toEqual({ status: 'unknown', hash });
+  });
+
+  it('a hanging ledger read counts as an error and the run still ends', async () => {
+    const { xdr, hash } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.latestLedger = hang;
+    const result = await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 10_000 });
+    expect(result).toEqual({ status: 'unknown', hash });
+  });
+
+  it('aborts the signal of a read it gives up on', async () => {
+    const { xdr } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    const signals: AbortSignal[] = [];
+    gateway.transaction = (_h, options) => {
+      if (options?.signal !== undefined) signals.push(options.signal);
+      return hang();
+    };
+    await run(gateway, xdr, clock(), { requestTimeoutMs: 5, maxWaitMs: 0 });
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((s) => s.aborted)).toBe(true);
+  });
+
+  it.each([Number.NaN, 0, -1, Number.POSITIVE_INFINITY])('fails closed on requestTimeoutMs = %p', async (requestTimeoutMs) => {
+    const { xdr } = signedPayment(maxTime);
+    const gateway = new FakeGateway();
+    await expect(run(gateway, xdr, clock(), { requestTimeoutMs })).rejects.toThrow(InvalidInputError);
+    expect(gateway.submitted).toEqual([]);
+  });
+});
+
+describe('submit: a broken clock ends the run', () => {
+  it('a clock that returns NaN once after the deadline is fixed ends with unknown, no tight loop', async () => {
+    // Review probe: the deadline used to be read from a second clock call; a
+    // NaN there made `t >= deadline` false forever and the loop spun.
+    const { xdr, hash } = signedPayment(T0 / 1000 + 60);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    let calls = 0;
+    let sleeps = 0;
+    const result = await run(gateway, xdr, clock(), {
+      now: () => (++calls === 2 ? Number.NaN : T0),
+      sleep: async () => {
+        sleeps += 1;
+        if (sleeps > 1_000) throw new Error('tight loop');
+      },
+      resubmit: false,
+      maxWaitMs: 1_000,
+    });
+    expect(result).toEqual({ status: 'unknown', hash });
+    expect(sleeps).toBe(0);
+  });
+
+  it('a clock that never moves ends after maxWaitMs / pollIntervalMs rounds', async () => {
+    const { xdr, hash } = signedPayment(T0 / 1000 + 60);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    let sleeps = 0;
+    const result = await run(gateway, xdr, clock(), {
+      now: () => T0,
+      sleep: async () => {
+        sleeps += 1;
+      },
+      maxWaitMs: 60_000,
+      pollIntervalMs: 5_000,
+    });
+    expect(result).toMatchObject({ status: 'unknown', hash });
+    expect(sleeps).toBe(12);
+  });
+
+  it('a clock that throws mid-way ends with unknown', async () => {
+    const { xdr, hash } = signedPayment(T0 / 1000 + 60);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    let calls = 0;
+    const now = () => {
+      calls += 1;
+      if (calls > 1) throw new Error('clock gone');
+      return T0;
+    };
+    expect(await run(gateway, xdr, clock(), { now })).toEqual({ status: 'unknown', hash });
+    expect(gateway.submitted).toEqual([xdr]);
+  });
+});
