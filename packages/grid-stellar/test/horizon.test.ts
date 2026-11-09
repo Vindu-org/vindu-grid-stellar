@@ -83,9 +83,18 @@ describe('horizon gateway', () => {
     expect(gatewayWith({}).gateway.networkPassphrase).toBe(TESTNET_NETWORK_PASSPHRASE);
   });
 
-  it('refuses http without allowHttp, a non-URL, and a URL with query or credentials', () => {
+  it('refuses http without allowHttp, a non-URL, and a URL with a query, a fragment or credentials', () => {
     const base = { networkPassphrase: TESTNET_NETWORK_PASSPHRASE, fetch: fakeFetch({}).fetch };
-    for (const horizonUrl of ['http://horizon.example', 'not a url', 'https://h.example/?a=1', 'https://u:p@h.example']) {
+    for (const horizonUrl of [
+      'http://horizon.example',
+      'not a url',
+      'https://h.example/?a=1',
+      'https://u:p@h.example',
+      // An empty query or fragment parses away; the raw characters are refused.
+      'https://h.example/?',
+      'https://h.example/#',
+      'https://h.example/x?#',
+    ]) {
       expect(() => createHorizonGateway({ ...base, horizonUrl })).toThrow(InvalidConfigError);
     }
     expect(() => createHorizonGateway({ ...base, horizonUrl: 'http://127.0.0.1:8000', allowHttp: true })).not.toThrow();

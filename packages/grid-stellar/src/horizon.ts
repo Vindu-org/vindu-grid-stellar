@@ -386,6 +386,12 @@ class HorizonRequestError extends Error {
 }
 
 function baseUrl(raw: string, allowHttp: boolean): string {
+  if (typeof raw !== 'string') throw new InvalidConfigError('horizonUrl is not a URL');
+  // `new URL` drops an empty query or fragment (`https://h/?`), and the
+  // paths appended later would then land after it: refuse the characters.
+  if (raw.includes('?') || raw.includes('#')) {
+    throw new InvalidConfigError('horizonUrl must have no query, fragment or credentials');
+  }
   let url: URL;
   try {
     url = new URL(raw);
