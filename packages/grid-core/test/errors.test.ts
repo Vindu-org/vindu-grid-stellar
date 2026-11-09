@@ -8,6 +8,7 @@ import {
   PartnerHttpError,
   PayoutAuthorizationError,
   PayoutIncompleteError,
+  PayoutInterruptedError,
   QuoteExpiredError,
   SignerRefusedError,
   SigningNotAllowedError,
@@ -217,6 +218,36 @@ describe('shared errors', () => {
       expect(new PayoutAuthorizationError('threw', secret).causeCode).toBeUndefined();
       expect(new SignerRefusedError('threw', secret).causeCode).toBeUndefined();
       expect(new SignerRefusedError('threw', secret).message).not.toMatch(/SECRET/);
+    });
+  });
+
+  describe('PayoutInterruptedError', () => {
+    it('names the stage and the edge, keeps the cause code and never the cause', () => {
+      const cause = Object.assign(new Error('db down for Jane Doe'), { code: 'store_unavailable' });
+      const e = new PayoutInterruptedError({ stage: 'on_signed', signedXdr: 'XDR', cause });
+      expect(e).toBeInstanceOf(GridError);
+      expect(e).toMatchObject({
+        code: 'payout_interrupted',
+        name: 'PayoutInterruptedError',
+        stage: 'on_signed',
+        signedXdr: 'XDR',
+        causeCode: 'store_unavailable',
+      });
+      expect(e.cause).toBeUndefined();
+      expect(e.message).toMatch(/awaiting_signature -> needs_attention/);
+      expect(e.message).toMatch(/nothing was submitted/);
+      expect(JSON.stringify({ ...e, message: e.message })).not.toMatch(/Jane/);
+    });
+
+    it.each<[string, unknown]>([
+      ['a plain Error', new Error('clock')],
+      ['a secret-shaped code', { code: 'sk_live_SECRET123' }],
+      ['nothing', undefined],
+    ])('has no cause code from %s', (_name, cause) => {
+      const e = new PayoutInterruptedError({ stage: 'clock', cause });
+      expect(e).toMatchObject({ stage: 'clock', causeCode: undefined, signedXdr: undefined });
+      expect(e.message).toMatch(/\(clock, no code\)/);
+      expect(e.message).not.toMatch(/SECRET/);
     });
   });
 });

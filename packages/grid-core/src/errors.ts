@@ -21,7 +21,8 @@ export type CoreErrorCode =
   | 'webhook_rejected'
   | 'quote_expired'
   | 'payout_authorization_failed'
-  | 'payout_incomplete';
+  | 'payout_incomplete'
+  | 'payout_interrupted';
 
 /**
  * Every code a {@link GridError} may carry: core's own, plus any code an
@@ -431,5 +432,53 @@ export class PayoutIncompleteError<TBody = unknown> extends GridError {
     this.txHash = init.txHash;
     this.outcome = init.outcome;
     this.pending = init.pending;
+  }
+}
+
+/**
+ * What a payout run was doing when it was interrupted after `onAuthorized`
+ * stored `awaiting_signature`:
+ * - `clock`: the clock threw or gave a time that is not a finite number;
+ * - `on_signed`: the `onSigned` hook threw;
+ * - `run`: anything else the run did not expect.
+ */
+export type PayoutInterruptedStage = 'clock' | 'on_signed' | 'run';
+
+export interface PayoutInterruptedInit {
+  readonly stage: PayoutInterruptedStage;
+  /** The signed XDR, when the signer had returned one. It was never submitted by the run. */
+  readonly signedXdr?: string;
+  readonly cause?: unknown;
+}
+
+/**
+ * A payout run stopped after the transfer moved to `awaiting_signature`, for
+ * a reason that has no edge of its own: a hook threw, the clock broke, or
+ * something else went wrong. Nothing was submitted or sent to the partner by
+ * the run. Take `awaiting_signature -> needs_attention` (`run_interrupted`);
+ * never sign again for this quote.
+ *
+ * `signedXdr` is set when the signer had already signed: store it with the
+ * transfer so an operator can look its hash up, but never submit it.
+ *
+ * It keeps the cause's `code` when {@link causeCodeOf} accepts it, never its
+ * message or the error itself: a hook's error text can carry client data.
+ */
+export class PayoutInterruptedError extends GridError {
+  readonly stage: PayoutInterruptedStage;
+  readonly signedXdr: string | undefined;
+  /** The `code` of what interrupted the run, as {@link causeCodeOf} keeps it. */
+  readonly causeCode: string | undefined;
+
+  constructor(init: PayoutInterruptedInit) {
+    const causeCode = causeCodeOf(init.cause);
+    super(
+      'payout_interrupted',
+      `The payout run was interrupted after awaiting_signature was stored (${init.stage}, ${causeCode ?? 'no code'}): ` +
+        'nothing was submitted; take awaiting_signature -> needs_attention and do not sign again',
+    );
+    this.stage = init.stage;
+    this.signedXdr = init.signedXdr;
+    this.causeCode = causeCode;
   }
 }
