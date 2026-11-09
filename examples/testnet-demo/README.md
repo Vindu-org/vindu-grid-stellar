@@ -43,8 +43,9 @@ yarn workspace testnet-demo start --blindpay-dry-run
 | `src/demo.ts` | `runDemo`: setup, routing, then the two legs. |
 | `src/funding-leg.ts`, `src/payout-leg.ts` | The two legs, step by step. |
 | `src/mock-partner.ts` | `MockPartner`, a core `PartnerAdapter`, and both partners' capabilities as data. |
-| `src/test-key-signer.ts` | `TestKeySigner`, a core `Signer` with a throwaway key. Read it as a reference for the checks a signer must make; `test/test-key-signer.test.ts` covers each refusal. |
-| `src/fake-horizon.ts` | `FakeHorizon`, an in-memory `HorizonGateway` that checks signatures, sequence numbers and time bounds. |
+| `src/test-key-signer.ts` | `TestKeySigner`, a core `Signer` with a throwaway key. Read it as a reference for a signer: `assertSigningAllowed`, the key check, then `assertPayoutXdrMatches`. `test/test-key-signer.test.ts` covers each refusal. |
+| `src/transfer.ts` | `Transfer`, the stored transfer: every move goes through core's `transition`; `compareAndMove` is the compare-and-set the payout hooks use. |
+| `src/fake-horizon.ts` | `FakeHorizon`, an in-memory `HorizonGateway` that checks signatures, sequence numbers and time bounds, and reports its ingested and elder ledgers. |
 | `src/chain-watch.ts` | The read layer over the client's account, and leg matching. |
 | `src/blindpay-dry-run.ts` | The `--blindpay-dry-run` flow: `runStellarPayout` with the BlindPay adapter and `createStellarSubmitter`. |
 
