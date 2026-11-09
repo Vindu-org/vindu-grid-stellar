@@ -31,6 +31,7 @@ describe('index exports', () => {
     'QuoteExpiredError',
     'PayoutAuthorizationError',
     'PayoutIncompleteError',
+    'WebhookRejectedError',
   ])('exports %s', (name) => {
     expect(core).toHaveProperty(name);
   });

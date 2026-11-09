@@ -49,6 +49,7 @@ export {
   RouteNotFoundError,
   SigningNotAllowedError,
   ToleranceExceededError,
+  WebhookRejectedError,
 } from './errors';
 export {
   add,

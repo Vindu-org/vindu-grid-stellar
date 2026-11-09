@@ -217,6 +217,20 @@ export class SigningNotAllowedError extends GridError {
   }
 }
 
+/**
+ * A partner webhook was refused: a missing or wrong signature, a stale
+ * timestamp or a body that cannot be read. Never act on its content.
+ * `reason` is a short code the adapter chooses, e.g. `signature_mismatch`.
+ */
+export class WebhookRejectedError extends GridError {
+  readonly reason: string;
+
+  constructor(reason: string, message: string) {
+    super('webhook_rejected', message);
+    this.reason = reason;
+  }
+}
+
 /** Longest response excerpt a {@link PartnerHttpError} keeps. */
 export const PARTNER_ERROR_SNIPPET_MAX = 256;
 

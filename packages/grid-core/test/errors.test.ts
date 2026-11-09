@@ -8,6 +8,7 @@ import {
   PayoutAuthorizationError,
   PayoutIncompleteError,
   QuoteExpiredError,
+  WebhookRejectedError,
 } from '../src/errors';
 
 const base = { partner: 'p', method: 'POST', path: '/v1/x' } as const;
@@ -61,6 +62,12 @@ describe('shared errors', () => {
     for (const e of [new InvalidConfigError('x'), new InvalidInputError('x'), expired]) {
       expect(e).toBeInstanceOf(GridError);
     }
+  });
+
+  it('a rejected webhook carries its reason under the core code', () => {
+    const e = new WebhookRejectedError('stale', 'svix-timestamp is too old');
+    expect(e).toBeInstanceOf(GridError);
+    expect(e).toMatchObject({ code: 'webhook_rejected', name: 'WebhookRejectedError', reason: 'stale' });
   });
 
   it('an adapter may add its own code', () => {
