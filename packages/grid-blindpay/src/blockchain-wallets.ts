@@ -7,11 +7,11 @@ import { InvalidInputError, isStellarAccountId } from '@vindu/grid-core';
 
 import { type BlindPayHttp, type Created, type IdempotencyOptions, create, get, list } from './http';
 import { assertId } from './ids';
-import type { BlockchainWallet, ListParams, Page, StellarNetwork } from './types';
+import type { BlindPayNetwork, BlockchainWallet, ListParams, Page } from './types';
 
 export interface CreateStellarWalletInput {
   readonly name: string;
-  readonly network: StellarNetwork;
+  readonly network: BlindPayNetwork;
   /** Stellar account id (G...). */
   readonly address: string;
   /**

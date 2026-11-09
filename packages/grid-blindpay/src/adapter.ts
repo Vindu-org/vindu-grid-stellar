@@ -28,7 +28,7 @@ import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
 import type { SignedTransactionField } from './stellar-payout-flow';
-import type { StellarNetwork, StellarToken, Tracking } from './types';
+import type { BlindPayNetwork, StellarToken, Tracking } from './types';
 import { assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
 export interface BlindPayAdapterOptions {
@@ -40,7 +40,7 @@ export interface BlindPayAdapterOptions {
    */
   readonly partnerId?: string;
   /** `stellar` in production, `stellar_testnet` on a development instance. */
-  readonly network: StellarNetwork;
+  readonly network: BlindPayNetwork;
   /** `whsec_...`. Required for `parseWebhook`. */
   readonly webhookSecret?: string;
   readonly webhookToleranceSec?: number;

@@ -5,8 +5,8 @@
  * whose presence is not guaranteed are optional.
  */
 
-/** `stellar` in production, `stellar_testnet` in development. Other networks are out of scope. */
-export type StellarNetwork = 'stellar' | 'stellar_testnet';
+/** BlindPay's network names in scope: `stellar` in production, `stellar_testnet` in development. */
+export type BlindPayNetwork = 'stellar' | 'stellar_testnet';
 
 /** `USDC` on Stellar mainnet; `USDB` is BlindPay's development token. */
 export type StellarToken = 'USDC' | 'USDB';
@@ -14,7 +14,7 @@ export type StellarToken = 'USDC' | 'USDB';
 /** Payin and payout status. `completed`, `failed` and `refunded` are terminal. */
 export type TransferStatus = 'processing' | 'on_hold' | 'completed' | 'failed' | 'refunded';
 
-export const TERMINAL_STATUSES: readonly TransferStatus[] = ['completed', 'failed', 'refunded'];
+export const BLINDPAY_TERMINAL_STATUSES: readonly TransferStatus[] = ['completed', 'failed', 'refunded'];
 
 export type TrackingStep = 'processing' | 'on_hold' | 'pending_review' | 'pending_refund_review' | 'completed';
 
@@ -130,7 +130,7 @@ export interface CustomerLimits {
 export interface BlockchainWallet {
   readonly id: string;
   readonly name: string;
-  readonly network: StellarNetwork;
+  readonly network: BlindPayNetwork;
   readonly is_account_abstraction: boolean;
   readonly address: string;
   /** `null` until answered. Saved once; cannot be changed afterwards. */
@@ -198,7 +198,7 @@ export interface CreatePayoutQuoteRequest {
   readonly currency_type: CurrencyType;
   readonly cover_fees: boolean;
   readonly request_amount: number;
-  readonly network: StellarNetwork;
+  readonly network: BlindPayNetwork;
   readonly token: StellarToken;
   readonly partner_fee_id?: string;
 }
