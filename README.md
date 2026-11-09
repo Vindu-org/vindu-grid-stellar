@@ -61,15 +61,15 @@ Your application authenticates the user, checks permissions, reads its own secre
 - **Unsigned out, signed in.** Payouts that need a signature come back as unsigned Stellar transactions. Your signer should check the amount, the destination and the transfer state before it signs.
 - **One adapter interface.** Every partner client implements the same interface and passes the same conformance tests. That suite is the integration kit for Stellar-ready VASPs.
 
-## Packages (planned)
+## Packages
 
 | Package | Contents | Status |
 |---|---|---|
-| `@vindu/grid-core` | Types, transfer states, routing rules, partner adapter interface | Planned |
-| `@vindu/grid-blindpay` | BlindPay client: accounts, pay-ins, payouts, Stellar payout flow | Planned |
-| `@vindu/grid-stellar` | Horizon read layer, reconciliation, transaction build and submit | Planned |
-| `contracts/registry` | Soroban contract for transfer and verification attestations | Planned |
-| `examples/testnet-demo` | End-to-end two-leg transfer on Stellar testnet with a mock partner | Planned |
+| [`@vindu/grid-core`](packages/grid-core) | Types, transfer states, routing rules, partner adapter interface | 0.1.0, unreleased |
+| [`@vindu/grid-blindpay`](packages/grid-blindpay) | BlindPay client: accounts, pay-ins, payouts, Stellar payout flow | 0.1.0, unreleased |
+| [`@vindu/grid-stellar`](packages/grid-stellar) | Horizon read layer, reconciliation, transaction submit | 0.1.0, unreleased |
+| `contracts/registry` | Soroban contract for transfer and verification attestations | Planned (tranche 2) |
+| [`examples/testnet-demo`](examples/testnet-demo) | End-to-end two-leg transfer on Stellar with a mock partner, offline | 0.1.0, unreleased |
 
 ## Roadmap
 
