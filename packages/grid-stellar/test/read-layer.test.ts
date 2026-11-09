@@ -20,7 +20,7 @@ describe('read layer', () => {
     const { layer, seen, cursorStore, records, gateway } = setup();
     const result = await layer.pollAccount(ACCOUNT);
     expect(seen.map((p) => p.id)).toEqual(records.map((r) => r.id));
-    expect(result).toEqual({ delivered: 3, skipped: 0, cursor: records[2]!.paging_token, hasMore: false });
+    expect(result).toEqual({ delivered: 3, skipped: 0, malformed: 0, cursor: records[2]!.paging_token, hasMore: false });
     expect(await cursorStore.get(ACCOUNT)).toBe(records[2]!.paging_token);
     expect(gateway.paymentQueries[0]!.query.order).toBe('asc');
   });
@@ -199,6 +199,127 @@ describe('read layer', () => {
     expect(text).not.toContain(ACCOUNT);
     expect(text).not.toContain(OTHER);
     expect(text).not.toContain('client-ref');
+  });
+
+  it('passes over a record it cannot read, reports it, and keeps going', async () => {
+    // Review probe: an amount like "1e3" made normalisePayment throw on every
+    // poll, so the cursor never moved past it.
+    const records = [paymentRecord(), paymentRecord({ amount: '1e3' }), paymentRecord()];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const seen: string[] = [];
+    const bad: Array<[string, string]> = [];
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      onEvent: (p) => {
+        seen.push(p.id);
+      },
+      onMalformed: (record, error) => {
+        bad.push([record.id, error instanceof Error ? error.name : String(error)]);
+      },
+    });
+    const result = await layer.pollAccount(ACCOUNT);
+    expect(seen).toEqual([records[0]!.id, records[2]!.id]);
+    expect(bad).toEqual([[records[1]!.id, 'InvalidMoneyError']]);
+    expect(result).toMatchObject({ delivered: 2, skipped: 0, malformed: 1, cursor: records[2]!.paging_token });
+    expect(await cursorStore.get(ACCOUNT)).toBe(records[2]!.paging_token);
+    // Not read again.
+    expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 0, malformed: 0 });
+    expect(bad).toHaveLength(1);
+  });
+
+  it('a malformed record as the last one still moves the cursor past it', async () => {
+    const records = [paymentRecord(), paymentRecord({ amount: 'not-a-number' })];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const layer = createReadLayer({ gateway, cursorStore, onEvent: () => undefined, onMalformed: () => undefined });
+    await layer.pollAccount(ACCOUNT);
+    expect(await cursorStore.get(ACCOUNT)).toBe(records[1]!.paging_token);
+  });
+
+  it('by default logs a malformed record with its ids only', async () => {
+    const lines: string[] = [];
+    const logger: Logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (m, f) => lines.push(m + JSON.stringify(f)),
+      error: () => undefined,
+    };
+    const record = paymentRecord({ amount: '1e3', memo: 'client-ref' });
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, [record]);
+    const layer = createReadLayer({ gateway, cursorStore: new InMemoryCursorStore(), onEvent: () => undefined, logger });
+    expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ malformed: 1 });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(record.id);
+    expect(lines[0]).toContain(record.transaction_hash);
+    expect(lines[0]).toContain('InvalidMoneyError');
+    for (const secret of [ACCOUNT, OTHER, 'client-ref', '1e3']) expect(lines[0]).not.toContain(secret);
+  });
+
+  it('an onMalformed that throws stops the poll with the cursor before that record', async () => {
+    const records = [paymentRecord({ type: 'change_trust' }), paymentRecord({ amount: '1e3' }), paymentRecord()];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      onEvent: () => undefined,
+      onMalformed: () => {
+        throw new Error('halt');
+      },
+    });
+    await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('halt');
+    expect(await cursorStore.get(ACCOUNT)).toBe(records[0]!.paging_token);
+  });
+
+  it('stores the position past skipped records once per page, not once per record', async () => {
+    const records = [
+      ...Array.from({ length: 4 }, () => paymentRecord({ type: 'change_trust' })),
+      paymentRecord({ amount: '1e3' }),
+      paymentRecord(),
+      ...Array.from({ length: 3 }, () => paymentRecord({ from: OTHER, to: THIRD })),
+    ];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const set = jest.spyOn(cursorStore, 'set');
+    const layer = createReadLayer({ gateway, cursorStore, onEvent: () => undefined, onMalformed: () => undefined, pageSize: 5 });
+    const result = await layer.pollAccount(ACCOUNT);
+    expect(result).toMatchObject({ delivered: 1, skipped: 7, malformed: 1, cursor: records[8]!.paging_token });
+    // End of page 1 (after 4 skipped and 1 malformed), the delivered payment, end of page 2.
+    expect(set.mock.calls.map((c) => c[1])).toEqual([
+      records[4]!.paging_token,
+      records[5]!.paging_token,
+      records[8]!.paging_token,
+    ]);
+  });
+
+  it('keeps the position past skipped records when onEvent fails after them', async () => {
+    const records = [paymentRecord({ type: 'change_trust' }), paymentRecord({ type: 'change_trust' }), paymentRecord()];
+    const { layer, cursorStore, onEvent, gateway } = setup(records);
+    gateway.payments.set(ACCOUNT, records);
+    onEvent.mockRejectedValueOnce(new Error('db down'));
+    await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('db down');
+    expect(await cursorStore.get(ACCOUNT)).toBe(records[1]!.paging_token);
+  });
+
+  it('reconcile reports malformed records too and never moves the cursor', async () => {
+    const records = [paymentRecord(), paymentRecord({ amount: '1e3' })];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const onMalformed = jest.fn();
+    const layer = createReadLayer({ gateway, cursorStore, onEvent: () => undefined, onMalformed });
+    const result = await layer.reconcile(ACCOUNT);
+    expect(result).toMatchObject({ skipped: 0, malformed: 1, lastCursor: records[1]!.paging_token });
+    expect(result.payments).toHaveLength(1);
+    expect(onMalformed).toHaveBeenCalledTimes(1);
+    expect(await cursorStore.get(ACCOUNT)).toBeUndefined();
   });
 
   it('validates its options', () => {

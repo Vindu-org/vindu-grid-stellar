@@ -8,6 +8,15 @@
  * payment is delivered again. **The consumer must drop duplicates by
  * `payment.id`.**
  *
+ * A record that cannot be normalised (for example an amount that is not a
+ * valid decimal) never blocks the cursor: `onMalformed` is called with it
+ * and the error, then the layer moves on. By default that logs a warning
+ * with the operation id and transaction hash only. Throw from `onMalformed`
+ * to stop instead; the cursor then stays before that record.
+ *
+ * Positions past skipped and malformed records are stored once per page
+ * (or before stopping), not once per record.
+ *
  * Follow the accounts you registered, not a partner's shared treasury
  * address: every client's traffic touches the treasury, so it says nothing
  * about one transfer. A reconciling poll ({@link ReadLayer.reconcile})
@@ -16,7 +25,7 @@
  * Logs carry operation ids, transaction hashes and counts only.
  */
 import { type Logger, noopLogger } from '@vindu/grid-core';
-import type { HorizonGateway } from './horizon';
+import type { HorizonGateway, HorizonPaymentRecord } from './horizon';
 import { type ChainPayment, normalisePayment } from './payments';
 
 /** Where the read layer keeps its position per account. Persist it in your own storage. */
@@ -41,10 +50,21 @@ export class InMemoryCursorStore implements CursorStore {
 /** Receives each payment. Throw (or reject) to stop the poll; the payment is delivered again next time. */
 export type OnChainPayment = (payment: ChainPayment) => Promise<void> | void;
 
+/**
+ * Receives a record that could not be normalised, and why. Resolve to skip
+ * it; throw to stop the poll with the cursor before it. It may be called
+ * again for the same record (by `reconcile`, or after a crash before the
+ * position was stored). Never log the whole record: it carries addresses
+ * and memos.
+ */
+export type OnMalformedPayment = (record: HorizonPaymentRecord, error: unknown) => Promise<void> | void;
+
 export interface ReadLayerOptions {
   readonly gateway: HorizonGateway;
   readonly cursorStore: CursorStore;
   readonly onEvent: OnChainPayment;
+  /** Default: a warning with the operation id, the transaction hash and the error name. */
+  readonly onMalformed?: OnMalformedPayment;
   readonly logger?: Logger;
   /** Records per Horizon page, 1 to 200. Default 200. */
   readonly pageSize?: number;
@@ -55,8 +75,10 @@ export interface ReadLayerOptions {
 export interface PollResult {
   /** Payments handed to `onEvent`. */
   readonly delivered: number;
-  /** Records skipped: other operation types, or not touching the account. */
+  /** Records skipped: other operation types, failed transactions, or not touching the account. */
   readonly skipped: number;
+  /** Records that could not be normalised, handed to `onMalformed` and passed over. */
+  readonly malformed: number;
   /** Cursor after the poll, or `undefined` when nothing was ever read. */
   readonly cursor: string | undefined;
   /** True when `maxPages` was reached before the end of the history. */
@@ -67,6 +89,8 @@ export interface ReconcileResult {
   /** Normalised payments in the window, oldest first. */
   readonly payments: readonly ChainPayment[];
   readonly skipped: number;
+  /** Records handed to `onMalformed`. */
+  readonly malformed: number;
   /** Paging token of the last record read; pass it as `sinceCursor` to continue. */
   readonly lastCursor: string | undefined;
   readonly hasMore: boolean;
@@ -96,9 +120,24 @@ export interface ReadLayer {
 
 const MAX_PAGE_SIZE = 200;
 
+/** One record, read: a payment, a record this layer does not report, or one it could not read. */
+type Item =
+  | { readonly kind: 'payment'; readonly payment: ChainPayment }
+  | { readonly kind: 'skipped' }
+  | { readonly kind: 'malformed'; readonly error: unknown };
+
 export function createReadLayer(options: ReadLayerOptions): ReadLayer {
   const { gateway, cursorStore, onEvent } = options;
   const logger = options.logger ?? noopLogger;
+  const onMalformed: OnMalformedPayment =
+    options.onMalformed ??
+    ((record, error) => {
+      logger.warn('payment record could not be read; skipped', {
+        paymentId: record.id,
+        txHash: record.transaction_hash,
+        error: error instanceof Error ? error.name : typeof error,
+      });
+    });
   const pageSize = options.pageSize ?? MAX_PAGE_SIZE;
   const maxPages = options.maxPages ?? 50;
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
@@ -108,16 +147,26 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
 
   const inFlight = new Set<string>();
 
+  function read(record: HorizonPaymentRecord, account: string): Item {
+    try {
+      const payment = normalisePayment(record, account);
+      return payment === null ? { kind: 'skipped' } : { kind: 'payment', payment };
+    } catch (error) {
+      return { kind: 'malformed', error };
+    }
+  }
+
   /**
-   * Pages forward from `cursor`. `visit` runs for each record in order with
-   * its normalised payment (or `null` when skipped); when it resolves the
-   * record counts as done.
+   * Pages forward from `cursor`. `visit` runs for each record in order;
+   * when it resolves the record counts as done. `pageDone` runs after each
+   * page with the position reached.
    */
   async function scan(
     account: string,
     cursor: string | undefined,
     pages: number,
-    visit: (payment: ChainPayment | null, pagingToken: string) => Promise<void>,
+    visit: (item: Item, record: HorizonPaymentRecord) => Promise<void>,
+    pageDone: () => Promise<void> = async () => undefined,
   ): Promise<{ cursor: string | undefined; hasMore: boolean }> {
     let position = cursor;
     for (let page = 0; page < pages; page += 1) {
@@ -127,9 +176,10 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
         order: 'asc',
       });
       for (const record of records) {
-        await visit(normalisePayment(record, account), record.paging_token);
+        await visit(read(record, account), record);
         position = record.paging_token;
       }
+      await pageDone();
       if (records.length < pageSize) return { cursor: position, hasMore: false };
     }
     return { cursor: position, hasMore: true };
@@ -143,10 +193,45 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
         const start = await cursorStore.get(account);
         let delivered = 0;
         let skipped = 0;
-        const end = await scan(account, start, maxPages, async (payment, pagingToken) => {
-          if (payment === null) {
-            skipped += 1;
-          } else {
+        let malformed = 0;
+        // Position past skipped or malformed records, not stored yet.
+        let unsaved: string | undefined;
+        const save = async (cursor: string): Promise<void> => {
+          await cursorStore.set(account, cursor);
+          unsaved = undefined;
+        };
+        // Before stopping, keep what was passed over, so it is not read again.
+        const saveBeforeStopping = async (): Promise<void> => {
+          if (unsaved === undefined) return;
+          try {
+            await save(unsaved);
+          } catch {
+            // The original error matters more; the records are re-read next time.
+          }
+        };
+
+        const end = await scan(
+          account,
+          start,
+          maxPages,
+          async (item, record) => {
+            if (item.kind === 'skipped') {
+              skipped += 1;
+              unsaved = record.paging_token;
+              return;
+            }
+            if (item.kind === 'malformed') {
+              try {
+                await onMalformed(record, item.error);
+              } catch (e) {
+                await saveBeforeStopping();
+                throw e;
+              }
+              malformed += 1;
+              unsaved = record.paging_token;
+              return;
+            }
+            const { payment } = item;
             try {
               await onEvent(payment);
             } catch (e) {
@@ -155,15 +240,19 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
                 txHash: payment.txHash,
                 error: e instanceof Error ? e.name : typeof e,
               });
+              await saveBeforeStopping();
               throw e;
             }
             delivered += 1;
             logger.debug('payment delivered', { paymentId: payment.id, txHash: payment.txHash });
-          }
-          await cursorStore.set(account, pagingToken);
-        });
-        logger.info('poll finished', { delivered, skipped, cursor: end.cursor, hasMore: end.hasMore });
-        return { delivered, skipped, cursor: end.cursor, hasMore: end.hasMore };
+            await save(record.paging_token);
+          },
+          async () => {
+            if (unsaved !== undefined) await save(unsaved);
+          },
+        );
+        logger.info('poll finished', { delivered, skipped, malformed, cursor: end.cursor, hasMore: end.hasMore });
+        return { delivered, skipped, malformed, cursor: end.cursor, hasMore: end.hasMore };
       } finally {
         inFlight.delete(account);
       }
@@ -172,16 +261,22 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
     async reconcile(account, sinceCursor, reconcileOptions = {}) {
       const payments: ChainPayment[] = [];
       let skipped = 0;
-      const end = await scan(account, sinceCursor, reconcileOptions.maxPages ?? maxPages, async (payment) => {
-        if (payment === null) {
+      let malformed = 0;
+      const end = await scan(account, sinceCursor, reconcileOptions.maxPages ?? maxPages, async (item, record) => {
+        if (item.kind === 'skipped') {
           skipped += 1;
           return;
         }
-        payments.push(payment);
-        if (reconcileOptions.deliver === true) await onEvent(payment);
+        if (item.kind === 'malformed') {
+          await onMalformed(record, item.error);
+          malformed += 1;
+          return;
+        }
+        payments.push(item.payment);
+        if (reconcileOptions.deliver === true) await onEvent(item.payment);
       });
-      logger.info('reconcile finished', { payments: payments.length, skipped, lastCursor: end.cursor });
-      return { payments, skipped, lastCursor: end.cursor, hasMore: end.hasMore };
+      logger.info('reconcile finished', { payments: payments.length, skipped, malformed, lastCursor: end.cursor });
+      return { payments, skipped, malformed, lastCursor: end.cursor, hasMore: end.hasMore };
     },
   };
 }
