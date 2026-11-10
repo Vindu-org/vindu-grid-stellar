@@ -53,6 +53,12 @@ export interface StellarSubmitter {
    * Submits `signedXdr` and resolves with what is known about it. Network and
    * Horizon errors should become `unknown`, not a rejection, because the
    * transaction may have reached the network before the error.
+   *
+   * Resolve with plain data: an object literal whose `status`, `hash` and
+   * `detail` are plain values. The payout flow reads those three fields once
+   * each, through getters if it must, and works on a frozen copy of them;
+   * anything else on the outcome is ignored. A field whose read throws is
+   * left out, which makes a success not confirmed.
    */
   submit(signedXdr: string): Promise<SubmitOutcome>;
 }
