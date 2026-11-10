@@ -182,10 +182,28 @@ export type PayoutAuthorizationFailure = 'threw' | 'invalid_authorization';
 const CAUSE_CODE_MAX = 48;
 /** A lowercase snake or kebab code: `partner_http`, `payout-xdr-mismatch`. */
 const CAUSE_CODE_RE = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/;
-/** A system error constant made of capital letters and underscores only: `ETIMEDOUT`, `UND_ERR_SOCKET`. */
+/** A code made of capital letters and underscores only, like a system constant. */
 const SYSTEM_CONSTANT_RE = /^[A-Z]+(?:_[A-Z]+)*$/;
-/** Longest system constant without an underscore that is kept: `ECONNREFUSED` has 12 characters. */
-const SYSTEM_CONSTANT_PLAIN_MAX = 12;
+/** The Node network errno names kept, lowercased. Any other all-capitals code is dropped. */
+const SYSTEM_ERRNO_NAMES: ReadonlySet<string> = new Set([
+  'EADDRINUSE',
+  'EADDRNOTAVAIL',
+  'EAI_AGAIN',
+  'EAI_FAIL',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTDOWN',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EPIPE',
+  'EPROTO',
+  'ETIMEDOUT',
+]);
+/** undici's error codes (`UND_ERR_SOCKET`, `UND_ERR_CONNECT_TIMEOUT`), kept by prefix. */
+const UNDICI_PREFIX = 'UND_ERR_';
 /** A segment this long that holds a digit reads as a token or an identifier, not a code. */
 const TOKEN_SEGMENT_MIN = 8;
 /** A code with this many digits or more, in total, reads as a number (a document, a phone, a token). */
@@ -213,10 +231,11 @@ function looksLikeData(code: string): boolean {
 
 /**
  * The `code` of an error, when it is safe to keep: a lowercase snake or
- * kebab code of at most 48 characters (`partner_http`). A system constant of
- * capital letters and underscores only (`ETIMEDOUT`, `UND_ERR_SOCKET`) is
- * kept lowercased (`etimedout`); one without an underscore is kept only up to
- * 12 characters (`ECONNREFUSED`), so a capitalised token is not taken for one.
+ * kebab code of at most 48 characters (`partner_http`). A code in capitals is
+ * kept, lowercased, only when it is a known Node network errno name
+ * (`ETIMEDOUT`, `ECONNREFUSED`, `EAI_AGAIN` and the like) or an undici code
+ * (`UND_ERR_SOCKET`); any other code in capitals (`SECRETTOKEN`, `JANE_DOE`)
+ * is dropped, so a capitalised token or name is not taken for one.
  *
  * A code that has the right shape but reads as data is dropped too: one with
  * a segment (split on `_` or `-`) of 8 or more characters holding a digit
@@ -239,7 +258,7 @@ export function causeCodeOf(cause: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   let code = raw;
   if (SYSTEM_CONSTANT_RE.test(raw)) {
-    if (!raw.includes('_') && raw.length > SYSTEM_CONSTANT_PLAIN_MAX) return undefined;
+    if (!SYSTEM_ERRNO_NAMES.has(raw) && !raw.startsWith(UNDICI_PREFIX)) return undefined;
     code = raw.toLowerCase();
   }
   if (code.length > CAUSE_CODE_MAX || !CAUSE_CODE_RE.test(code)) return undefined;

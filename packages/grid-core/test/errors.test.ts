@@ -237,6 +237,41 @@ describe('shared errors', () => {
       expect(causeCodeOf({ code })).toBeUndefined();
     });
 
+    // Review probe: any capitals code of up to 12 letters was taken for a system constant.
+    it.each<string>([
+      'ETIMEDOUT',
+      'ECONNREFUSED',
+      'ECONNRESET',
+      'EPIPE',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'EHOSTUNREACH',
+      'ENETUNREACH',
+      'EADDRNOTAVAIL',
+      'ECONNABORTED',
+      'EADDRINUSE',
+      'UND_ERR_SOCKET',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+    ])('keeps the network errno name %p, lowercased', (code) => {
+      expect(causeCodeOf({ code })).toBe(code.toLowerCase());
+    });
+
+    it.each<string>([
+      'SECRETTOKEN',
+      'ABCDEFGHIJKL',
+      'JANE_DOE',
+      'MARIA_DA_SILVA',
+      'CERT_HAS_EXPIRED',
+      'ERR_TLS_CERT_ALTNAME_INVALID',
+      'EBADF',
+      'UND_ERR',
+      'XUND_ERR_SOCKET',
+    ])('drops %p: capitals outside the network errno names', (code) => {
+      expect(causeCodeOf({ code })).toBeUndefined();
+    });
+
     // Review probe: client data split into short segments kept the shape of a code.
     it.each<[string, string]>([
       ['a document number in dashes', 'cpf-123-456-789-00'],
