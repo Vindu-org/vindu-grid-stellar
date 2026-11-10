@@ -82,8 +82,9 @@ printf 'nodeLinker: node-modules\nenableTelemetry: false\nenableScripts: false\n
   cat "$work/install.log"
   fail "installing the tarballs failed"
 }
-# Read only the last line: corepack may print a one-time notice before the value.
-enable_scripts="$(cd "$consumer" && yarn config get enableScripts 2>/dev/null | tail -n 1)"
+# JSON output with colours off: CI runners force colour, which wraps the value
+# in escape codes. Only the last line is read, in case corepack prints a notice.
+enable_scripts="$(cd "$consumer" && FORCE_COLOR=0 YARN_ENABLE_COLORS=false yarn config get enableScripts --json 2>/dev/null | tail -n 1)"
 [ "$enable_scripts" = false ] || fail "the consumer project runs install scripts (enableScripts is '$enable_scripts')"
 echo "installed with yarn $(cd "$consumer" && yarn --version), TypeScript $typescript, install scripts off"
 
