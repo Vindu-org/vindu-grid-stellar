@@ -179,10 +179,18 @@ describe('shared errors', () => {
       ['partner_http', 'partner_http'],
       ['payout-xdr-mismatch', 'payout-xdr-mismatch'],
       ['signing_not_allowed', 'signing_not_allowed'],
-      ['a'.repeat(48), 'a'.repeat(48)],
+      ['x'.repeat(48), 'x'.repeat(48)],
       ['x1', 'x1'],
+      ['payout_xdr_mismatch', 'payout_xdr_mismatch'],
+      ['signer_refused', 'signer_refused'],
+      ['etimedout', 'etimedout'],
+      ['econnrefused', 'econnrefused'],
+      ['und_err_socket', 'und_err_socket'],
+      ['err_http2_stream_error', 'err_http2_stream_error'],
       // A system constant is kept, lowercased.
       ['ETIMEDOUT', 'etimedout'],
+      ['ECONNREFUSED', 'econnrefused'],
+      ['UND_ERR_SOCKET', 'und_err_socket'],
       ['UND_ERR_CONNECT_TIMEOUT', 'und_err_connect_timeout'],
     ])('keeps %p as %p', (code, kept) => {
       expect(causeCodeOf({ code })).toBe(kept);
@@ -211,6 +219,22 @@ describe('shared errors', () => {
 
     it.each<unknown>([undefined, null, 'partner_http', 42])('reads nothing from %p', (cause) => {
       expect(causeCodeOf(cause)).toBeUndefined();
+    });
+
+    // Review probe: codes of the right shape that are really tokens, hashes,
+    // ids or client data.
+    it.each<[string, string]>([
+      ['an API key', 'sk_live_abc123def456'],
+      ['a 40-character hex hash', 'deadbeefcafebabe0123456789abcdef01234567'],
+      ['a hex run made of letters only', 'abcdefabcdefabcd'],
+      ['a UUID', 'a3f2504e-4f89-11d3-9a0c-0305e82c3301'],
+      ['a UUID without long mixed segments', 'abcdefab-abcd-abcd-abcd-abcdefabcdef'],
+      ['a name with a document number', 'maria_silva_12345678901'],
+      ['a token of capitals', 'SECRETTOKENABCDEF'],
+      ['a 13-letter capital constant', 'ABCDEFGHIJKLM'],
+      ['a token with a long mixed segment', 'ghp_abcdefghijklmnopqrstuvwxyz0123'],
+    ])('drops %s', (_label, code) => {
+      expect(causeCodeOf({ code })).toBeUndefined();
     });
 
     // Review probe: a code getter that throws escaped every error built from the cause.
