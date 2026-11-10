@@ -32,6 +32,7 @@ describe('package index', () => {
     'createBlindPayHttp',
     'IDEMPOTENCY_IN_FLIGHT',
     'DEFAULT_TIMEOUT_MS',
+    'DEFAULT_MAX_RESPONSE_BYTES',
     'DEFAULT_BASE_URL',
     'UNCONFIRMED_GET_PAYOUT_PATH',
     'assertId',

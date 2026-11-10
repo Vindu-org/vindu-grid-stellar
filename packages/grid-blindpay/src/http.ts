@@ -11,6 +11,10 @@
  *   the body again to a URL BlindPay did not choose for us.
  * - Non-2xx becomes a {@link BlindPayHttpError}. There is no retry loop here:
  *   whether and when to retry is the caller's decision.
+ * - The response body is read as it arrives, up to `maxResponseBytes`
+ *   (default 1 MiB). A larger body, or a `Content-Length` that declares one,
+ *   fails the call with code `response_too_large`; on a 2xx it is not
+ *   retryable, because the call may have taken effect.
  */
 import { randomUUID } from 'node:crypto';
 
@@ -108,7 +112,7 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
     const timer = setTimeout(() => controller.abort(), resolved.timeoutMs);
     const started = resolved.now();
     let response: Response;
-    let text: string;
+    let text: string | typeof TOO_LARGE;
     try {
       response = await resolved.fetch(`${resolved.baseUrl}${fullPath}${queryString(options.query)}`, {
         method: options.method,
@@ -118,7 +122,7 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
         // A redirect would re-send the body (and maybe the key) to another URL.
         redirect: 'error',
       });
-      text = await response.text();
+      text = await readText(response, resolved.maxResponseBytes, controller.signal);
     } catch (cause) {
       const kind = controller.signal.aborted ? 'timeout' : 'network';
       report(null, kind);
@@ -128,6 +132,21 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
       throw fail({ status: null, code: kind, ...(causeCode === undefined ? {} : { causeCode }) });
     } finally {
       clearTimeout(timer);
+    }
+
+    if (text === TOO_LARGE) {
+      report(response.status, 'response_too_large');
+      resolved.logger.warn('blindpay response too large', {
+        method: options.method, path: template, status: response.status, maxResponseBytes: resolved.maxResponseBytes,
+      });
+      // On a 2xx the call may have taken effect: not retryable as is. The
+      // caller looks the resource up, or replays a create with the same key
+      // and body. Otherwise the status decides, as for any failed call.
+      throw fail({
+        status: response.status,
+        code: 'response_too_large',
+        ...(response.ok ? { retryable: false } : {}),
+      });
     }
 
     report(response.status);
@@ -165,6 +184,48 @@ export function createBlindPayHttp(config: BlindPayConfig): BlindPayHttp {
   }
 
   return { config: resolved, request };
+}
+
+/** What {@link readText} returns for a body over the cap. */
+const TOO_LARGE: unique symbol = Symbol('response_too_large');
+
+/**
+ * The body as text, read as it arrives. Stops, cancelling the stream, as
+ * soon as more than `maxBytes` arrived, or before reading when
+ * `Content-Length` declares more. Decoded as UTF-8 like `Response.text()`.
+ */
+async function readText(response: Response, maxBytes: number, signal: AbortSignal): Promise<string | typeof TOO_LARGE> {
+  const declared = response.headers.get('content-length')?.trim();
+  if (declared !== undefined && /^[0-9]+$/.test(declared) && Number(declared) > maxBytes) {
+    response.body?.cancel().catch(() => undefined);
+    return TOO_LARGE;
+  }
+  if (response.body === null) return '';
+  const reader = response.body.getReader();
+  const stop = (): void => {
+    reader.cancel(signal.reason).catch(() => undefined);
+  };
+  signal.addEventListener('abort', stop, { once: true });
+  const decoder = new TextDecoder('utf-8');
+  let size = 0;
+  let text = '';
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal.throwIfAborted();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        stop();
+        return TOO_LARGE;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
+  return text + decoder.decode();
 }
 
 /** Runs a create call and returns the resource with the key that was used. */

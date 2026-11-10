@@ -4,7 +4,7 @@ import { inspect } from 'node:util';
 
 import { InvalidConfigError, PartnerHttpError } from '@vindu/grid-core';
 
-import { type FetchLike, resolveConfig } from '../src/config';
+import { DEFAULT_MAX_RESPONSE_BYTES, type FetchLike, resolveConfig } from '../src/config';
 import { BlindPayHttpError } from '../src/errors';
 import { createBlindPayHttp, parseRetryAfter, readErrorBody } from '../src/http';
 import { API_KEY, INSTANCE_ID, captureOutput, caught, config, dumpError, mockFetch } from './helpers';
@@ -196,6 +196,87 @@ describe('client error redaction', () => {
   });
 });
 
+/** A streamed response: each chunk is sent as it is pulled, and `pulled` counts them. */
+function streamedResponse(chunks: readonly string[], init: { status?: number; headers?: Record<string, string> } = {}) {
+  const encoder = new TextEncoder();
+  const state = { pulled: 0, cancelled: false };
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[state.pulled];
+      if (chunk === undefined) {
+        controller.close();
+        return;
+      }
+      state.pulled += 1;
+      controller.enqueue(encoder.encode(chunk));
+    },
+    cancel() {
+      state.cancelled = true;
+    },
+    // No read ahead: a chunk is pulled only when the reader asks for it.
+  }, { highWaterMark: 0 });
+  const response = new Response(body, { status: init.status ?? 200, headers: init.headers ?? {} });
+  return { response, state };
+}
+
+// Review probe: the whole body was read with response.text(), with no limit.
+describe('client response size cap', () => {
+  it('defaults to 1 MiB', () => {
+    expect(DEFAULT_MAX_RESPONSE_BYTES).toBe(1024 * 1024);
+    expect(resolveConfig({ apiKey: API_KEY, instanceId: INSTANCE_ID }).resolved.maxResponseBytes).toBe(1024 * 1024);
+  });
+
+  it('reads a body under the cap, chunk by chunk, multi-byte characters included', async () => {
+    const json = JSON.stringify({ id: 'qu_1', name: 'São Paulo ✓' });
+    const bytes = new TextEncoder().encode(json);
+    // Split inside a multi-byte character, to prove decoding is streamed.
+    const cut = json.indexOf('ã') + 1;
+    const { response } = streamedResponse([json.slice(0, cut), json.slice(cut)]);
+    const http = createBlindPayHttp(config(async () => response, { maxResponseBytes: bytes.byteLength }));
+    await expect(http.request({ method: 'GET', path: '/x' })).resolves.toMatchObject({ data: { id: 'qu_1', name: 'São Paulo ✓' } });
+  });
+
+  it('stops a chunked 2xx body over the cap, without reading the rest, and is not retryable', async () => {
+    const out = captureOutput();
+    const { response, state } = streamedResponse(['{"id":"', 'x'.repeat(64), 'y'.repeat(64), 'z'.repeat(64), '"}']);
+    const http = createBlindPayHttp(config(async () => response, { maxResponseBytes: 100, onCall: out.onCall, logger: out.logger }));
+    const e = (await caught(http.request({ method: 'POST', path: '/payouts/stellar', body: {} }))) as BlindPayHttpError;
+    expect(e).toBeInstanceOf(BlindPayHttpError);
+    expect(e).toMatchObject({ status: 200, partnerCode: 'response_too_large', retryable: false });
+    // The key comes back, so the caller can replay the create with it.
+    expect(e.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+    expect(state.pulled).toBeLessThan(5);
+    expect(state.cancelled).toBe(true);
+    expect(out.calls[0]).toMatchObject({ status: 200, error: 'response_too_large' });
+    expect(out.lines.join('\n')).not.toMatch(/xxxx/);
+  });
+
+  it('fails early on a declared Content-Length over the cap, reading nothing', async () => {
+    const { response, state } = streamedResponse(['{}'], { headers: { 'content-length': '2000000' } });
+    const http = createBlindPayHttp(config(async () => response));
+    const e = (await caught(http.request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e).toMatchObject({ status: 200, partnerCode: 'response_too_large', retryable: false });
+    expect(state.pulled).toBe(0);
+  });
+
+  it('accepts a body of exactly the cap', async () => {
+    const json = JSON.stringify({ id: 'a'.repeat(20) });
+    const { response } = streamedResponse([json], { headers: { 'content-length': String(json.length) } });
+    const http = createBlindPayHttp(config(async () => response, { maxResponseBytes: json.length }));
+    await expect(http.request({ method: 'GET', path: '/x' })).resolves.toMatchObject({ data: { id: 'a'.repeat(20) } });
+  });
+
+  it('keeps the status rule for a failed call whose body is over the cap', async () => {
+    const big = 'x'.repeat(200);
+    const { fetch } = mockFetch([{ status: 503, text: big }, { status: 400, text: big }]);
+    const http = createBlindPayHttp(config(fetch, { maxResponseBytes: 100, includeErrorBodies: true }));
+    const e503 = (await caught(http.request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e503).toMatchObject({ status: 503, partnerCode: 'response_too_large', retryable: true, bodySnippet: undefined });
+    const e400 = (await caught(http.request({ method: 'GET', path: '/x' }))) as BlindPayHttpError;
+    expect(e400).toMatchObject({ status: 400, partnerCode: 'response_too_large', retryable: false });
+  });
+});
+
 describe('client redirects', () => {
   const servers: Server[] = [];
   const listen = (handler: (req: IncomingMessage, res: ServerResponse) => void) =>
@@ -249,6 +330,10 @@ describe('client config', () => {
     [{ baseUrl: 'ftp://x' }, /https/],
     [{ baseUrl: 'https://x?y=1' }, /query/],
     [{ timeoutMs: 0 }, /timeoutMs/],
+    [{ maxResponseBytes: 0 }, /maxResponseBytes/],
+    [{ maxResponseBytes: -1 }, /maxResponseBytes/],
+    [{ maxResponseBytes: 1.5 }, /maxResponseBytes/],
+    [{ maxResponseBytes: Number.POSITIVE_INFINITY }, /maxResponseBytes/],
   ])('rejects %j', (override, msg) => {
     expect(() => resolveConfig({ apiKey: API_KEY, instanceId: INSTANCE_ID, ...override })).toThrow(msg);
   });

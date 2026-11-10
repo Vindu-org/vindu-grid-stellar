@@ -14,6 +14,10 @@ import { GridError, PartnerHttpError, type PartnerHttpErrorInit } from '@vindu/g
  * `cause`, because a fetch error message can quote request headers or bodies.
  * `causeCode` keeps the system error code, lowercased (`econnrefused`), when
  * core's `causeCodeOf` accepts it; anything else is dropped.
+ *
+ * A body over `maxResponseBytes` gives code `response_too_large`. After a
+ * 2xx it is not retryable: the call may have taken effect, so look the
+ * resource up or replay a create with the same idempotency key and body.
  */
 export class BlindPayHttpError extends PartnerHttpError {
   /** Code of the underlying network failure, lowercased: `econnrefused`, `und_err_connect_timeout`. */

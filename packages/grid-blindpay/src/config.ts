@@ -10,6 +10,8 @@ import { InvalidConfigError, type Logger, type OnPartnerCall, noopLogger } from 
 export const BLINDPAY_PARTNER_ID = 'blindpay';
 export const DEFAULT_BASE_URL = 'https://api.blindpay.com';
 export const DEFAULT_TIMEOUT_MS = 30_000;
+/** Largest response body read by default: 1 MiB. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -32,6 +34,15 @@ export interface BlindPayConfig {
   readonly onCall?: OnPartnerCall;
   /** Per-request timeout. Defaults to {@link DEFAULT_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
+  /**
+   * Largest response body read, in bytes. Defaults to
+   * {@link DEFAULT_MAX_RESPONSE_BYTES} (1 MiB). A larger body, or a declared
+   * `Content-Length` above it, stops the read and fails the call with code
+   * `response_too_large`. On a 2xx that error is not retryable as is: the
+   * call may have taken effect, so look the resource up, or replay a create
+   * with the same idempotency key and body.
+   */
+  readonly maxResponseBytes?: number;
   /** Clock in epoch milliseconds. Defaults to `Date.now`. */
   readonly now?: () => number;
   /**
@@ -53,6 +64,7 @@ export interface ResolvedConfig {
   readonly logger: Logger;
   readonly onCall: OnPartnerCall | undefined;
   readonly timeoutMs: number;
+  readonly maxResponseBytes: number;
   readonly now: () => number;
   readonly includeErrorBodies: boolean;
 }
@@ -84,6 +96,10 @@ export function resolveConfig(config: BlindPayConfig): { resolved: ResolvedConfi
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new InvalidConfigError('timeoutMs must be a positive integer');
   }
+  const maxResponseBytes = config.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+    throw new InvalidConfigError('maxResponseBytes must be a positive integer');
+  }
   const fetchImpl = config.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== 'function') {
     throw new InvalidConfigError('No fetch implementation: pass config.fetch');
@@ -98,6 +114,7 @@ export function resolveConfig(config: BlindPayConfig): { resolved: ResolvedConfi
       logger: config.logger ?? noopLogger,
       onCall: config.onCall,
       timeoutMs,
+      maxResponseBytes,
       now: config.now ?? Date.now,
       includeErrorBodies: config.includeErrorBodies === true,
     },
