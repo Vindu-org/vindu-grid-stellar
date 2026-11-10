@@ -22,13 +22,13 @@
  * same number for both. A record whose position is not greater than the
  * current one is passed over without moving the cursor: a payment there is
  * skipped (not delivered), a malformed record still goes to `onMalformed`.
- * A malformed record's fallback operation id is used only when it is also
- * lower than the paging token of the next readable record on the same page,
- * so a huge id on a broken record cannot jump the cursor past the payments
- * after it. With no readable record after it on the page, the id is used
- * only when nothing else on the page moves the cursor; otherwise the record
- * is passed over and seen again at the head of the next page, where the
- * payment after it bounds it. A record with no position never resets or
+ * A malformed record's position (its paging token or its fallback operation
+ * id alike) is used only when it is also lower than the paging token of the
+ * next readable record on the same page, so a huge number on a broken record
+ * cannot jump the cursor past the payments after it. With no readable record
+ * after it on the page, the position is used only when nothing else on the
+ * page moves the cursor; otherwise the record is passed over and seen again
+ * at the head of the next page, where the payment after it bounds it. A record with no position never resets or
  * clears the cursor. A full page that does not move the position at all
  * cannot be passed: the call then throws rather than read the same page
  * again.
@@ -336,14 +336,15 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
  * move forward, compared as integers:
  * - a readable record moves it to its paging token when that is past the
  *   position reached, and is `behind` otherwise;
- * - a malformed record with a decimal paging token moves it to that token
- *   when it is past the position reached;
- * - a malformed record without one falls back to its operation id, used only
- *   when it is past the position reached and lower than the paging token of
- *   the next readable record on the page. With no readable record after it,
- *   the id is used only when nothing else on the page moves the cursor (a
- *   full page would otherwise be read again forever); else the record is
- *   passed over and the next page, read from the position reached, bounds it.
+ * - a malformed record's position is its paging token when that is decimal
+ *   digits, else its operation id when that is. Either one is used only when
+ *   it is past the position reached and lower than the paging token of the
+ *   next readable record on the page: a broken record's numbers are not
+ *   trusted beyond the readable records around it. With no readable record
+ *   after it, the position is used only when nothing else on the page moves
+ *   the cursor (a full page would otherwise be read again forever); else the
+ *   record is passed over and the next page, read from the position reached,
+ *   bounds it.
  */
 function planPage(
   records: readonly HorizonPaymentRecord[],
@@ -383,14 +384,10 @@ function stepFor(
     const token = record.paging_token;
     return isPast(token, current) ? { position: token, behind: false } : { position: undefined, behind: true };
   }
-  const token = stringField(record, 'paging_token');
-  if (token !== undefined && PAGING_TOKEN.test(token)) {
-    return { position: isPast(token, current) ? token : undefined, behind: false };
-  }
-  const id = recordPosition(record);
+  const position = recordPosition(record);
   const usable =
-    id !== undefined && isPast(id, current) && (bound === undefined ? unbounded : BigInt(id) < bound);
-  return { position: usable ? id : undefined, behind: false };
+    position !== undefined && isPast(position, current) && (bound === undefined ? unbounded : BigInt(position) < bound);
+  return { position: usable ? position : undefined, behind: false };
 }
 
 /**

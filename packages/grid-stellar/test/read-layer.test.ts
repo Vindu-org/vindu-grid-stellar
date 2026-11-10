@@ -231,14 +231,20 @@ describe('read layer', () => {
     expect(bad).toHaveLength(1);
   });
 
-  it('a malformed record as the last one still moves the cursor past it', async () => {
+  it('a malformed record as the last one moves the cursor past it once nothing else on its page does', async () => {
     const records = [paymentRecord(), paymentRecord({ amount: 'not-a-number' })];
     const gateway = new FakeGateway();
     gateway.payments.set(ACCOUNT, records);
     const cursorStore = new InMemoryCursorStore();
-    const layer = createReadLayer({ gateway, cursorStore, onEvent: () => undefined, onMalformed: () => undefined });
+    const onMalformed = jest.fn();
+    const layer = createReadLayer({ gateway, cursorStore, onEvent: () => undefined, onMalformed });
+    // Nothing after it bounds its position, and the payment moved the cursor: passed over.
+    await layer.pollAccount(ACCOUNT);
+    expect(await cursorStore.get(ACCOUNT)).toBe(records[0]!.paging_token);
+    // Alone at the head of the next poll, it moves the cursor.
     await layer.pollAccount(ACCOUNT);
     expect(await cursorStore.get(ACCOUNT)).toBe(records[1]!.paging_token);
+    expect(onMalformed).toHaveBeenCalledTimes(2);
   });
 
   it('by default logs a malformed record with its ids only', async () => {
@@ -370,8 +376,9 @@ describe('read layer', () => {
 
   it('stores the position past skipped records once per page, not once per record', async () => {
     const records = [
-      ...Array.from({ length: 4 }, () => paymentRecord({ type: 'change_trust' })),
+      ...Array.from({ length: 3 }, () => paymentRecord({ type: 'change_trust' })),
       paymentRecord({ amount: '1e3' }),
+      paymentRecord({ type: 'change_trust' }),
       paymentRecord(),
       ...Array.from({ length: 3 }, () => paymentRecord({ from: OTHER, to: THIRD })),
     ];
@@ -400,15 +407,15 @@ describe('read layer', () => {
   });
 
   it('reconcile reports malformed records too and never moves the cursor', async () => {
-    const records = [paymentRecord(), paymentRecord({ amount: '1e3' })];
+    const records = [paymentRecord(), paymentRecord({ amount: '1e3' }), paymentRecord()];
     const gateway = new FakeGateway();
     gateway.payments.set(ACCOUNT, records);
     const cursorStore = new InMemoryCursorStore();
     const onMalformed = jest.fn();
     const layer = createReadLayer({ gateway, cursorStore, onEvent: () => undefined, onMalformed });
     const result = await layer.reconcile(ACCOUNT);
-    expect(result).toMatchObject({ skipped: 0, malformed: 1, lastCursor: records[1]!.paging_token });
-    expect(result.payments).toHaveLength(1);
+    expect(result).toMatchObject({ skipped: 0, malformed: 1, lastCursor: records[2]!.paging_token });
+    expect(result.payments).toHaveLength(2);
     expect(onMalformed).toHaveBeenCalledTimes(1);
     expect(await cursorStore.get(ACCOUNT)).toBeUndefined();
   });
@@ -537,7 +544,10 @@ describe('read layer', () => {
 });
 
 /** A payment record at position `n`, with an optional paging token and id. */
-function at(n: number | bigint, overrides: { paging_token?: string; id?: string; amount?: string } = {}): HorizonPaymentRecord {
+function at(
+  n: number | bigint,
+  overrides: { paging_token?: string; id?: string; amount?: string; transaction_hash?: string | undefined } = {},
+): HorizonPaymentRecord {
   return paymentRecord({ id: String(n), paging_token: String(n), ...overrides });
 }
 
@@ -624,6 +634,46 @@ describe('read layer: positions only move forward', () => {
     await t.poll();
     expect(t.delivered).toEqual(['1', '3', '4', '5']);
     expect(t.queries()).toEqual([undefined, '3']);
+  });
+
+  // Review probe: a malformed record's own decimal paging token was trusted
+  // with no bound, so the payments after it on its page fell behind the
+  // cursor and were dropped.
+  it('a malformed record with a huge paging token before valid payments does not skip them', async () => {
+    const records = [at(1), at(2, { transaction_hash: undefined, paging_token: '999999' }), at(4), at(5)];
+    const t = orderedLayer(records, 200);
+    expect(await t.poll()).toMatchObject({ delivered: 3, malformed: 1, skipped: 0, cursor: '5', hasMore: false });
+    expect(t.delivered).toEqual(['1', '4', '5']);
+    expect(t.malformed).toEqual(['2']);
+    expect(t.stored).not.toContain('999999');
+    expect(onlyForward(t.stored)).toBe(true);
+  });
+
+  it('a malformed record with a huge paging token last on its page waits for the next page', async () => {
+    const records = [at(1), at(2), at(3, { amount: 'zz', paging_token: '999999' }), at(4), at(5)];
+    const t = orderedLayer(records, 3);
+    await t.poll();
+    expect(t.delivered).toEqual(['1', '2', '4', '5']);
+    // Read from the last payment, not from the huge paging token.
+    expect(t.queries()).toEqual([undefined, '2', '5']);
+    expect(t.stored).not.toContain('999999');
+  });
+
+  it('a malformed record whose paging token is below the next payment still moves the cursor to it', async () => {
+    const records = [at(10), at(20, { amount: 'bad' }), at(30)];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      onMalformed: () => undefined,
+      onEvent: (p) => {
+        if (p.id === '30') throw new Error('db down');
+      },
+    });
+    await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('db down');
+    expect(await cursorStore.get(ACCOUNT)).toBe('20');
   });
 
   it('a malformed record whose fallback id is below the next payment still moves the cursor to it', async () => {
