@@ -188,6 +188,8 @@ const SYSTEM_CONSTANT_RE = /^[A-Z]+(?:_[A-Z]+)*$/;
 const SYSTEM_CONSTANT_PLAIN_MAX = 12;
 /** A segment this long that holds a digit reads as a token or an identifier, not a code. */
 const TOKEN_SEGMENT_MIN = 8;
+/** A code with this many digits or more, in total, reads as a number (a document, a phone, a token). */
+const DIGITS_MIN = 6;
 /** A run of 16 or more hex characters: a hash, a key or an id. */
 const HEX_RUN_RE = /[0-9a-f]{16,}/;
 /** A UUID, in any position. */
@@ -205,6 +207,7 @@ function readCode(cause: unknown): unknown {
 /** Whether a code's shape says it carries a secret or client data rather than naming an error. */
 function looksLikeData(code: string): boolean {
   if (HEX_RUN_RE.test(code) || UUID_RE.test(code)) return true;
+  if ((code.match(/[0-9]/g) ?? []).length >= DIGITS_MIN) return true;
   return code.split(/[_-]/).some((segment) => segment.length >= TOKEN_SEGMENT_MIN && /[0-9]/.test(segment));
 }
 
@@ -217,10 +220,15 @@ function looksLikeData(code: string): boolean {
  *
  * A code that has the right shape but reads as data is dropped too: one with
  * a segment (split on `_` or `-`) of 8 or more characters holding a digit
- * (`sk_live_abc123def456`, `maria_silva_12345678901`), a run of 16 or more hex
- * characters, or a UUID. Anything else is dropped, so a secret or client data
- * put in `code` (`sk_live_SECRET123`, `Jane Doe`) never reaches an error or a
- * log.
+ * (`sk_live_abc123def456`, `maria_silva_12345678901`), 6 or more digits in
+ * total (`cpf-123-456-789-00`, `token_0123456`), a run of 16 or more hex
+ * characters, or a UUID. Anything else that is not code-shaped is dropped
+ * (`sk_live_SECRET123`, `Jane Doe`).
+ *
+ * This filter is best-effort: it only keeps values shaped like codes. It
+ * does not catch a secret or a name made of lowercase letters only
+ * (`janedoe`, `mariasilva_rua_augusta`), which looks just like a code.
+ * Callers must still never put client data or secrets in a `code`.
  *
  * It never throws: a `code` getter that throws, a Proxy, `null` or any other
  * value without a usable `code` gives `undefined`. Every cause code in this

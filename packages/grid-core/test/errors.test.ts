@@ -237,6 +237,29 @@ describe('shared errors', () => {
       expect(causeCodeOf({ code })).toBeUndefined();
     });
 
+    // Review probe: client data split into short segments kept the shape of a code.
+    it.each<[string, string]>([
+      ['a document number in dashes', 'cpf-123-456-789-00'],
+      ['a phone number', 'tel_11-98765-4321'],
+      ['a token in short mixed segments', 'ab12-cd34-ef56-ab78'],
+      ['a token with 7 digits', 'token_0123456'],
+    ])('drops a code with 6 or more digits in total: %s', (_label, code) => {
+      expect(causeCodeOf({ code })).toBeUndefined();
+    });
+
+    it.each<string>(['http_502', 'err_1234', 'und_err_socket', 'tx_bad_seq', 'payout_xdr_mismatch', 'etimedout', 'econnrefused'])(
+      'keeps %p, with fewer than 6 digits',
+      (code) => {
+        expect(causeCodeOf({ code })).toBe(code);
+      },
+    );
+
+    it('keeps a code of 5 digits and drops one of 6', () => {
+      expect(causeCodeOf({ code: 'err_12345' })).toBe('err_12345');
+      expect(causeCodeOf({ code: 'err_123456' })).toBeUndefined();
+      expect(causeCodeOf({ code: 'e1_2_3_4_5_6' })).toBeUndefined();
+    });
+
     // Review probe: a code getter that throws escaped every error built from the cause.
     it.each<[string, () => unknown]>([
       [
