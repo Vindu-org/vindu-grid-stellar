@@ -393,8 +393,8 @@ async function submitAndRecord(
   const submitter = signing.submitter as StellarSubmitter;
   let outcome: unknown;
   try {
-    // A frozen copy: onSubmitted gets what was checked, and a hostile getter fails here, as an unknown outcome.
-    outcome = frozenCopy(await submitter.submit(signedXdr), 'the submit outcome');
+    // A frozen copy of status, hash and detail: onSubmitted gets what was checked.
+    outcome = frozenOutcome(await submitter.submit(signedXdr));
   } catch (cause) {
     throw new PayoutIncompleteError({ stage: 'submit', signedXdr, cause });
   }
@@ -685,6 +685,43 @@ function assertQuoteFresh(quote: LegQuote, now: number, marginMs: number, stage:
     throw new QuoteExpiredError(quote.id, quote.expiresAt, stage);
   }
   return now;
+}
+
+/** Reads one property, or `undefined` when its getter or a Proxy trap throws. */
+function readGuarded(value: object, key: string): unknown {
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The submit outcome as frozen plain data, built from `status`, `hash` and
+ * `detail` read one by one, so an outcome that is a class instance with
+ * getters reads like a plain object. A field whose read throws, or that is
+ * not the type the port says, is left out: a missing `status` or `hash`
+ * makes the outcome not a confirmed success, and a `detail` that cannot be
+ * copied is dropped. Anything that is not an object is returned as it is.
+ */
+function frozenOutcome(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null) return value;
+  const status = readGuarded(value, 'status');
+  const hash = readGuarded(value, 'hash');
+  const detail = readGuarded(value, 'detail');
+  let detailCopy: unknown;
+  if (typeof detail === 'object' && detail !== null) {
+    try {
+      detailCopy = frozenCopy(detail, 'the submit outcome detail');
+    } catch {
+      detailCopy = undefined;
+    }
+  }
+  return Object.freeze({
+    ...(typeof status === 'string' ? { status } : {}),
+    ...(typeof hash === 'string' ? { hash } : {}),
+    ...(detailCopy === undefined ? {} : { detail: detailCopy }),
+  });
 }
 
 function isOutcome(value: unknown): value is SubmitOutcome {

@@ -662,6 +662,104 @@ describe('signed payout', () => {
       expect(executePayout).not.toHaveBeenCalled();
     });
 
+    // Review probe: a class-instance outcome with getters was copied as an
+    // empty object, so a confirmed success was reported as not confirmed.
+    it('reads a class-instance success through its getters', async () => {
+      class Outcome {
+        readonly #hash = HASH;
+        get status(): 'success' {
+          return 'success';
+        }
+        get hash(): string {
+          return this.#hash;
+        }
+      }
+      const { input, submit, onSubmitted, executePayout } = setup();
+      submit.mockResolvedValueOnce(new Outcome());
+      await expect(runSignedPayout(input)).resolves.toMatchObject({ leg: LEG, txHash: HASH });
+      expect(onSubmitted).toHaveBeenCalledTimes(1);
+      const recorded = onSubmitted.mock.calls[0]![0];
+      expect(recorded).toEqual({ status: 'success', hash: HASH });
+      expect(Object.getPrototypeOf(recorded)).toBe(Object.prototype);
+      expect(Object.isFrozen(recorded)).toBe(true);
+      expect(executePayout).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the status, hash and detail of a class-instance outcome that is not a success', async () => {
+      class Outcome {
+        get status(): 'rejected' {
+          return 'rejected';
+        }
+        get hash(): string {
+          return HASH;
+        }
+        get detail(): { operationCodes: string[] } {
+          return { operationCodes: ['op_underfunded'] };
+        }
+      }
+      const { input, submit, executePayout } = setup();
+      submit.mockResolvedValueOnce(new Outcome() as SubmitOutcome);
+      const e = (await caught(runSignedPayout(input))) as PayoutIncompleteError;
+      expect(e).toMatchObject({ stage: 'submit', txHash: HASH });
+      expect(e.outcome).toEqual({ status: 'rejected', hash: HASH, detail: { operationCodes: ['op_underfunded'] } });
+      expect(Object.isFrozen(e.outcome)).toBe(true);
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, () => unknown]>([
+      [
+        'a status getter that throws',
+        () => ({
+          get status(): string {
+            throw new Error('boom');
+          },
+          hash: HASH,
+        }),
+      ],
+      [
+        'a hash getter that throws',
+        () => ({
+          status: 'success',
+          get hash(): string {
+            throw new Error('boom');
+          },
+        }),
+      ],
+      [
+        'a Proxy whose every read throws',
+        () =>
+          new Proxy(
+            {},
+            {
+              get() {
+                throw new Error('boom');
+              },
+            },
+          ),
+      ],
+    ])('treats an outcome with %s as not confirmed', async (_name, make) => {
+      const { input, submit, onSubmitted, executePayout } = setup();
+      submit.mockResolvedValueOnce(make() as SubmitOutcome);
+      await expect(runSignedPayout(input)).rejects.toMatchObject({ stage: 'submit', signedXdr: SIGNED });
+      expect(onSubmitted).not.toHaveBeenCalled();
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it('drops a detail that cannot be read and keeps the rest of the outcome', async () => {
+      const { input, submit } = setup();
+      submit.mockResolvedValueOnce({
+        status: 'failed',
+        hash: HASH,
+        detail: {
+          get transactionCode(): string {
+            throw new Error('boom');
+          },
+        },
+      } as SubmitOutcome);
+      const e = (await caught(runSignedPayout(input))) as PayoutIncompleteError;
+      expect(e.outcome).toEqual({ status: 'failed', hash: HASH });
+    });
+
     it('executes after a success even if the quote expired during submission: the payment moved', async () => {
       let t = NOW;
       const { input, submit, executePayout } = setup({ clock: () => t });
