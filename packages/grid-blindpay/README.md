@@ -128,7 +128,7 @@ Quotes are `sender` quotes: BlindPay's `sender_amount` must equal the `request_a
 - `status` from BlindPay's `status` field, never from the event name (the docs disagree on which event fires for which outcome). Anything unexpected is `unknown`.
 - `amount`: the stablecoin the leg moved on Stellar, as core's port defines it. Funding: `receiver_amount`, the stablecoin delivered to the account. Payout: `sender_amount`, the stablecoin taken from it. It is left out, never guessed, unless the token is known (BlindPay's `token` field, or USDC on `stellar`, the only token there) and its issuer is in `assetIssuers`, and the amount is a whole number of cents. The fiat side (a payout's `receiver_amount`, the fiat delivered) is on the raw resource: `adapter.client.stellarPayouts.getPayout(id)` or the parsed webhook.
 - `txHash`: the Stellar hash from `tracking_transaction.transaction_hash`, only when it is 64 hex characters; anything else is left out.
-- `occurredAt` (events) and `updatedAt` (reads): the resource's own change time, from `updated_at`, or for a completed leg `tracking_complete.completed_at`. Left out when BlindPay sends neither.
+- `occurredAt` (events) and `updatedAt` (reads): the resource's own change time, from `updated_at`, or for a completed leg `tracking_complete.completed_at`. Left out when BlindPay sends neither, or sends one that is not a strict ISO-8601 instant with an offset (an impossible date such as `2029-02-30` is left out, never rolled over).
 - `deliveredAt` (events): the Svix timestamp. It is the delivery time; retries change it, so never order events by it.
 
 ## Webhooks
