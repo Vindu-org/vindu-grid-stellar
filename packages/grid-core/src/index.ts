@@ -80,6 +80,7 @@ export {
   toMinorUnits,
   toUnits,
 } from './money';
+export { parseInstantMs } from './instant';
 export {
   type LogFields,
   type Logger,

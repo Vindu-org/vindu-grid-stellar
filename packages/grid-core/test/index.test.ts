@@ -35,6 +35,7 @@ describe('index exports', () => {
     'SignerRefusedError',
     'causeCodeOf',
     'PayoutInterruptedError',
+    'parseInstantMs',
   ])('exports %s', (name) => {
     expect(core).toHaveProperty(name);
   });
