@@ -403,6 +403,16 @@ describe('adapter leg amounts and times', () => {
     expect((await read(payin)).updatedAt).toBeUndefined();
   });
 
+  // Review probe: Date.parse rolled an impossible date over to the next month.
+  it.each(['2029-02-30T10:00:00Z', '2030-02-29T10:00:00Z', '2029-04-31T00:00:00Z', '2029-12-31T24:00:00Z', '2029-12-31T23:60:00Z'])(
+    'leaves the change time unset for the impossible instant %p',
+    async (when) => {
+      const read = (r: Record<string, unknown>) => reading(r).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id });
+      expect((await read({ ...payin, updated_at: when })).updatedAt).toBeUndefined();
+      expect((await read({ ...payin, tracking_complete: { step: 'completed', completed_at: when } })).updatedAt).toBeUndefined();
+    },
+  );
+
   it('puts amount and resource time on webhook events, and the Svix time in deliveredAt only', async () => {
     const ts = String(NOW / 1000 - 10);
     const sign = (body: string) => ({

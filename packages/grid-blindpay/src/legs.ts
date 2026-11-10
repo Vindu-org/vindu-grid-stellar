@@ -13,7 +13,7 @@
  * `stellar`, the only token there is USDC), and its issuer must be in the
  * adapter's `assetIssuers`. A missing or non-integer amount is left out too.
  */
-import { type LegKind, type LegStatusValue, type Money, fromMinorUnits } from '@vindu/grid-core';
+import { type LegKind, type LegStatusValue, type Money, fromMinorUnits, parseInstantMs } from '@vindu/grid-core';
 
 import { BLINDPAY_DECIMALS } from './amounts';
 import type { Stablecoins } from './tokens';
@@ -72,11 +72,12 @@ export function legTxHash(resource: Payin | Payout): string | undefined {
   return typeof h === 'string' && TX_HASH_RE.test(h) ? h : undefined;
 }
 
-/** ISO-8601 date and time with an explicit offset. Anything looser is dropped rather than guessed. */
-const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-
+/**
+ * ISO-8601 date and time with an explicit offset, through core's strict
+ * parser: anything looser, or an impossible date or time (`2029-02-30`,
+ * `24:00`), is dropped rather than guessed or rolled over.
+ */
 function instant(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !ISO_INSTANT_RE.test(value)) return undefined;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+  const ms = parseInstantMs(value);
+  return ms === undefined ? undefined : new Date(ms).toISOString();
 }
