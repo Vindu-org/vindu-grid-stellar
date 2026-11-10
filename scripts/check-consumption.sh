@@ -82,7 +82,9 @@ printf 'nodeLinker: node-modules\nenableTelemetry: false\nenableScripts: false\n
   cat "$work/install.log"
   fail "installing the tarballs failed"
 }
-[ "$(cd "$consumer" && yarn config get enableScripts)" = false ] || fail "the consumer project runs install scripts"
+# Read only the last line: corepack may print a one-time notice before the value.
+enable_scripts="$(cd "$consumer" && yarn config get enableScripts 2>/dev/null | tail -n 1)"
+[ "$enable_scripts" = false ] || fail "the consumer project runs install scripts (enableScripts is '$enable_scripts')"
 echo "installed with yarn $(cd "$consumer" && yarn --version), TypeScript $typescript, install scripts off"
 
 echo "== require()"
