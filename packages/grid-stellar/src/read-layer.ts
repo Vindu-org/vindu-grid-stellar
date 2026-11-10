@@ -28,7 +28,10 @@
  * cannot jump the cursor past the payments after it. With no readable record
  * after it on the page, the position is used only when nothing else on the
  * page moves the cursor; otherwise the record is passed over and seen again
- * at the head of the next page, where the payment after it bounds it. A record with no position never resets or
+ * at the head of the next page, where the payment after it bounds it. On a
+ * page where nothing readable moves the cursor, each malformed position must
+ * also be lower than every position after it on the page, so a huge one
+ * cannot jump past the honest ones. A record with no position never resets or
  * clears the cursor. A full page that does not move the position at all
  * cannot be passed: the call then throws rather than read the same page
  * again.
@@ -345,24 +348,38 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
  *   the cursor (a full page would otherwise be read again forever); else the
  *   record is passed over and the next page, read from the position reached,
  *   bounds it.
+ *
+ * When that moves nothing, the page is planned again with each malformed
+ * position bounded by the lowest position of any record after it, readable or
+ * not. The last one is used only when nothing before it moved the cursor, so
+ * a full page of broken records still advances (to all but its last), and a
+ * huge position among them does not.
  */
 function planPage(
   records: readonly HorizonPaymentRecord[],
   items: readonly Item[],
   start: string | undefined,
 ): Step[] {
-  // The paging token of the next readable record after each index.
+  // For each index: the paging token of the next readable record after it,
+  // and the lowest position of any record after it (for a page where no
+  // readable record moves the cursor).
   const bounds = new Array<bigint | undefined>(records.length);
+  const fallbackBounds = new Array<bigint | undefined>(records.length);
   let next: bigint | undefined;
+  let lowest: bigint | undefined;
   for (let i = records.length - 1; i >= 0; i -= 1) {
     bounds[i] = next;
+    fallbackBounds[i] = lowest;
     // normalisePayment only reads a record whose paging_token is decimal digits.
+    const own = items[i]!.kind === 'malformed' ? recordPosition(records[i]!) : records[i]!.paging_token;
     if (items[i]!.kind !== 'malformed') next = BigInt(records[i]!.paging_token);
+    if (own !== undefined && (lowest === undefined || BigInt(own) < lowest)) lowest = BigInt(own);
   }
-  const plan = (unbounded: boolean): { steps: Step[]; end: string | undefined } => {
+  const plan = (fallback: boolean): { steps: Step[]; end: string | undefined } => {
     let position = start;
     const steps = records.map((record, i): Step => {
-      const step = stepFor(items[i]!, record, position, bounds[i], unbounded);
+      const bound = fallback ? fallbackBounds[i] : bounds[i];
+      const step = stepFor(items[i]!, record, position, bound, fallback && position === start);
       position = step.position ?? position;
       return step;
     });

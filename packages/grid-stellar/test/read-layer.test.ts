@@ -483,14 +483,15 @@ describe('read layer', () => {
     });
     expect(await layer.pollAccount(ACCOUNT)).toMatchObject({
       delivered: 1,
-      malformed: 2,
+      malformed: 3,
       cursor: records[2]!.paging_token,
       hasMore: false,
     });
-    expect(onMalformed).toHaveBeenCalledTimes(2);
-    expect(gateway.paymentQueries.map((q) => q.query.cursor)).toEqual([undefined, '45056']);
+    // The first id is bounded by the next one; the last waits for the payment after it.
+    expect(onMalformed).toHaveBeenCalledTimes(3);
+    expect(gateway.paymentQueries.map((q) => q.query.cursor)).toEqual([undefined, '40960', records[2]!.paging_token]);
     expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 0, malformed: 0, hasMore: false });
-    expect(onMalformed).toHaveBeenCalledTimes(2);
+    expect(onMalformed).toHaveBeenCalledTimes(3);
     expect(seen).toEqual([records[2]!.id]);
   });
 
@@ -531,7 +532,8 @@ describe('read layer', () => {
       onMalformed: () => undefined,
     });
     await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('no position past the cursor');
-    expect(calls).toBe(2);
+    // To 10 (bounded by 11), then to 11 (alone past the cursor), then no move.
+    expect(calls).toBe(3);
     expect(await cursorStore.get(ACCOUNT)).toBe('11');
   });
 
@@ -674,6 +676,31 @@ describe('read layer: positions only move forward', () => {
     });
     await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('db down');
     expect(await cursorStore.get(ACCOUNT)).toBe('20');
+  });
+
+  it('on a page where nothing readable moves, a huge malformed position is bounded by the records after it', async () => {
+    const records = [
+      at(615, { paging_token: '', amount: 'bad' }),
+      at(619, { amount: 'zz', paging_token: '999999' }),
+      at(621, { paging_token: '', amount: 'bad' }),
+      at(626),
+      at(630),
+    ];
+    const t = orderedLayer(records, 3);
+    await t.poll();
+    expect(t.delivered).toEqual(['626', '630']);
+    expect(t.stored).not.toContain('999999');
+    expect(onlyForward(t.stored)).toBe(true);
+    // 615 moves (below 999999), 999999 does not (not below 621), 621 waits for the next page.
+    expect(t.queries()).toEqual([undefined, '615', '626']);
+  });
+
+  it('the only malformed position on a full page moves the cursor when nothing else does', async () => {
+    const records = [at(5, { paging_token: '', id: 'none', amount: 'bad' }), at(7, { paging_token: '', amount: 'bad' }), at(9)];
+    const t = orderedLayer(records, 2);
+    await t.poll();
+    expect(t.delivered).toEqual(['9']);
+    expect(t.queries()).toEqual([undefined, '7']);
   });
 
   it('a malformed record whose fallback id is below the next payment still moves the cursor to it', async () => {
