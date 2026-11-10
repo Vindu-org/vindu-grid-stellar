@@ -1,4 +1,5 @@
 import { InvalidInputError, type Logger } from '@vindu/grid-core';
+import type { HorizonPaymentRecord } from '../src/horizon';
 import type { ChainPayment } from '../src/payments';
 import { InMemoryCursorStore, createReadLayer } from '../src/read-layer';
 import { ACCOUNT, FakeGateway, OTHER, THIRD, USDC_ISSUER, paymentRecord } from './fake-gateway';
@@ -532,5 +533,213 @@ describe('read layer', () => {
     expect(() => createReadLayer({ ...base, pageSize: 0 })).toThrow(RangeError);
     expect(() => createReadLayer({ ...base, pageSize: 201 })).toThrow(RangeError);
     expect(() => createReadLayer({ ...base, maxPages: 0 })).toThrow(RangeError);
+  });
+});
+
+/** A payment record at position `n`, with an optional paging token and id. */
+function at(n: number | bigint, overrides: { paging_token?: string; id?: string; amount?: string } = {}): HorizonPaymentRecord {
+  return paymentRecord({ id: String(n), paging_token: String(n), ...overrides });
+}
+
+/** A layer over the fake Horizon, recording the cursors asked for and stored. */
+function orderedLayer(records: readonly HorizonPaymentRecord[], pageSize: number, start?: string, numeric = false) {
+  const gateway = new FakeGateway();
+  gateway.payments.set(ACCOUNT, [...records]);
+  const queries = gateway.paymentQueries;
+  if (numeric) {
+    // Pages by position as a number (paging token, else id) instead of list
+    // place, as the review probe's Horizon did.
+    const order = (r: HorizonPaymentRecord): bigint =>
+      /^[0-9]+$/.test(r.paging_token) ? BigInt(r.paging_token) : /^[0-9]+$/.test(r.id) ? BigInt(r.id) : -1n;
+    gateway.paymentsForAccount = async (account, query) => {
+      queries.push({ account, query });
+      const after = query.cursor === undefined ? -1n : BigInt(query.cursor);
+      return records.filter((r) => order(r) > after).slice(0, query.limit);
+    };
+  }
+  const cursorStore = new InMemoryCursorStore();
+  const stored: string[] = [];
+  const set = cursorStore.set.bind(cursorStore);
+  cursorStore.set = async (account, cursor) => {
+    stored.push(cursor);
+    return set(account, cursor);
+  };
+  const delivered: string[] = [];
+  const malformed: string[] = [];
+  const layer = createReadLayer({
+    gateway,
+    cursorStore,
+    pageSize,
+    maxPages: 10,
+    onEvent: (p) => {
+      delivered.push(p.id);
+    },
+    onMalformed: (record) => {
+      malformed.push(record.id);
+    },
+  });
+  const poll = async () => {
+    if (start !== undefined) await set(ACCOUNT, start);
+    return layer.pollAccount(ACCOUNT);
+  };
+  return { layer, poll, queries: () => queries.map((q) => q.query.cursor), stored, delivered, malformed, cursorStore };
+}
+
+/** Whether every stored cursor is greater than the one before, as integers. */
+function onlyForward(stored: readonly string[]): boolean {
+  return stored.every((c, i) => i === 0 || BigInt(c) > BigInt(stored[i - 1]!));
+}
+
+describe('read layer: positions only move forward', () => {
+  // Review probe: a malformed record with a huge operation id moved the
+  // cursor past every payment after it, so they were never delivered.
+  it('a malformed record with a huge id before valid payments does not skip them', async () => {
+    const records = [at(1), at(2), at(3, { paging_token: 'bad', id: '999999999999' }), at(4), at(5)];
+    const t = orderedLayer(records, 200);
+    expect(await t.poll()).toMatchObject({ delivered: 4, malformed: 1, skipped: 0, cursor: '5', hasMore: false });
+    expect(t.delivered).toEqual(['1', '2', '4', '5']);
+    expect(t.malformed).toEqual(['999999999999']);
+    expect(t.stored).not.toContain('999999999999');
+    expect(onlyForward(t.stored)).toBe(true);
+    expect(await t.cursorStore.get(ACCOUNT)).toBe('5');
+  });
+
+  // The review probe's exact case: the malformed record is the last one on
+  // its page, so the next payment is on the next page.
+  it('a malformed record with a huge id last on its page does not skip the next page', async () => {
+    const records = [at(1), at(2), at(3, { paging_token: 'bad', id: '999999' }), at(4), at(5)];
+    const t = orderedLayer(records, 3, undefined, true);
+    await t.poll();
+    expect(t.delivered).toEqual(['1', '2', '4', '5']);
+    // Read from the last payment, not from the huge id.
+    expect(t.queries()).toEqual([undefined, '2', '5']);
+    expect(t.stored.indexOf('5')).toBeGreaterThanOrEqual(0);
+    expect(t.stored.slice(0, t.stored.indexOf('5'))).not.toContain('999999');
+  });
+
+  it('a malformed record with a huge id ahead of a page boundary does not skip the next page', async () => {
+    // The bound is the next readable record on the same page.
+    const records = [at(1), at(2, { paging_token: 'bad', id: '999999999999' }), at(3), at(4), at(5)];
+    const t = orderedLayer(records, 3);
+    await t.poll();
+    expect(t.delivered).toEqual(['1', '3', '4', '5']);
+    expect(t.queries()).toEqual([undefined, '3']);
+  });
+
+  it('a malformed record whose fallback id is below the next payment still moves the cursor to it', async () => {
+    const records = [at(10), at(20, { paging_token: '', amount: 'bad' }), at(30)];
+    const t = orderedLayer(records, 200);
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const cursorStore = new InMemoryCursorStore();
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      onMalformed: () => undefined,
+      onEvent: (p) => {
+        if (p.id === '30') throw new Error('db down');
+      },
+    });
+    // Stopped at the payment after it: the position kept is the malformed record's id.
+    await expect(layer.pollAccount(ACCOUNT)).rejects.toThrow('db down');
+    expect(await cursorStore.get(ACCOUNT)).toBe('20');
+    // And with nothing failing, the poll passes both.
+    await t.poll();
+    expect(t.delivered).toEqual(['10', '30']);
+    expect(t.malformed).toEqual(['20']);
+  });
+
+  it('a malformed record without a readable record after it on a page that moves waits for the next page', async () => {
+    // Its id cannot be bounded yet: the next page, read from the last payment, bounds it.
+    const records = [at(10), at(20, { paging_token: '', amount: 'bad' }), at(30), at(40)];
+    const t = orderedLayer(records, 2);
+    await t.poll();
+    expect(t.delivered).toEqual(['10', '30', '40']);
+    expect(t.queries()).toEqual([undefined, '10', '30']);
+    expect(t.malformed).toEqual(['20', '20']);
+    expect(onlyForward(t.stored)).toBe(true);
+  });
+
+  it('a malformed record whose fallback id equals the next payment\'s token does not move the cursor', async () => {
+    const records = [at(10), at(20, { paging_token: 'x', id: '30' }), at(30)];
+    const t = orderedLayer(records, 200);
+    await t.poll();
+    expect(t.delivered).toEqual(['10', '30']);
+    expect(t.stored).toEqual(['10', '30']);
+  });
+
+  it('a malformed record at or behind the cursor goes to onMalformed and never moves it back', async () => {
+    const records = [at(5, { amount: '1e3' }), at(10), at(7, { paging_token: '', amount: 'bad' }), at(10, { amount: '1e3' }), at(12)];
+    const gateway = new FakeGateway();
+    gateway.payments.set(ACCOUNT, records);
+    const malformed: string[] = [];
+    const delivered: string[] = [];
+    const cursorStore = new InMemoryCursorStore();
+    await cursorStore.set(ACCOUNT, '6');
+    const layer = createReadLayer({
+      gateway,
+      cursorStore,
+      onEvent: (p) => {
+        delivered.push(p.id);
+      },
+      onMalformed: (record) => {
+        malformed.push(record.id);
+      },
+    });
+    // A Horizon that answers with records it should not have: every one of them is read.
+    gateway.paymentsForAccount = async () => records;
+    expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 2, malformed: 3, cursor: '12' });
+    expect(malformed).toEqual(['5', '7', '10']);
+    expect(delivered).toEqual(['10', '12']);
+    expect(await cursorStore.get(ACCOUNT)).toBe('12');
+  });
+
+  // Review probe: a payment whose paging token went backwards moved the
+  // cursor back, so the next page read payments already delivered again.
+  it('a readable payment behind the cursor is skipped and never moves it back', async () => {
+    const records = [at(10), at(11), at(5), at(12), at(13)];
+    const t = orderedLayer(records, 3);
+    // The fake pages by list position, so the out-of-order record comes back
+    // at the head of the second page too, and is passed over again.
+    expect(await t.poll()).toMatchObject({ delivered: 4, skipped: 2, malformed: 0, cursor: '13', hasMore: false });
+    expect(t.delivered).toEqual(['10', '11', '12', '13']);
+    expect(t.queries()).toEqual([undefined, '11', '13']);
+    expect(t.stored).not.toContain('5');
+    expect(onlyForward(t.stored)).toBe(true);
+  });
+
+  it('a payment with the same position as the cursor is skipped, not delivered twice', async () => {
+    const gateway = new FakeGateway();
+    gateway.paymentsForAccount = async () => [at(20), at(20), at(21)];
+    const delivered: string[] = [];
+    const layer = createReadLayer({
+      gateway,
+      cursorStore: new InMemoryCursorStore(),
+      onEvent: (p) => {
+        delivered.push(p.id);
+      },
+    });
+    expect(await layer.pollAccount(ACCOUNT)).toMatchObject({ delivered: 2, skipped: 1, cursor: '21' });
+    expect(delivered).toEqual(['20', '21']);
+  });
+
+  it('compares positions as integers, not as strings or floating point numbers', async () => {
+    const short = orderedLayer([at(999), at(1000), at(1001)], 200, '999');
+    await short.poll();
+    expect(short.delivered).toEqual(['1000', '1001']);
+
+    const big = 9007199254740992n; // 2^53: the next integer is not a distinct JavaScript number.
+    const huge = orderedLayer([at(big), at(big + 1n), at(big + 2n)], 200, String(big));
+    await huge.poll();
+    expect(huge.delivered).toEqual([String(big + 1n), String(big + 2n)]);
+    expect(await huge.cursorStore.get(ACCOUNT)).toBe(String(big + 2n));
+  });
+
+  it('reconcile passes over a payment behind its window position too', async () => {
+    const records = [at(10), at(11), at(5), at(12)];
+    const t = orderedLayer(records, 200);
+    const result = await t.layer.reconcile(ACCOUNT);
+    expect(result.payments.map((p) => p.id)).toEqual(['10', '11', '12']);
+    expect(result).toMatchObject({ skipped: 1, lastCursor: '12' });
   });
 });

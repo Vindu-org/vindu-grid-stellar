@@ -16,12 +16,22 @@
  * from `onMalformed` to stop instead; the cursor then stays before that
  * record.
  *
- * The cursor only ever moves to a record's own position: its paging token
- * when that is decimal digits, otherwise (for a malformed record) its
- * operation id when that is, since Horizon uses the same number for both. A
- * record with neither never resets or clears the cursor. A full page that
- * does not move the position at all cannot be passed: the call then throws
- * rather than read the same page again.
+ * The cursor only ever moves forward, to a record's own position, compared
+ * as integers: its paging token when that is decimal digits, otherwise (for
+ * a malformed record) its operation id when that is, since Horizon uses the
+ * same number for both. A record whose position is not greater than the
+ * current one is passed over without moving the cursor: a payment there is
+ * skipped (not delivered), a malformed record still goes to `onMalformed`.
+ * A malformed record's fallback operation id is used only when it is also
+ * lower than the paging token of the next readable record on the same page,
+ * so a huge id on a broken record cannot jump the cursor past the payments
+ * after it. With no readable record after it on the page, the id is used
+ * only when nothing else on the page moves the cursor; otherwise the record
+ * is passed over and seen again at the head of the next page, where the
+ * payment after it bounds it. A record with no position never resets or
+ * clears the cursor. A full page that does not move the position at all
+ * cannot be passed: the call then throws rather than read the same page
+ * again.
  *
  * Positions past skipped and malformed records are stored once per page
  * (or before stopping), not once per record.
@@ -62,8 +72,9 @@ export type OnChainPayment = (payment: ChainPayment) => Promise<void> | void;
 /**
  * Receives a record that could not be normalised, and why. Resolve to skip
  * it; throw to stop the poll with the cursor before it. It may be called
- * again for the same record (by `reconcile`, or after a crash before the
- * position was stored). Never log the whole record: it carries addresses
+ * again for the same record (by `reconcile`, after a crash before the
+ * position was stored, or when it was passed over at the end of a page and
+ * comes back at the head of the next). Never log the whole record: it carries addresses
  * and memos.
  */
 export type OnMalformedPayment = (record: HorizonPaymentRecord, error: unknown) => Promise<void> | void;
@@ -84,7 +95,10 @@ export interface ReadLayerOptions {
 export interface PollResult {
   /** Payments handed to `onEvent`. */
   readonly delivered: number;
-  /** Records skipped: other operation types, failed transactions, or not touching the account. */
+  /**
+   * Records skipped: other operation types, failed transactions, not
+   * touching the account, or not past the cursor.
+   */
   readonly skipped: number;
   /** Records that could not be normalised, handed to `onMalformed` and passed over. */
   readonly malformed: number;
@@ -135,6 +149,16 @@ type Item =
   | { readonly kind: 'skipped' }
   | { readonly kind: 'malformed'; readonly error: unknown };
 
+/**
+ * Where a record moves the cursor: `position` when it moves it forward,
+ * `undefined` when it does not. `behind` is true for a readable record whose
+ * position is not past the current one; it is passed over.
+ */
+interface Step {
+  readonly position: string | undefined;
+  readonly behind: boolean;
+}
+
 export function createReadLayer(options: ReadLayerOptions): ReadLayer {
   const { gateway, cursorStore, onEvent } = options;
   const logger = options.logger ?? noopLogger;
@@ -174,7 +198,7 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
     account: string,
     cursor: string | undefined,
     pages: number,
-    visit: (item: Item, record: HorizonPaymentRecord) => Promise<void>,
+    visit: (item: Item, record: HorizonPaymentRecord, step: Step) => Promise<void>,
     pageDone: () => Promise<void> = async () => undefined,
   ): Promise<{ cursor: string | undefined; hasMore: boolean }> {
     let position = cursor;
@@ -185,9 +209,20 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
         order: 'asc',
       });
       const before = position;
-      for (const record of records) {
-        await visit(read(record, account), record);
-        position = recordPosition(record) ?? position;
+      const items = records.map((record) => read(record, account));
+      const steps = planPage(records, items, position);
+      for (let i = 0; i < records.length; i += 1) {
+        const record = records[i]!;
+        const item = items[i]!;
+        const step = steps[i]!;
+        if (step.behind) {
+          logger.warn('payment record not past the cursor; passed over', {
+            paymentId: stringField(record, 'id'),
+            txHash: stringField(record, 'transaction_hash'),
+          });
+        }
+        await visit(item, record, step);
+        position = step.position ?? position;
       }
       await pageDone();
       if (records.length < pageSize) return { cursor: position, hasMore: false };
@@ -229,10 +264,10 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
           account,
           start,
           maxPages,
-          async (item, record) => {
-            if (item.kind === 'skipped') {
+          async (item, record, step) => {
+            if (item.kind === 'skipped' || step.behind) {
               skipped += 1;
-              unsaved = recordPosition(record) ?? unsaved;
+              unsaved = step.position ?? unsaved;
               return;
             }
             if (item.kind === 'malformed') {
@@ -243,7 +278,7 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
                 throw e;
               }
               malformed += 1;
-              unsaved = recordPosition(record) ?? unsaved;
+              unsaved = step.position ?? unsaved;
               return;
             }
             const { payment } = item;
@@ -260,7 +295,7 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
             }
             delivered += 1;
             logger.debug('payment delivered', { paymentId: payment.id, txHash: payment.txHash });
-            await save(payment.pagingToken);
+            await save(step.position ?? payment.pagingToken);
           },
           async () => {
             if (unsaved !== undefined) await save(unsaved);
@@ -277,8 +312,8 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
       const payments: ChainPayment[] = [];
       let skipped = 0;
       let malformed = 0;
-      const end = await scan(account, sinceCursor, reconcileOptions.maxPages ?? maxPages, async (item, record) => {
-        if (item.kind === 'skipped') {
+      const end = await scan(account, sinceCursor, reconcileOptions.maxPages ?? maxPages, async (item, record, step) => {
+        if (item.kind === 'skipped' || step.behind) {
           skipped += 1;
           return;
         }
@@ -294,6 +329,78 @@ export function createReadLayer(options: ReadLayerOptions): ReadLayer {
       return { payments, skipped, malformed, lastCursor: end.cursor, hasMore: end.hasMore };
     },
   };
+}
+
+/**
+ * How each record of a page moves the cursor from `start`. Positions only
+ * move forward, compared as integers:
+ * - a readable record moves it to its paging token when that is past the
+ *   position reached, and is `behind` otherwise;
+ * - a malformed record with a decimal paging token moves it to that token
+ *   when it is past the position reached;
+ * - a malformed record without one falls back to its operation id, used only
+ *   when it is past the position reached and lower than the paging token of
+ *   the next readable record on the page. With no readable record after it,
+ *   the id is used only when nothing else on the page moves the cursor (a
+ *   full page would otherwise be read again forever); else the record is
+ *   passed over and the next page, read from the position reached, bounds it.
+ */
+function planPage(
+  records: readonly HorizonPaymentRecord[],
+  items: readonly Item[],
+  start: string | undefined,
+): Step[] {
+  // The paging token of the next readable record after each index.
+  const bounds = new Array<bigint | undefined>(records.length);
+  let next: bigint | undefined;
+  for (let i = records.length - 1; i >= 0; i -= 1) {
+    bounds[i] = next;
+    // normalisePayment only reads a record whose paging_token is decimal digits.
+    if (items[i]!.kind !== 'malformed') next = BigInt(records[i]!.paging_token);
+  }
+  const plan = (unbounded: boolean): { steps: Step[]; end: string | undefined } => {
+    let position = start;
+    const steps = records.map((record, i): Step => {
+      const step = stepFor(items[i]!, record, position, bounds[i], unbounded);
+      position = step.position ?? position;
+      return step;
+    });
+    return { steps, end: position };
+  };
+  const bounded = plan(false);
+  return bounded.end === start ? plan(true).steps : bounded.steps;
+}
+
+/** One record's {@link Step}; see {@link planPage}. */
+function stepFor(
+  item: Item,
+  record: HorizonPaymentRecord,
+  current: string | undefined,
+  bound: bigint | undefined,
+  unbounded: boolean,
+): Step {
+  if (item.kind !== 'malformed') {
+    const token = record.paging_token;
+    return isPast(token, current) ? { position: token, behind: false } : { position: undefined, behind: true };
+  }
+  const token = stringField(record, 'paging_token');
+  if (token !== undefined && PAGING_TOKEN.test(token)) {
+    return { position: isPast(token, current) ? token : undefined, behind: false };
+  }
+  const id = recordPosition(record);
+  const usable =
+    id !== undefined && isPast(id, current) && (bound === undefined ? unbounded : BigInt(id) < bound);
+  return { position: usable ? id : undefined, behind: false };
+}
+
+/**
+ * Whether decimal `position` is greater than `current`, compared as integers.
+ * Any position is past the start (`undefined`), and past a stored cursor that
+ * is not decimal digits, which cannot be compared.
+ */
+function isPast(position: string, current: string | undefined): boolean {
+  if (current === undefined || !PAGING_TOKEN.test(current)) return true;
+  return BigInt(position) > BigInt(current);
 }
 
 /**
