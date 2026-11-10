@@ -140,6 +140,32 @@ describe('horizon gateway', () => {
     }
   });
 
+  // Review probe: a close time without an offset was read in the host's time
+  // zone, so the same answer gave a different instant on each machine. The
+  // strict parser reads only UTC parts, so no time zone can change the result;
+  // tests here never change the environment, so they do not switch zones.
+  it.each([
+    '2026-11-09T12:00:05',
+    '2026-11-09T12:00:05.123',
+    '2026-11-09 12:00:05Z',
+    '2026-11-09',
+    '2026-02-30T12:00:05Z',
+    'Mon, 09 Nov 2026 12:00:05 GMT',
+  ])('refuses a ledger closed at %p', async (closedAt) => {
+    const body = { history_latest_ledger: 51, history_latest_ledger_closed_at: closedAt };
+    await expect(gatewayWith({ '/': { body } }).gateway.latestLedger()).rejects.toThrow('no usable latest ledger');
+  });
+
+  it.each([
+    ['2026-11-09T12:00:05Z', '2026-11-09T12:00:05.000Z'],
+    ['2026-11-09T09:00:05-03:00', '2026-11-09T12:00:05.000Z'],
+    ['2026-11-09T12:00:05.250+00:00', '2026-11-09T12:00:05.250Z'],
+  ])('reads a ledger closed at %p as %p', async (closedAt, iso) => {
+    const body = { history_latest_ledger: 51, history_latest_ledger_closed_at: closedAt };
+    const ledger = await gatewayWith({ '/': { body } }).gateway.latestLedger();
+    expect(ledger.closedAt.toISOString()).toBe(iso);
+  });
+
   it('a not-found lookup carries the answering instance\'s Latest-Ledger header', async () => {
     const { gateway, calls } = gatewayWith({ [`/transactions/${HASH}`]: { status: 404, headers: { 'Latest-Ledger': '812' } } });
     expect(await gateway.transaction(HASH)).toEqual({ found: false, latestLedger: 812 });

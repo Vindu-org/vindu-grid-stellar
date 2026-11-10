@@ -12,7 +12,7 @@
  * Point the gateway at one Horizon instance you operate or trust to be
  * consistent, not at a public load-balanced URL: see `TESTNET_HORIZON_URL`.
  */
-import { InvalidConfigError, InvalidInputError } from '@vindu/grid-core';
+import { InvalidConfigError, InvalidInputError, parseInstantMs } from '@vindu/grid-core';
 import { Horizon, TransactionBuilder, stellarSdk } from './sdk';
 
 /** One operation from Horizon's payments endpoint, in Horizon's own field names. */
@@ -321,12 +321,13 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       const { body } = await get('/', request?.signal);
       const root = asObject(body);
       const sequence = root['history_latest_ledger'];
-      const closedRaw = root['history_latest_ledger_closed_at'];
-      const closedAt = typeof closedRaw === 'string' ? new Date(closedRaw) : null;
-      if (!isLedgerNumber(sequence) || closedAt === null || Number.isNaN(closedAt.getTime())) {
+      // Strict: a close time without `Z` or an offset would be read in the
+      // host's time zone, so it makes the ledger unusable instead.
+      const closedMs = parseInstantMs(root['history_latest_ledger_closed_at']);
+      if (!isLedgerNumber(sequence) || closedMs === undefined) {
         throw new Error('Horizon returned no usable latest ledger');
       }
-      return { sequence, closedAt };
+      return { sequence, closedAt: new Date(closedMs) };
     },
 
     async paymentsForAccount(account, query, request) {
