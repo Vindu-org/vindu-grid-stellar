@@ -745,6 +745,37 @@ describe('signed payout', () => {
       expect(executePayout).not.toHaveBeenCalled();
     });
 
+    // Review probe: the hash was dropped whenever the status could not be read.
+    it('keeps a valid hash as txHash when the status read fails', async () => {
+      const { input, submit, executePayout } = setup();
+      submit.mockResolvedValueOnce({
+        get status(): string {
+          throw new Error('boom');
+        },
+        hash: HASH,
+      } as unknown as SubmitOutcome);
+      const e = (await caught(runSignedPayout(input))) as PayoutIncompleteError;
+      expect(e).toBeInstanceOf(PayoutIncompleteError);
+      expect(e).toMatchObject({ stage: 'submit', signedXdr: SIGNED, txHash: HASH, outcome: undefined });
+      expect(executePayout).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, unknown]>([
+      ['a malformed hash', { hash: 'nope' }],
+      ['a hash of the wrong length', { hash: HASH.slice(1) }],
+      ['a hash that is not a string', { hash: 42 }],
+    ])('leaves txHash unset for %s when the status read fails', async (_name, rest) => {
+      const { input, submit } = setup();
+      submit.mockResolvedValueOnce({
+        get status(): string {
+          throw new Error('boom');
+        },
+        ...(rest as object),
+      } as unknown as SubmitOutcome);
+      const e = (await caught(runSignedPayout(input))) as PayoutIncompleteError;
+      expect(e).toMatchObject({ stage: 'submit', txHash: undefined });
+    });
+
     it('drops a detail that cannot be read and keeps the rest of the outcome', async () => {
       const { input, submit } = setup();
       submit.mockResolvedValueOnce({

@@ -732,8 +732,13 @@ function isConfirmedSuccess(outcome: unknown): outcome is Extract<SubmitOutcome,
   return isOutcome(outcome) && outcome.status === 'success' && typeof outcome.hash === 'string' && TX_HASH_RE.test(outcome.hash);
 }
 
+/**
+ * The outcome's hash when it is 64 hex characters, whether or not its status
+ * could be read: a submit whose status read failed may still have landed,
+ * and the hash is what an operator checks on Stellar.
+ */
 function hashOf(outcome: unknown): string | undefined {
-  const hash = isOutcome(outcome) ? (outcome as { hash?: unknown }).hash : undefined;
+  const hash = typeof outcome === 'object' && outcome !== null ? (outcome as { hash?: unknown }).hash : undefined;
   return typeof hash === 'string' && TX_HASH_RE.test(hash) ? hash : undefined;
 }
 
