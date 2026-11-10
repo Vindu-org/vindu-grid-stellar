@@ -274,6 +274,27 @@ describe('signed payout', () => {
       expect(onAuthorized).not.toHaveBeenCalled();
       expect(signStellar).not.toHaveBeenCalled();
     });
+
+    // Review probe: a thrown value whose code getter threw escaped the run
+    // with the adapter's own message instead of PayoutAuthorizationError.
+    it('wraps a preparePayout error whose code getter throws', async () => {
+      const { input, preparePayout, onAuthorized, signStellar } = setup();
+      const hostile = {
+        get code(): string {
+          throw new Error('partner error text: Jane Doe CPF 123.456.789-00');
+        },
+      };
+      preparePayout.mockRejectedValueOnce(hostile);
+      const warn = jest.fn();
+      const logger = { debug: jest.fn(), info: jest.fn(), warn, error: jest.fn() };
+      const e = (await caught(runSignedPayout({ ...input, logger }))) as PayoutAuthorizationError;
+      expect(e).toBeInstanceOf(PayoutAuthorizationError);
+      expect(e).toMatchObject({ failure: 'threw', causeCode: undefined });
+      expect(e.message).not.toMatch(/Jane|CPF/);
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/Jane|CPF/);
+      expect(onAuthorized).not.toHaveBeenCalled();
+      expect(signStellar).not.toHaveBeenCalled();
+    });
   });
 
   describe('error -> transition table', () => {
