@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          # setup-node would set up a Yarn cache before corepack enables Yarn 4.
+          package-manager-cache: false
       - run: corepack enable
       - run: yarn install --immutable
       - run: yarn build
@@ -42,6 +44,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
+          # setup-node would set up a Yarn cache before corepack enables Yarn 4.
+          package-manager-cache: false
       - run: corepack enable
       - run: yarn install --immutable
       - run: yarn build
@@ -64,4 +68,4 @@ jobs:
         run: >
           docker run --rm -v "${{ github.workspace }}:/repo" -w /repo
           ghcr.io/gitleaks/gitleaks:v8.21.2
-          detect --source /repo --redact --verbose --exit-code 1
+          detect --source /repo --config /repo/.gitleaks.toml --redact --verbose --exit-code 1
