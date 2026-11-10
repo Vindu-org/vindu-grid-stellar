@@ -185,16 +185,28 @@ const CAUSE_CODE_RE = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/;
 /** A system error constant made of capital letters and underscores only: `ETIMEDOUT`, `UND_ERR_SOCKET`. */
 const SYSTEM_CONSTANT_RE = /^[A-Z]+(?:_[A-Z]+)*$/;
 
+/** Reads `cause.code` without letting a getter, a Proxy trap or a revoked Proxy throw. */
+function readCode(cause: unknown): unknown {
+  try {
+    return typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The `code` of an error, when it is safe to keep: a lowercase snake or
  * kebab code of at most 48 characters (`partner_http`). A system constant of
  * capital letters and underscores only (`ETIMEDOUT`) is kept lowercased
  * (`etimedout`). Anything else is dropped, so a secret or client data put in
  * `code` (`sk_live_SECRET123`, `Jane Doe`) never reaches an error or a log.
- * Every cause code in this library and its adapters comes from here.
+ *
+ * It never throws: a `code` getter that throws, a Proxy, `null` or any other
+ * value without a usable `code` gives `undefined`. Every cause code in this
+ * library and its adapters comes from here.
  */
 export function causeCodeOf(cause: unknown): string | undefined {
-  const raw = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  const raw = readCode(cause);
   if (typeof raw !== 'string') return undefined;
   const code = SYSTEM_CONSTANT_RE.test(raw) ? raw.toLowerCase() : raw;
   return code.length <= CAUSE_CODE_MAX && CAUSE_CODE_RE.test(code) ? code : undefined;

@@ -213,6 +213,55 @@ describe('shared errors', () => {
       expect(causeCodeOf(cause)).toBeUndefined();
     });
 
+    // Review probe: a code getter that throws escaped every error built from the cause.
+    it.each<[string, () => unknown]>([
+      [
+        'a code getter that throws',
+        () => ({
+          get code(): string {
+            throw new Error('partner error text: Jane Doe');
+          },
+        }),
+      ],
+      [
+        'a Proxy whose every trap throws',
+        () =>
+          new Proxy(
+            {},
+            {
+              get() {
+                throw new Error('trap');
+              },
+              has() {
+                throw new Error('trap');
+              },
+              getOwnPropertyDescriptor() {
+                throw new Error('trap');
+              },
+              getPrototypeOf() {
+                throw new Error('trap');
+              },
+            },
+          ),
+      ],
+      [
+        'a revoked Proxy',
+        () => {
+          const { proxy, revoke } = Proxy.revocable({}, {});
+          revoke();
+          return proxy;
+        },
+      ],
+      ['null', () => null],
+    ])('never throws on %s', (_label, make) => {
+      const cause = make();
+      expect(() => causeCodeOf(cause)).not.toThrow();
+      expect(causeCodeOf(cause)).toBeUndefined();
+      expect(new PayoutAuthorizationError('threw', cause).causeCode).toBeUndefined();
+      expect(new SignerRefusedError('threw', cause).causeCode).toBeUndefined();
+      expect(new PayoutInterruptedError({ stage: 'run', cause }).causeCode).toBeUndefined();
+    });
+
     it('applies to every error that keeps a cause code', () => {
       const secret = Object.assign(new Error('x'), { code: 'sk_live_SECRET123' });
       expect(new PayoutAuthorizationError('threw', secret).causeCode).toBeUndefined();
