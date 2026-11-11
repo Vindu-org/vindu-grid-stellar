@@ -10,7 +10,7 @@ Typed [BlindPay](https://blindpay.com) client for two-leg transfers settled on S
 | Node | 22 or later. |
 | Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-blindpay` only; files under `dist/` are internal. |
 | Stability | 0.x: a breaking change bumps the minor version, a patch never breaks. See the [stability policy](../../README.md#stability). |
-| Planned | BlindPay's answers to the points under [Unconfirmed](#unconfirmed). Passing the shared adapter conformance suite once it exists (tranche 3). |
+| Planned | BlindPay's written answers to the points under [Unconfirmed](#unconfirmed). Passing the shared adapter conformance suite once it exists (tranche 3). |
 
 ## What it covers
 
@@ -141,15 +141,15 @@ Customers are approved automatically (legal name `Fail` forces a rejection), pay
 
 ## Unconfirmed
 
-The public docs leave these open. Each one lives in one place so a different answer is a small change.
+The public docs leave these open. Each one lives in one place so a different answer is a small change. `examples/live-blindpay` asks a development instance; what it answered on 2026-11-11 is in [its findings](../../examples/live-blindpay/FINDINGS.md) and noted below. A development instance is not production: keep the options until BlindPay confirms in writing.
 
-- **`signed_transaction` content**: signed XDR or Stellar hash. Adapter option `signedTransactionField` (`signed_xdr` default, `tx_hash`).
-- **Who submits to Stellar**: `runStellarPayout` option `submission` (`client_submits` default, `partner_submits`).
-- **The Stellar account payouts pay**: not in the public docs. Get it from BlindPay in writing and set it as the adapter's `payoutDestination`. Never read it from the transaction BlindPay returns: the signer checks that transaction against it.
-- **Quote lifetime**: not stated. Quotes expiring more than `maxQuoteTtlMs` (default one hour) ahead are refused; raise it if BlindPay confirms longer quotes.
-- **Reading one payout**: `GET /payouts/{po_id}` assumed, in one constant in `stellar-payouts.ts`.
-- **Error body format**: the code is read from `code` or `error.code`, and kept only when it is code-shaped. Free text never becomes the code.
-- **Leg fields**: `token`, `updated_at` and a payout's `sender_amount` are used when present, never required.
+- **`signed_transaction` content**: signed XDR or Stellar hash. Adapter option `signedTransactionField` (`signed_xdr` default, `tx_hash`). Development took the signed envelope (plain or fee-bumped) and refused a hash.
+- **Who submits to Stellar**: `runStellarPayout` option `submission` (`client_submits` default, `partner_submits`). Development did both: it submitted an envelope it was given, and took one already on the ledger.
+- **The Stellar account payouts pay**: not in the public docs. Get it from BlindPay in writing and set it as the adapter's `payoutDestination`. Never read it from the transaction BlindPay returns: the signer checks that transaction against it. On development every payout paid the USDB issuer.
+- **Quote lifetime**: not stated. Quotes expiring more than `maxQuoteTtlMs` (default one hour) ahead are refused; raise it if BlindPay confirms longer quotes. Development quotes, payin and payout, expired 300 s after the request; the authorize transaction about 30 s after it was built.
+- **Reading one payout**: `GET /payouts/{po_id}`, in one constant in `stellar-payouts.ts`. Development answered it.
+- **Error body format**: the code is read from `code` or `error.code`, and kept only when it is code-shaped. Free text never becomes the code. Development sends `{ success, code, description, message, errors, trace_id }`: `code` is a generic class such as `VALIDATION_INVALID_REQUEST`, and the specific reason (`transaction_xdr_invalid`) is only in `message`, which errors carry only with `includeErrorBodies`.
+- **Leg fields**: `token`, `updated_at` and a payout's `sender_amount` are used when present, never required. Development sends all three. A payin's delivery hash is in `tracking_complete`, a payout's in `tracking_transaction`.
 - **Fee currency on quotes**: not stated, so `LegQuote.fees` is left empty rather than guessed.
 - **Webhook firing rules** conflict between pages: the adapter reads the `status` field, never the event name.
 

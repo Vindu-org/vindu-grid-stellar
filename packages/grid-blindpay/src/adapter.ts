@@ -64,9 +64,10 @@ export interface BlindPayAdapterOptions {
    */
   readonly partnerFeeIdFor?: (leg: LegKind, spreadBps: number | undefined) => string | undefined;
   /**
-   * What `executePayout` sends in `signed_transaction`; UNCONFIRMED which one
-   * BlindPay expects. Default `signed_xdr`. With `tx_hash`, the payout must be
-   * submitted by us first (`client_submits`).
+   * What `executePayout` sends in `signed_transaction`. Default `signed_xdr`,
+   * the signed envelope: the only form a development instance accepted
+   * (2026-11-11); it refused a hash with `transaction_xdr_invalid`. With
+   * `tx_hash`, the payout must be submitted by us first (`client_submits`).
    */
   readonly signedTransactionField?: SignedTransactionField;
   /**

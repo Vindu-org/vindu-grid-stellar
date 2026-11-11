@@ -217,7 +217,11 @@ export interface CreatePayoutQuoteRequest {
 }
 
 export interface PayoutQuote extends QuoteAmounts {
-  /** `null` on Stellar. */
+  /**
+   * An EVM token approval (ABI, amount). The docs say `null` on Stellar, but
+   * a development instance sent one on Stellar quotes too (2026-11-11):
+   * ignore it there, it plays no part in a Stellar payout.
+   */
   readonly contract?: unknown;
 }
 
@@ -229,23 +233,26 @@ export interface AuthorizeStellarPayoutRequest {
 /**
  * What goes in `signed_transaction` when creating a Stellar payout: the signed
  * XDR envelope (`signed_xdr`) or the Stellar transaction hash (`tx_hash`).
- * UNCONFIRMED which one BlindPay expects, so it is an adapter option.
+ *
+ * A development instance (2026-11-11) takes the signed envelope, plain or
+ * fee-bumped, and refuses a hash with `400 REQUEST_REJECTED`
+ * (`transaction_xdr_invalid`), even for a transaction already on the
+ * ledger. Use `signed_xdr`; `tx_hash` stays only until BlindPay says
+ * otherwise in writing.
  */
 export type SignedTransactionField = 'signed_xdr' | 'tx_hash';
 
 export interface CreateStellarPayoutRequest {
   readonly quote_id: string;
-  /**
-   * What goes here (signed XDR envelope or Stellar transaction hash) is
-   * UNCONFIRMED. See {@link SignedTransactionField}.
-   */
+  /** The signed transaction envelope, base64 XDR. See {@link SignedTransactionField}. */
   readonly signed_transaction: string;
   readonly sender_wallet_address: string;
 }
 
 /**
- * Response shape assumed to match a payout (UNCONFIRMED for the Stellar create
- * call). As on a payout quote, `sender` is the stablecoin and `receiver` the fiat.
+ * A payout, as the Stellar create and `GET /payouts/{po_id}` return it. As on
+ * a payout quote, `sender` is the stablecoin and `receiver` the fiat. On a
+ * development instance the create already answers with the final status.
  */
 export interface Payout extends UnconfirmedLegFields {
   readonly id: string;

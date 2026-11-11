@@ -37,12 +37,20 @@
  *   the exact input and key. Retry with {@link retryStellarPayoutCreate}.
  * - A clock, margin or submit budget that is not a finite number fails closed.
  *
- * Two BlindPay answers are still open, so both are options:
+ * Two options cover what BlindPay's docs leave open. A development instance
+ * answered both on 2026-11-11 (see `examples/live-blindpay/FINDINGS.md`):
  * - `submission`: we submit to Stellar first (`client_submits`, the docs'
- *   example and the default) or BlindPay receives the signed XDR (`partner_submits`).
+ *   example and the default) or BlindPay receives the signed XDR and submits
+ *   it (`partner_submits`). Both worked: BlindPay submitted an envelope it
+ *   was given, and took one already on the ledger.
  * - The adapter's `signedTransactionField`: `signed_transaction` carries the
- *   signed XDR (`signed_xdr`, default) or the hash (`tx_hash`). `tx_hash`
- *   needs `client_submits`: without a submit there is no hash.
+ *   signed XDR (`signed_xdr`, default) or the hash (`tx_hash`). Only the
+ *   signed XDR was accepted. `tx_hash` needs `client_submits`: without a
+ *   submit there is no hash.
+ *
+ * BlindPay's authorize transaction expires about 30 seconds after it is
+ * built (its `maxTime`), well inside the quote. Sign and submit right away,
+ * and size the submitter's `timeoutMs` and `maxWaitMs` to that window.
  */
 import {
   type ExecutePayoutInput,
