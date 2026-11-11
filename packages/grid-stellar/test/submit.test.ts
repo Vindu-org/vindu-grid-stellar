@@ -1000,7 +1000,7 @@ describe("submit: someone else's fee bump, as testnet Horizon answers (real HTTP
     fee_bump_transaction: { hash: theirs.hash, signatures: [] },
     inner_transaction: { hash: inner.hash, signatures: [], max_fee: '200' },
   };
-  /** What the fake Horizon answers for the inner hash. */
+  /** What the fake Horizon answers for the inner hash. A field set to undefined is left out of the JSON. */
   let record: Record<string, unknown> = asHorizonAnswers;
 
   /** Submits our fee bump; Horizon refuses it as `tx_bad_seq`, or gives no answer with `answer: 'timeout'`. */
@@ -1066,16 +1066,14 @@ describe("submit: someone else's fee bump, as testnet Horizon answers (real HTTP
   });
 
   it('a record with a well-formed fee_bump_transaction.hash but no inner_transaction is unknown', async () => {
-    const { inner_transaction: _dropped, ...withoutInner } = asHorizonAnswers;
-    record = withoutInner;
+    record = { ...asHorizonAnswers, inner_transaction: undefined };
     const result = await submit('timeout');
     expect(result).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
     expect(canSignReplacement(result)).toBe(false);
   });
 
   it('a fee bump record without its envelope is unknown', async () => {
-    const { envelope_xdr: _dropped, ...withoutEnvelope } = asHorizonAnswers;
-    record = withoutEnvelope;
+    record = { ...asHorizonAnswers, envelope_xdr: undefined };
     expect(await submit('timeout')).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
   });
 
