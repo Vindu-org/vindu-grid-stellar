@@ -64,4 +64,27 @@ export async function resubmitScenario(world: World, report: Report): Promise<vo
   const held = await testnet.balanceReaches(receiver.publicKey(), asset, expected);
   check(held === expected, `Receiver holds ${String(held)}, expected ${expected}`);
   report.step(`receiver balance ${startBalance} -> ${expected}: paid once; sender sequence used once`);
+
+  // A transaction that lands as failed: its sequence number is spent and
+  // nothing moved. The submitter reads the landed result's own codes.
+  const tooMuch = testnet.build(sender, [
+    Operation.payment({ destination: receiver.publicKey(), asset: world.sdkAsset, amount: '1000000' }),
+  ]);
+  const failedXdr = testnet.sign(tooMuch, sender);
+  const failedInfo = inspectSignedTransaction(failedXdr, testnet.networkPassphrase);
+  const failed = await submitter.submit(failedXdr);
+  check(failed.status === 'failed', `An underfunded payment ended ${failed.status}, not failed`);
+  check(failed.detail.error?.code === 'underfunded', `The failure should carry op_underfunded, got ${JSON.stringify(failed.detail.error)}`);
+  testnet.noteLanded(failed.detail.ledger);
+  const failedAgain = await submitter.submit(failedXdr);
+  check(failedAgain.status === 'failed', `Resubmitting the failed envelope ended ${failedAgain.status}, not failed`);
+  check(failedAgain.detail.error?.code === 'underfunded', 'The resubmitted failure should keep its own codes');
+  const senderAfterFailure = await testnet.settledAccount(sender.publicKey(), failedInfo.sequence);
+  check(senderAfterFailure.sequence === failedInfo.sequence, 'The failed transaction should spend exactly its sequence number');
+  const stillHeld = await testnet.balanceReaches(receiver.publicKey(), asset, expected);
+  check(stillHeld === expected, `The failed payment moved money: receiver holds ${String(stillHeld)}`);
+  report.step(
+    `an underfunded payment landed as failed (${failed.detail.error.transactionCode ?? ''} ` +
+      `${failed.detail.error.operationCodes.join(',')}), also on resubmit; nothing moved`,
+  );
 }
