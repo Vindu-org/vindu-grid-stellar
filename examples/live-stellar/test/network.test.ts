@@ -1,6 +1,8 @@
 import { MAINNET_HORIZON_URL, MAINNET_NETWORK_PASSPHRASE, TESTNET_NETWORK_PASSPHRASE } from '@vindu/grid-stellar';
 
 import { LIVE_TESTNET, NotTestnetError, assertHorizonRootIsTestnet, assertTestnet, networkFromArgs } from '../src/network';
+import { packageLogger } from '../src/report';
+import { Testnet } from '../src/testnet';
 
 describe('the testnet guard', () => {
   it('accepts the public testnet settings', () => {
@@ -19,6 +21,12 @@ describe('the testnet guard', () => {
 
   it('refuses another friendbot', () => {
     expect(() => assertTestnet({ ...LIVE_TESTNET, friendbotUrl: 'https://friendbot.example.org' })).toThrow(NotTestnetError);
+  });
+
+  it('stops the live run before anything is built for another network', () => {
+    const logger = packageLogger(() => undefined);
+    expect(() => new Testnet({ ...LIVE_TESTNET, horizonUrl: MAINNET_HORIZON_URL }, logger)).toThrow(NotTestnetError);
+    expect(() => new Testnet({ ...LIVE_TESTNET, networkPassphrase: MAINNET_NETWORK_PASSPHRASE }, logger)).toThrow(NotTestnetError);
   });
 
   it('refuses a Horizon whose root names another passphrase, or none', () => {
