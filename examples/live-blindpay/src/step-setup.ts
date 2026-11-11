@@ -40,22 +40,16 @@ export async function setUpAccount(w: World): Promise<boolean> {
   if (!w.report.check(step, fb.ok, `Friendbot funded a throwaway testnet account ${address} (HTTP ${fb.status})`)) return false;
 
   // The trustline: BlindPay builds it, the throwaway key signs it, grid-stellar submits it.
+  // TESTNET SETUP ONLY: a throwaway key signs a transaction the partner built,
+  // after the checks below. Never sign a partner's transaction like this with
+  // a key that holds anything.
   const unsigned = await createAssetTrustline(w.client, address);
-  const tx = TransactionBuilder.fromXDR(unsigned, NETWORK_PASSPHRASE);
-  if (!(tx instanceof Transaction)) {
-    w.report.fail(step, 'create-asset-trustline did not return a plain transaction');
+  const checked = checkTrustlineTransaction(unsigned, address, w.now());
+  if (typeof checked === 'string') {
+    w.report.fail(step, `create-asset-trustline: ${checked}; not signed`);
     return false;
   }
-  const op = tx.operations[0];
-  if (tx.operations.length !== 1 || op?.type !== 'changeTrust' || !('code' in op.line) || tx.source !== address) {
-    w.report.fail(step, 'create-asset-trustline returned something other than one changeTrust from the test account');
-    return false;
-  }
-  const line = op.line as { code: string; issuer: string };
-  if (line.code !== 'USDB') {
-    w.report.fail(step, `The trustline is for ${line.code}, not USDB`);
-    return false;
-  }
+  const { tx, line } = checked;
   const usdb = stellarAsset('USDB', line.issuer);
   w.found.usdb = usdb;
   w.report.finding(
@@ -106,6 +100,51 @@ export async function setUpAccount(w: World): Promise<boolean> {
     w.report.finding(step, 'BLINDPAY_PAYOUT_DESTINATION not set: payoutDestination is the USDB issuer from the trustline XDR (development only, circular for the destination check). In production take it from BlindPay in writing');
   }
   return shapeOk;
+}
+
+/** Highest fee the throwaway key pays for BlindPay's trustline transaction, in stroops (0.01 XLM). */
+export const TRUSTLINE_MAX_FEE_STROOPS = 100_000;
+/** Latest `maxTime` accepted on BlindPay's trustline transaction, from now. Development sent 300 s. */
+export const TRUSTLINE_MAX_LIFETIME_SEC = 900;
+
+/**
+ * Testnet setup only. Checks the trustline transaction BlindPay built before
+ * the throwaway key signs it: a plain transaction from `address`, one
+ * `changeTrust` for USDB with no source of its own, a fee of at most
+ * {@link TRUSTLINE_MAX_FEE_STROOPS}, and time bounds that let it land only
+ * now: a `maxTime` after now and at most {@link TRUSTLINE_MAX_LIFETIME_SEC}
+ * ahead, and a `minTime` of zero or not after now. Returns the transaction
+ * and its asset, or why it is refused.
+ */
+export function checkTrustlineTransaction(
+  unsignedXdr: string,
+  address: string,
+  nowMs: number,
+): { tx: InstanceType<typeof Transaction>; line: { code: string; issuer: string } } | string {
+  let tx: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    tx = TransactionBuilder.fromXDR(unsignedXdr, NETWORK_PASSPHRASE);
+  } catch {
+    return 'not a transaction envelope';
+  }
+  if (!(tx instanceof Transaction)) return 'not a plain transaction';
+  const op = tx.operations[0];
+  if (tx.operations.length !== 1 || op?.type !== 'changeTrust' || !('code' in op.line) || tx.source !== address || op.source !== undefined) {
+    return 'something other than one changeTrust from the test account';
+  }
+  const line = op.line as { code: string; issuer: string };
+  if (line.code !== 'USDB') return `a trustline for ${line.code}, not USDB`;
+  if (!/^[0-9]+$/.test(tx.fee) || BigInt(tx.fee) > BigInt(TRUSTLINE_MAX_FEE_STROOPS)) {
+    return `a fee of ${tx.fee} stroops, above the cap of ${TRUSTLINE_MAX_FEE_STROOPS}`;
+  }
+  const nowSec = Math.floor(nowMs / 1000);
+  const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
+  if (!(maxTime > nowSec) || maxTime > nowSec + TRUSTLINE_MAX_LIFETIME_SEC) {
+    return maxTime === 0 ? 'no maxTime' : `a maxTime ${maxTime - nowSec} s from now, outside 1 to ${TRUSTLINE_MAX_LIFETIME_SEC} s`;
+  }
+  const minTime = Number(tx.timeBounds?.minTime ?? 0);
+  if (minTime > nowSec) return 'a minTime later than now';
+  return { tx, line };
 }
 
 /** Polls `probe` until it returns a value or `timeoutMs` passes. */
