@@ -262,6 +262,24 @@ describe('horizon gateway', () => {
     expect(await gateway.transaction(HASH)).toEqual({ found: true, hash: HASH, successful: false });
   });
 
+  it('fails a lookup whose record hash is not 64 hex characters, never reports it found', async () => {
+    for (const bad of ['NOT A HASH <x>', 'ab'.repeat(31), `${HASH}0`, '']) {
+      const { gateway } = gatewayWith({
+        [`/transactions/${HASH}`]: { body: { hash: bad, successful: true, ledger: 5, inner_transaction: { hash: HASH } } },
+      });
+      await expect(gateway.transaction(HASH)).rejects.toThrow('malformed hash');
+    }
+  });
+
+  it('fails a lookup whose inner hash is present but not 64 hex characters', async () => {
+    for (const bad of ['zz', 7, null]) {
+      const { gateway } = gatewayWith({
+        [`/transactions/${HASH}`]: { body: { hash: HASH, successful: true, inner_transaction: { hash: bad } } },
+      });
+      await expect(gateway.transaction(HASH)).rejects.toThrow('malformed inner hash');
+    }
+  });
+
   it('fails a lookup whose answer has no hash or result', async () => {
     const { gateway } = gatewayWith({ [`/transactions/${HASH}`]: { body: { ledger: 3 } } });
     await expect(gateway.transaction(HASH)).rejects.toThrow('without a hash');

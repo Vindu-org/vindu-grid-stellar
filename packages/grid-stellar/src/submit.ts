@@ -14,7 +14,9 @@
  * A lookup is believed only when the record it returns is ours: its hash is
  * the hash looked up, our envelope hash or our inner hash, or its inner
  * transaction's hash is our inner (or plain) hash. Any other record ends the
- * submission as `unknown` with reason `unexpected_lookup_hash`.
+ * submission as `unknown` with reason `unexpected_lookup_hash`; so does a
+ * record whose hash (or inner hash) is not 64 hex characters, even when its
+ * other hash is ours.
  *
  * Whether a transaction expired is decided by the network, never by the
  * local clock, and never by an absent history record. `expired_not_landed`
@@ -369,14 +371,16 @@ export async function submitSignedTransaction(options: SubmitOptions): Promise<S
     }
   }
 
-  /** The record is this transaction: see the module documentation. */
+  /**
+   * The record is this transaction: see the module documentation. A record
+   * whose hash, or inner hash when it has one, is not 64 hex characters is
+   * never ours: its hash would be reported as the landed one.
+   */
   function isOurs(record: HorizonTransactionFound, requested: string): boolean {
     const recordHash = wellFormedHash(record.hash);
     const recordInner = wellFormedHash(record.innerHash);
-    return (
-      (recordHash !== undefined && (recordHash === requested || ownHashes.has(recordHash))) ||
-      (recordInner !== undefined && recordInner === ownInnerHash)
-    );
+    if (recordHash === undefined || (record.innerHash !== undefined && recordInner === undefined)) return false;
+    return recordHash === requested || ownHashes.has(recordHash) || (recordInner !== undefined && recordInner === ownInnerHash);
   }
 
   /** Looks the transaction up by every local hash. A failed or timed-out lookup never counts as not found. */

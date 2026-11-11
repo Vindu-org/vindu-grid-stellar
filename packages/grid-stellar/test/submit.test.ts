@@ -1163,6 +1163,24 @@ describe('submit: a lookup must return our transaction', () => {
     expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash, reason: 'unexpected_lookup_hash' });
   });
 
+  it('a record whose inner hash is ours but whose own hash is malformed is unknown, never success', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(hash, { found: true, hash: 'NOT A HASH <x>', innerHash: hash, successful: true, ledger: 5 });
+    const result = await run(gateway, xdr);
+    expect(result).toEqual({ status: 'unknown', hash, reason: 'unexpected_lookup_hash', returnedInnerHash: hash });
+    expect(canSignReplacement(result)).toBe(false);
+  });
+
+  it('a record whose hash is ours but whose inner hash is malformed is unknown, never success', async () => {
+    const { xdr, hash } = signedPayment(IN_ONE_HOUR);
+    const gateway = new FakeGateway();
+    gateway.submitResponses = [{ kind: 'timeout' }];
+    gateway.transactions.set(hash, { found: true, hash, innerHash: 'zz', successful: true, ledger: 5 });
+    expect(await run(gateway, xdr)).toEqual({ status: 'unknown', hash, reason: 'unexpected_lookup_hash', returnedHash: hash });
+  });
+
   it("someone else's fee bump whose inner hash is not ours is unknown", async () => {
     const plain = signedPayment(IN_ONE_HOUR);
     const unrelated = signedPayment(IN_ONE_HOUR);

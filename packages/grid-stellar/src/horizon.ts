@@ -355,7 +355,12 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       if (typeof tx['hash'] !== 'string' || typeof tx['successful'] !== 'boolean') {
         throw new Error('Horizon returned a transaction without a hash or a result');
       }
+      // A hash that is not 64 hex characters is no hash at all.
+      if (!HASH.test(tx['hash'])) throw new Error('Horizon returned a transaction with a malformed hash');
       const innerHash = asObject(tx['inner_transaction'])['hash'];
+      if (innerHash !== undefined && (typeof innerHash !== 'string' || !HASH.test(innerHash))) {
+        throw new Error('Horizon returned a transaction with a malformed inner hash');
+      }
       // Looked up by its inner hash, a fee bump comes back with the inner
       // hash as its own `hash`; the envelope on the ledger, whose hash its
       // operations and payments carry, is `fee_bump_transaction`.
