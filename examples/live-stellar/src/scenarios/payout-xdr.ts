@@ -62,6 +62,7 @@ export async function payoutXdrScenario(world: World, report: Report): Promise<v
     ['fee over the cap', 'fee', tampered([pay()], { fee: overCapFee })],
     ['no maxTime', 'max_time', tampered([pay()], { maxTime: 0 })],
     ['maxTime after the quote expires', 'max_time', tampered([pay()], { maxTime: expiresAtS + 1 })],
+    ['maxTime already past', 'max_time', tampered([pay()], { maxTime: nowSeconds() - 1 })],
     ['an extra operation', 'operations', tampered([pay(), pay({ amount: '1' })])],
     ['the payment spends from another account', 'operation_source', tampered([pay({ source: feePayer.publicKey() })])],
     [
