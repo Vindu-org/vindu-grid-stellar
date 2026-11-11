@@ -406,9 +406,17 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
   };
 }
 
-/** The record says it is a fee bump: it names a fee bump or an inner transaction. */
+/**
+ * The record says it is a fee bump: it names a fee bump or an inner
+ * transaction. A field that is present but `null` names neither, so a plain
+ * record from a Horizon that sends `null` for them stays a plain record.
+ */
 function isFeeBumpRecord(tx: Record<string, unknown>): boolean {
-  return tx['fee_bump_transaction'] !== undefined || tx['inner_transaction'] !== undefined;
+  return present(tx['fee_bump_transaction']) || present(tx['inner_transaction']);
+}
+
+function present(value: unknown): boolean {
+  return value !== undefined && value !== null;
 }
 
 /**

@@ -312,6 +312,15 @@ describe('horizon gateway', () => {
     expect(await gateway.transaction(HASH)).toEqual({ found: true, hash: HASH, successful: false });
   });
 
+  it('reads a plain record whose fee bump fields are null as a plain transaction', async () => {
+    const { gateway } = gatewayWith({
+      [`/transactions/${HASH}`]: {
+        body: { hash: HASH, successful: true, ledger: 5, fee_bump_transaction: null, inner_transaction: null },
+      },
+    });
+    expect(await gateway.transaction(HASH)).toMatchObject({ found: true, hash: HASH, successful: true, ledger: 5 });
+  });
+
   it('fails a lookup whose record hash is not 64 hex characters, never reports it found', async () => {
     for (const bad of ['NOT A HASH <x>', 'ab'.repeat(31), `${HASH}0`, '']) {
       const { gateway } = gatewayWith({
