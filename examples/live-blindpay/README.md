@@ -15,7 +15,7 @@ It is never run in CI. `yarn test` runs only its offline unit tests, with `fetch
 0. Reads the instance and stops unless its `type` is `development`, before any write.
 1. Picks an approved customer, funds a throwaway testnet account with friendbot, adds the USDB trustline BlindPay builds (`create-asset-trustline`), authorizes it with a 1 USDB test mint (`mint-usdb-stellar`), and registers the account as the customer's `stellar_testnet` blockchain wallet.
 2. Quotes and creates a 100.00 BRL PIX payin to that wallet through the adapter, waits for it to end, and checks the USDB delivery on testnet with the read layer, `matchPaymentToLeg` and `partnerAndChainAgree`.
-3. Payins with the sentinel amounts 66600 (must end `failed`) and 77700 (`refunded`), and the same amounts as payouts.
+3. Payins with the sentinel amounts 66600 and 77700, which the docs say end `failed` and `refunded`: a payin still `processing` when the wait ends is a FINDING (no Stellar payin completed on development), one that ended otherwise, or whose raw status readLeg disagrees with, is a FAIL. The same amounts as payouts must end `failed` and `refunded`.
 4. Payouts through `runStellarPayout`, each on its own quote and signed once by a test-key signer that runs `assertPayoutXdrMatches` first: `partner_submits`, `client_submits` (submitted by grid-stellar first), a fee-bumped envelope, and an attempt to sign after the transaction's `maxTime`, which the signer must refuse (check `max_time`) so nothing reaches BlindPay. It checks the chain, `readLeg`, and the authorize transaction's fee, time bounds and destination. The receiver is a clearly fake ACH bank account; development instances skip the bank submission.
 5. Webhooks: skipped, there is no public URL to deliver to.
 

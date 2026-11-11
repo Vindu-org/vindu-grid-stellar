@@ -72,15 +72,26 @@ export async function settlePayins(w: World, payins: readonly StartedPayin[]): P
   }
 
   for (const p of payins) {
-    const read = final.get(p.leg.id);
+    let read = final.get(p.leg.id);
     if (read === undefined) {
       const raw = await w.client.payins.get(p.leg.id);
-      w.report.finding(
-        p.step,
-        `Payin ${p.label} still ${raw.status} ${Math.round((w.now() - p.createdAt) / 1000)} s after it was created (tracking: transaction ${raw.tracking_transaction?.step ?? '?'}, ` +
-          `payment ${raw.tracking_payment?.step ?? '?'}, complete ${raw.tracking_complete?.step ?? '?'}); docs say about 30 s`,
-      );
-      continue;
+      if (raw.status === 'processing') {
+        w.report.finding(
+          p.step,
+          `Payin ${p.label} still ${raw.status} ${Math.round((w.now() - p.createdAt) / 1000)} s after it was created (tracking: transaction ${raw.tracking_transaction?.step ?? '?'}, ` +
+            `payment ${raw.tracking_payment?.step ?? '?'}, complete ${raw.tracking_complete?.step ?? '?'}); docs say about 30 s`,
+        );
+        continue;
+      }
+      // Not "still processing": it may have ended since the last poll, so read it once more.
+      const again = await adapter.readLeg(p.leg);
+      last.set(p.leg.id, again);
+      if (!FINAL.includes(again.status) || again.status !== raw.status) {
+        w.report.fail(p.step, `Payin ${p.label}: BlindPay's status is ${String(raw.status)} but readLeg says ${again.status}`);
+        continue;
+      }
+      final.set(p.leg.id, again);
+      read = again;
     }
     w.report.check(p.step, read.status === p.expect, `Payin ${p.label} ended ${read.status} (expected ${p.expect})`);
   }
@@ -128,7 +139,18 @@ async function checkDeliveryOnChain(
   const raw = await w.client.payins.get(payin.leg.id);
   w.report.info(step, `Payin amounts: sender ${String(raw.sender_amount)} BRL cents, receiver ${String(raw.receiver_amount)} USDB cents, transaction_fee_amount ${String(raw.transaction_fee_amount)}, partner_fee ${String(raw.partner_fee)}`);
   w.report.check(step, read.amount !== undefined && read.amount.amount === payin.quote.target.amount, `readLeg amount ${read.amount?.amount ?? '?'} USDB equals the quote's ${payin.quote.target.amount}`);
-  w.report.check(step, read.txHash !== undefined, `readLeg carries the delivery hash ${read.txHash ?? 'none'} (tracking_complete.transaction_hash)`);
+  // On EVM payins the delivery hash is in tracking_complete; for a Stellar
+  // payin that is unconfirmed, and readLeg falls back to tracking_transaction.
+  const sameHash = (h: unknown): boolean => typeof h === 'string' && read.txHash !== undefined && h.toLowerCase() === read.txHash.toLowerCase();
+  if (read.txHash === undefined) {
+    w.report.fail(step, 'readLeg carries no delivery hash for a completed payin');
+  } else if (sameHash(raw.tracking_complete?.transaction_hash)) {
+    w.report.pass(step, `readLeg's delivery hash ${read.txHash} is the payin's tracking_complete.transaction_hash`);
+  } else if (sameHash(raw.tracking_transaction?.transaction_hash)) {
+    w.report.finding(step, `A Stellar payin's delivery hash ${read.txHash} is in tracking_transaction, not tracking_complete: readLeg used its fallback`);
+  } else {
+    w.report.fail(step, `readLeg's delivery hash ${read.txHash} is in neither tracking field of the raw payin`);
+  }
   const expected = { legId: payin.leg.id, destination: account.address, amount: payin.quote.target, ...(read.txHash === undefined ? {} : { txHash: read.txHash }) };
   const matches = window.payments.map((p) => ({ p, m: matchPaymentToLeg(p, [expected]) })).filter((x) => x.m.status === 'matched');
   const hit = matches[0];
