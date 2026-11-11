@@ -375,6 +375,46 @@ describe('adapter leg amounts and times', () => {
     expect((await reading(payout).readLeg({ partner: 'blindpay', kind: 'payout', id: payout.id })).amount).toEqual(money('100.01', usdb));
   });
 
+  // Shapes from a development instance (2026-11-11), every value replaced.
+  // A payin's tracking_transaction tracks the PIX and has no hash: the
+  // delivery hash is in tracking_complete. A payout has it in both.
+  const livePayin = {
+    ...payin,
+    tracking_transaction: { step: 'completed', status: null, external_id: 'ext_0000000000', completed_at: '2029-12-31T23:58:00.000Z' },
+    tracking_payment: { step: 'completed', provider_name: null, completed_at: '2029-12-31T23:58:00.000Z' },
+    tracking_complete: { step: 'completed', transaction_hash: HASH, completed_at: '2029-12-31T23:59:00.000Z' },
+  };
+  const OTHER_HASH = 'ef'.repeat(32);
+  const livePayout = {
+    ...payout,
+    status: 'completed',
+    tracking_transaction: { step: 'completed', status: 'found', transaction_hash: HASH, completed_at: '2029-12-31T23:58:00.000Z' },
+    tracking_complete: { step: 'completed', status: null, transaction_hash: OTHER_HASH, completed_at: '2029-12-31T23:59:00.000Z' },
+  };
+
+  it('reads the delivery hash of a payin from tracking_complete', async () => {
+    const leg = await reading(livePayin).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id });
+    expect(leg.txHash).toBe(HASH);
+  });
+
+  it('reads the signed transaction hash of a payout from tracking_transaction first', async () => {
+    const leg = await reading(livePayout).readLeg({ partner: 'blindpay', kind: 'payout', id: payout.id });
+    expect(leg.txHash).toBe(HASH);
+    const onlyComplete = { ...livePayout, tracking_transaction: { step: 'completed', status: 'found', transaction_hash: null } };
+    expect((await reading(onlyComplete).readLeg({ partner: 'blindpay', kind: 'payout', id: payout.id })).txHash).toBe(OTHER_HASH);
+  });
+
+  it('puts the payin delivery hash on a webhook event', async () => {
+    const ts = String(NOW / 1000 - 10);
+    const body = JSON.stringify({ webhook_event: 'payin.complete', ...livePayin });
+    const headers = {
+      'svix-id': 'msg_live', 'svix-timestamp': ts,
+      'svix-signature': `v1,${createHmac('sha256', WEBHOOK_KEY).update(`msg_live.${ts}.${body}`).digest('base64')}`,
+    };
+    const event = await reading(livePayin).parseWebhook(body, headers);
+    expect(event?.txHash).toBe(HASH);
+  });
+
   it('takes USDC on mainnet when BlindPay sends no token, with the configured issuer', async () => {
     const adapter = reading({ ...payin, token: undefined }, { network: 'stellar', assetIssuers: { USDC: USDC_ISSUER } });
     expect((await adapter.readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id })).amount).toEqual(money('95.12', usdc));

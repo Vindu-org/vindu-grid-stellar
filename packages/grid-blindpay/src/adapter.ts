@@ -240,7 +240,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
       const resource = leg.kind === 'funding' ? await client.payins.get(leg.id) : await client.stellarPayouts.getPayout(leg.id);
       const amount = legAmount(leg.kind, resource, options.network, coins);
       const updatedAt = legChangedAt(resource);
-      const txHash = legTxHash(resource);
+      const txHash = legTxHash(leg.kind, resource);
       return {
         ref: ref(leg.kind, resource.id),
         status: toLegStatus(resource.status),
@@ -265,7 +265,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
       const kind: LegKind = event.kind === 'payin' ? 'funding' : 'payout';
       const amount = legAmount(kind, resource, options.network, coins);
       const occurredAt = legChangedAt(resource);
-      const txHash = legTxHash(resource);
+      const txHash = legTxHash(kind, resource);
       return {
         eventId: verified.eventId,
         ref: ref(kind, resource.id),

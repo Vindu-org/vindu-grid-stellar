@@ -66,10 +66,21 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  * The Stellar transaction hash BlindPay reports for the leg: 64 hex
  * characters, or `undefined`. Anything else (free text, markup, a hash of
  * another length) is dropped rather than passed on as a hash.
+ *
+ * Where it sits depends on the leg, as a development instance answered on
+ * 2026-11-11:
+ * - Payin: `tracking_complete.transaction_hash`, the stablecoin delivery.
+ *   Its `tracking_transaction` tracks the PIX and carries no hash.
+ * - Payout: `tracking_transaction.transaction_hash`, the signed transaction
+ *   (the outer hash for a fee bump); `tracking_complete` repeats it.
+ * Each leg reads its own field first and the other one only when the first
+ * holds no hash.
  */
-export function legTxHash(resource: Payin | Payout): string | undefined {
-  const h = resource.tracking_transaction?.transaction_hash;
-  return typeof h === 'string' && TX_HASH_RE.test(h) ? h : undefined;
+export function legTxHash(kind: LegKind, resource: Payin | Payout): string | undefined {
+  const delivery = resource.tracking_complete?.transaction_hash;
+  const signed = resource.tracking_transaction?.transaction_hash;
+  const candidates = kind === 'funding' ? [delivery, signed] : [signed, delivery];
+  return candidates.find((h): h is string => typeof h === 'string' && TX_HASH_RE.test(h));
 }
 
 /**
