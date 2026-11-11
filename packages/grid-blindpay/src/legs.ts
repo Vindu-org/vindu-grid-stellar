@@ -78,12 +78,34 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  *   (the outer hash for a fee bump); `tracking_complete` repeats it.
  * Each leg reads its own field first and the other one only when the first
  * holds no well-formed hash.
+ *
+ * When both fields hold well-formed hashes that differ, nothing is guessed
+ * beyond that order: a payout keeps `tracking_transaction`'s (the envelope
+ * it was given), a payin `tracking_complete`'s, and {@link legTxHashConflict}
+ * reports the disagreement so the adapter can log it. Matching stays fail
+ * closed: a payment carrying the other hash does not match the leg.
  */
 export function legTxHash(kind: LegKind, resource: Payin | Payout): string | undefined {
   const delivery = resource.tracking_complete?.transaction_hash;
   const signed = resource.tracking_transaction?.transaction_hash;
   const candidates = kind === 'funding' ? [delivery, signed] : [signed, delivery];
-  return candidates.find((h): h is string => typeof h === 'string' && TX_HASH_RE.test(h));
+  return candidates.find(isTxHash);
+}
+
+/**
+ * The hash {@link legTxHash} did not pick, when `tracking_transaction` and
+ * `tracking_complete` both hold a well-formed hash and they differ;
+ * otherwise `undefined`.
+ */
+export function legTxHashConflict(kind: LegKind, resource: Payin | Payout): string | undefined {
+  const delivery = resource.tracking_complete?.transaction_hash;
+  const signed = resource.tracking_transaction?.transaction_hash;
+  if (!isTxHash(delivery) || !isTxHash(signed) || delivery.toLowerCase() === signed.toLowerCase()) return undefined;
+  return kind === 'funding' ? signed : delivery;
+}
+
+function isTxHash(value: unknown): value is string {
+  return typeof value === 'string' && TX_HASH_RE.test(value);
 }
 
 /**

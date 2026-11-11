@@ -28,8 +28,8 @@ import { BLINDPAY_CAPABILITIES } from './capabilities';
 import { type BlindPayClient, createBlindPayClient } from './client';
 import { BLINDPAY_PARTNER_ID, type BlindPayConfig, assertPartnerId } from './config';
 import { type StablecoinIssuers, stablecoins } from './tokens';
-import type { BlindPayNetwork, SignedTransactionField } from './types';
-import { legAmount, legChangedAt, legTxHash, toLegStatus } from './legs';
+import type { BlindPayNetwork, Payin, Payout, SignedTransactionField } from './types';
+import { legAmount, legChangedAt, legTxHash, legTxHashConflict, toLegStatus } from './legs';
 import { assertWebhookSecret, assertWebhookTolerance, parseWebhookEvent, verifyWebhook } from './webhooks';
 
 export interface BlindPayAdapterOptions {
@@ -143,6 +143,16 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
     throw new InvalidConfigError('payoutDestination must be the Stellar account (G...) BlindPay gave you for payouts');
   }
   const ref = (kind: LegKind, id: string): LegRef => ({ partner: partnerId, kind, id });
+  /**
+   * Logs, never decides, when BlindPay's two hash fields disagree: the leg
+   * keeps `legTxHash`'s choice, and a payment under the other hash does not
+   * match it, so the leg waits for a person rather than settle by accident.
+   */
+  const warnOnHashConflict = (kind: LegKind, resource: Payin | Payout, txHash: string | undefined): void => {
+    const other = legTxHashConflict(kind, resource);
+    if (other === undefined) return;
+    client.http.config.logger.warn('blindpay leg hashes disagree', { kind, id: resource.id, txHash, otherHash: other });
+  };
 
   const feeId = (leg: LegKind, spreadBps: number | undefined) => {
     if (spreadBps !== undefined && (!Number.isSafeInteger(spreadBps) || spreadBps < 0)) {
@@ -242,6 +252,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
       const amount = legAmount(leg.kind, resource, options.network, coins);
       const updatedAt = legChangedAt(resource);
       const txHash = legTxHash(leg.kind, resource);
+      warnOnHashConflict(leg.kind, resource, txHash);
       return {
         ref: ref(leg.kind, resource.id),
         status: toLegStatus(resource.status),
@@ -267,6 +278,7 @@ export function createBlindPayAdapter(config: BlindPayConfig, options: BlindPayA
       const amount = legAmount(kind, resource, options.network, coins);
       const occurredAt = legChangedAt(resource);
       const txHash = legTxHash(kind, resource);
+      warnOnHashConflict(kind, resource, txHash);
       return {
         eventId: verified.eventId,
         ref: ref(kind, resource.id),

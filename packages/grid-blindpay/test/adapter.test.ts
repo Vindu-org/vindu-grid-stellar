@@ -7,7 +7,7 @@ import { type BlindPayAdapterOptions, DEFAULT_MAX_QUOTE_TTL_MS, createBlindPayAd
 import { BlindPayQuoteError } from '../src/errors';
 import { toLegStatus } from '../src/legs';
 import { WebhookVerificationError } from '../src/webhooks';
-import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, USDB_ISSUER, USDC_ISSUER, WALLET_ID, caught, config, mockFetch } from './helpers';
+import { BANK_ACCOUNT_ID, CUSTOMER_ID, type Handler, STELLAR_ADDRESS, USDB_ISSUER, USDC_ISSUER, WALLET_ID, captureOutput, caught, config, mockFetch } from './helpers';
 
 const NOW = Date.parse('2030-01-01T00:00:00Z');
 const usdb = stellarAsset('USDB', USDB_ISSUER);
@@ -424,6 +424,30 @@ describe('adapter leg amounts and times', () => {
     expect(leg.txHash).toBe(HASH);
     const onlyComplete = { ...livePayout, tracking_transaction: { step: 'completed', status: 'found', transaction_hash: null } };
     expect((await reading(onlyComplete).readLeg({ partner: 'blindpay', kind: 'payout', id: payout.id })).txHash).toBe(OTHER_HASH);
+  });
+
+  it('keeps tracking_transaction when a payout\'s two hashes disagree, and logs the disagreement', async () => {
+    const out = captureOutput();
+    const { fetch } = mockFetch(() => ({ body: livePayout }));
+    const adapter = createBlindPayAdapter(config(fetch, { now: () => NOW, logger: out.logger }), {
+      network: 'stellar_testnet', webhookSecret: SECRET, assetIssuers: ISSUERS,
+    });
+    const leg = await adapter.readLeg({ partner: 'blindpay', kind: 'payout', id: payout.id });
+    expect(leg.txHash).toBe(HASH);
+    const warnings = out.lines.filter((l) => l.startsWith('warn blindpay leg hashes disagree'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(OTHER_HASH);
+  });
+
+  it('logs nothing when a payout repeats the same hash in both fields, in any case', async () => {
+    const out = captureOutput();
+    const same = { ...livePayout, tracking_complete: { ...livePayout.tracking_complete, transaction_hash: HASH.toUpperCase() } };
+    const { fetch } = mockFetch(() => ({ body: same }));
+    const adapter = createBlindPayAdapter(config(fetch, { now: () => NOW, logger: out.logger }), {
+      network: 'stellar_testnet', webhookSecret: SECRET, assetIssuers: ISSUERS,
+    });
+    expect((await adapter.readLeg({ partner: 'blindpay', kind: 'payout', id: payout.id })).txHash).toBe(HASH);
+    expect(out.lines.filter((l) => l.includes('hashes disagree'))).toEqual([]);
   });
 
   it('puts the payin delivery hash on a webhook event', async () => {
