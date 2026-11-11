@@ -31,8 +31,11 @@
  * 10. Fee: no more than the signer's own cap, in stroops.
  * 11. Time bounds: {@link assertMaxTimeWithinQuote} passes: the transaction
  *     has a `maxTime`, no later than the quote expiry, so it can never land
- *     after the quote is gone. Its `minTime`, if any, is no later than the
- *     signing time, so it cannot be held back to land later.
+ *     after the quote is gone. Its `maxTime` is later than the signing time:
+ *     a transaction that has already expired can never land, so signing it
+ *     is pointless (a partner's transaction may live only some seconds).
+ *     Its `minTime`, if any, is no later than the signing time, so it cannot
+ *     be held back to land later.
  * 12. No v2 preconditions: no minimum account sequence, no minimum sequence
  *     age or ledger gap, no extra signers and no ledger bounds. Each lets
  *     the transaction wait or land in ways the time bounds do not limit.
@@ -40,7 +43,7 @@
  * This package has no Stellar SDK, so decoding is the signer's job; steps 1
  * and 11 are helpers here. `@vindu/grid-stellar` exports
  * `assertPayoutXdrMatches`, a key-free check of the transaction rules
- * (steps 3 to 12, the `minTime` against its `now` option) with the Stellar
+ * (steps 3 to 12, `maxTime` and `minTime` against its `now` option) with the Stellar
  * SDK; a signer calls it before it signs, and signs with its own network
  * passphrase (step 2).
  *

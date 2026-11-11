@@ -71,8 +71,10 @@ export interface PayoutXdrOptions {
   /** Highest total fee, in stroops. Default {@link DEFAULT_MAX_FEE_STROOPS}. A positive safe integer. */
   readonly maxFeeStroops?: number;
   /**
-   * Clock in ms since epoch, read only when the transaction has a minTime,
-   * to refuse one that cannot land yet. Default `Date.now`.
+   * Clock in ms since epoch: the signing time. Read once, to refuse a
+   * transaction whose `maxTime` is at or before it (it can no longer land)
+   * and one whose `minTime` is after it (it cannot land yet). Default
+   * `Date.now`.
    */
   readonly now?: () => number;
 }
@@ -96,7 +98,9 @@ export const DEFAULT_MAX_FEE_STROOPS = 1_000_000;
  * - the asset (code and issuer) and the exact amount are `expected.amount`;
  * - the total fee is at most `maxFeeStroops`;
  * - it has a `maxTime`, no later than the quote expiry
- *   (`assertMaxTimeWithinQuote`);
+ *   (`assertMaxTimeWithinQuote`), and later than now (`now`): a signature on
+ *   a transaction that can no longer land is of no use to anyone, and a
+ *   partner's transaction may live only some seconds;
  * - its `minTime` is zero (or absent) or no later than now (`now`): a
  *   transaction that cannot land before some later time would hold the
  *   payout back while the quote runs out;
@@ -108,7 +112,7 @@ export const DEFAULT_MAX_FEE_STROOPS = 1_000_000;
  *
  * @throws {PayoutXdrMismatchError} on any mismatch.
  * @throws {InvalidConfigError} when `networkPassphrase` is empty, `maxFeeStroops` is not a positive safe integer,
- * or `now` does not return a finite number when it is read.
+ * or `now` does not return a finite number.
  */
 export function assertPayoutXdrMatches(unsignedXdr: string, context: SigningContext, options: PayoutXdrOptions): void {
   const { networkPassphrase } = options;
@@ -179,14 +183,16 @@ export function assertPayoutXdrMatches(unsignedXdr: string, context: SigningCont
       cause,
     });
   }
+  // `assertMaxTimeWithinQuote` passed, so maxTime is a positive whole number.
+  const nowMs = readNow(options.now ?? Date.now);
+  if ((maxTime as number) * 1000 <= nowMs) {
+    throw new PayoutXdrMismatchError('max_time', 'The transaction expired: its maxTime is at or before now');
+  }
 
   const rawMinTime = tx.timeBounds?.minTime;
   const minTime = rawMinTime === undefined ? 0 : Number(rawMinTime);
-  if (minTime > 0) {
-    const nowMs = readNow(options.now ?? Date.now);
-    if (minTime * 1000 > nowMs) {
-      throw new PayoutXdrMismatchError('min_time', 'The transaction cannot land before its minTime, which is later than now');
-    }
+  if (minTime > 0 && minTime * 1000 > nowMs) {
+    throw new PayoutXdrMismatchError('min_time', 'The transaction cannot land before its minTime, which is later than now');
   }
 
   const precondition = setPrecondition(tx);

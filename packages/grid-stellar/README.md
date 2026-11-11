@@ -147,8 +147,8 @@ It throws `PayoutXdrMismatchError` (code `payout_xdr_mismatch`, with `check` nam
 - the destination is `expected.destination`;
 - the asset code and issuer, and the exact amount, are `expected.amount`;
 - the total fee is at most `maxFeeStroops` (default 1 000 000 stroops);
-- a `maxTime` greater than 0 and no later than the quote expiry (core's `assertMaxTimeWithinQuote`);
-- a `minTime` of zero (or none), or no later than now (check `min_time`): a transaction that cannot land yet would hold the payout back while the quote runs out. `now` defaults to `Date.now` and is read only when there is a `minTime`; a clock that is not a finite number throws `InvalidConfigError`;
+- a `maxTime` greater than 0 and no later than the quote expiry (core's `assertMaxTimeWithinQuote`), and later than now (check `max_time`): a transaction already past its `maxTime` can never land, so a signature on it is of no use (a partner's transaction may live only some seconds);
+- a `minTime` of zero (or none), or no later than now (check `min_time`): a transaction that cannot land yet would hold the payout back while the quote runs out. `now` is the signing time, defaults to `Date.now` and is read once; a clock that is not a finite number throws `InvalidConfigError`;
 - none of the newer preconditions: minimum account sequence, its age or ledger gap, extra signers, ledger bounds (unset or zero only).
 
 **The network cannot be checked from an unsigned envelope.** An envelope does not name its network: the same bytes decode under any passphrase, so a transaction built for another network passes these checks. What binds it to one network is the signature: the signer signs the hash computed for the passphrase it signs under, and that signature is valid on that network only. Sign under the same `networkPassphrase` you pass here.

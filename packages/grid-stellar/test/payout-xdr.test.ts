@@ -54,8 +54,9 @@ function payment(overrides: Partial<Parameters<typeof Operation.payment>[0]> = {
 
 type Extra = { maxFeeStroops?: number; now?: () => number };
 
+/** Signs at T0 unless `extra.now` says otherwise. */
 const check = (xdr: string, ctx: SigningContext = context, extra: Extra = {}) =>
-  assertPayoutXdrMatches(xdr, ctx, { networkPassphrase: TESTNET_NETWORK_PASSPHRASE, ...extra });
+  assertPayoutXdrMatches(xdr, ctx, { networkPassphrase: TESTNET_NETWORK_PASSPHRASE, now: () => T0, ...extra });
 
 /** The check that refused `xdr`, or `null` when it was accepted. */
 function refusal(xdr: string, ctx: SigningContext = context, extra: Extra = {}): string | null {
@@ -225,21 +226,42 @@ describe('assertPayoutXdrMatches', () => {
     expect(refusal(payout({ minTime: T0 / 1000 - 60 }), context, { now })).toBeNull();
   });
 
-  it('accepts a zero minTime without reading the clock', () => {
-    const now = jest.fn(() => Number.NaN);
-    expect(refusal(payout({ minTime: 0 }), context, { now })).toBeNull();
-    expect(now).not.toHaveBeenCalled();
+  it('refuses a maxTime at or before now, and accepts one after it', () => {
+    // A partner's transaction may live only some seconds: signing it after
+    // its maxTime gives a signature that can never land.
+    expect(refusal(payout(), context, { now: () => MAX_TIME * 1000 })).toBe('max_time');
+    expect(refusal(payout(), context, { now: () => MAX_TIME * 1000 + 1 })).toBe('max_time');
+    expect(refusal(payout(), context, { now: () => MAX_TIME * 1000 - 1 })).toBeNull();
+    expect(refusal(payout({ maxTime: T0 / 1000 - 1 }), context, { now: () => T0 })).toBe('max_time');
   });
 
-  it('refuses a clock that is not a finite number when a minTime needs it', () => {
-    const xdr = payout({ minTime: T0 / 1000 });
-    for (const now of [() => Number.NaN, () => Number.POSITIVE_INFINITY, () => '1' as unknown as number]) {
-      expect(() => check(xdr, context, { now })).toThrow(InvalidConfigError);
+  it('reads the clock once, and defaults to the current time', () => {
+    const now = jest.fn(() => T0);
+    expect(refusal(payout({ minTime: T0 / 1000 }), context, { now })).toBeNull();
+    expect(now).toHaveBeenCalledTimes(1);
+    // The fixtures' maxTime (2026-11-09) is in the past for the real clock.
+    expect(
+      (() => {
+        try {
+          assertPayoutXdrMatches(payout({ maxTime: 1 }), context, { networkPassphrase: TESTNET_NETWORK_PASSPHRASE });
+          return null;
+        } catch (e) {
+          return e instanceof PayoutXdrMismatchError ? e.check : e;
+        }
+      })(),
+    ).toBe('max_time');
+  });
+
+  it('refuses a clock that is not a finite number, with or without a minTime', () => {
+    for (const xdr of [payout({ minTime: T0 / 1000 }), payout({ minTime: 0 })]) {
+      for (const now of [() => Number.NaN, () => Number.POSITIVE_INFINITY, () => '1' as unknown as number]) {
+        expect(() => check(xdr, context, { now })).toThrow(InvalidConfigError);
+      }
     }
     const broken = () => {
       throw new Error('clock gone');
     };
-    expect(() => check(xdr, context, { now: broken })).toThrow(InvalidConfigError);
+    expect(() => check(payout(), context, { now: broken })).toThrow(InvalidConfigError);
   });
 
   it('honours a lower fee cap and refuses a bad one', () => {
