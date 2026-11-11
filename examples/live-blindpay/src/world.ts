@@ -25,6 +25,12 @@ export interface Found {
   account?: AccountRef;
   usdb?: Asset;
   payoutDestination?: string;
+  /**
+   * True when `payoutDestination` is the development fallback (the USDB
+   * issuer, read from BlindPay's own trustline XDR) rather than
+   * `BLINDPAY_PAYOUT_DESTINATION`. Checking payouts against it is circular.
+   */
+  payoutDestinationIsFallback?: boolean;
   bankAccountId?: string;
 }
 

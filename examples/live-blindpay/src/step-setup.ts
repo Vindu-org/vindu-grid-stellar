@@ -91,9 +91,19 @@ export async function setUpAccount(w: World): Promise<boolean> {
   w.report.check(step, shapeOk, `Registered the account as a stellar_testnet blockchain wallet ${wallet.data.id} (no ownership proof asked)`);
   w.report.finding(step, 'Stellar wallets take the direct-address flow only (is_account_abstraction: true): BlindPay checks the address format, no signature or proof of ownership');
 
-  w.found.payoutDestination = w.env.payoutDestination ?? line.issuer;
-  if (w.env.payoutDestination === undefined) {
-    w.report.finding(step, 'BLINDPAY_PAYOUT_DESTINATION not set: payoutDestination is the USDB issuer, the account every development payout paid so far. In production take it from BlindPay in writing');
+  if (w.env.payoutDestination !== undefined) {
+    w.found.payoutDestination = w.env.payoutDestination;
+  } else {
+    // DEVELOPMENT ONLY, NEVER IN PRODUCTION. Without BLINDPAY_PAYOUT_DESTINATION
+    // this example takes the payout account from BlindPay's own trustline XDR
+    // (the USDB issuer, which every development payout paid). That is the
+    // partner telling the signer what to check its own transactions against:
+    // circular, so the destination check below only reports what it saw.
+    // Production takes payoutDestination from BlindPay in writing, never from
+    // anything BlindPay's API returns.
+    w.found.payoutDestination = line.issuer;
+    w.found.payoutDestinationIsFallback = true;
+    w.report.finding(step, 'BLINDPAY_PAYOUT_DESTINATION not set: payoutDestination is the USDB issuer from the trustline XDR (development only, circular for the destination check). In production take it from BlindPay in writing');
   }
   return shapeOk;
 }

@@ -8,8 +8,10 @@
  * - `BLINDPAY_BASE_URL` (optional): another API host, e.g. a local mock.
  * - `BLINDPAY_PAYOUT_DESTINATION` (optional): the Stellar account BlindPay
  *   payouts must pay, as BlindPay gave it to you. Without it the run uses
- *   the USDB issuer, which is what development instances paid in every run
- *   so far, and says so in a FINDING line.
+ *   the USDB issuer from BlindPay's trustline XDR, which is what development
+ *   instances paid in every run so far, and says so in a FINDING line. That
+ *   fallback is for development only, never production: the destination
+ *   check is then a FINDING too, because it would be circular.
  * - `BLINDPAY_PAYIN_WAIT_SEC` (optional): how long to wait for a payin to
  *   reach a final status. Default 300.
  */

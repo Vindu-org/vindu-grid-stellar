@@ -238,7 +238,7 @@ export async function runPayouts(w: World): Promise<void> {
     }
   }
 
-  reportXdrFacts(w, facts, destinations, payoutDestination);
+  reportXdrFacts(w, facts, destinations, payoutDestination, w.found.payoutDestinationIsFallback === true);
 }
 
 /**
@@ -292,6 +292,8 @@ function reportXdrFacts(
   facts: ReadonlyArray<{ scenario: string; facts: UnsignedPayoutFacts; maxTimeAfterNowSec: number | undefined; quoteLeftSec: number }>,
   destinations: ReadonlySet<string>,
   payoutDestination: string,
+  /** `payoutDestination` came from BlindPay's own trustline XDR: the check would be circular. */
+  destinationIsFallback: boolean,
 ): void {
   if (facts.length === 0) return;
   const fees = [...new Set(facts.map((f) => f.facts.feeStroops))].join(', ');
@@ -305,9 +307,19 @@ function reportXdrFacts(
       `maxTime ${range(windows)} s after signing; the quote had ${Math.min(...facts.map((f) => f.quoteLeftSec))} s or more left`,
   );
   w.report.check('c time bounds', fits, 'Every authorize maxTime is no later than its quote expiry (assertPayoutXdrMatches agreed before signing)');
+  const sameAccount = destinations.size === 1 && destinations.has(payoutDestination);
+  if (destinationIsFallback) {
+    // The expected account was read from BlindPay itself: agreeing with it proves nothing.
+    w.report.finding(
+      'd destination',
+      `${sameAccount ? 'Every' : 'Not every'} one of ${facts.length} authorize transactions paid the USDB issuer, the development fallback payoutDestination ${payoutDestination}: ` +
+        'not a PASS, since that account came from BlindPay; set BLINDPAY_PAYOUT_DESTINATION to check it',
+    );
+    return;
+  }
   w.report.check(
     'd destination',
-    destinations.size === 1 && destinations.has(payoutDestination),
+    sameAccount,
     `Every one of ${facts.length} authorize transactions paid the same account, the configured payoutDestination ${payoutDestination}`,
   );
 }

@@ -36,7 +36,7 @@ Optional:
 | Variable | Default | Meaning |
 |---|---|---|
 | `BLINDPAY_BASE_URL` | `https://api.blindpay.com` | Another API host, such as a local mock. |
-| `BLINDPAY_PAYOUT_DESTINATION` | the USDB issuer | The Stellar account payouts must pay, as BlindPay gave it to you. Without it the run uses the USDB issuer, which every development payout paid, and says so. |
+| `BLINDPAY_PAYOUT_DESTINATION` | the USDB issuer (development only) | The Stellar account payouts must pay, as BlindPay gave it to you. Without it the run uses the USDB issuer named in BlindPay's trustline XDR, which every development payout paid, and says so; the destination check is then a FINDING, not a PASS, because the expected account came from BlindPay itself. Never take a payout account from a partner's answer in production. |
 | `BLINDPAY_PAYIN_WAIT_SEC` | `300` | How long to wait for the payins to end. |
 
 Everything printed goes through a redactor: the key, the instance id, BlindPay ids and emails are removed, and Stellar accounts and hashes are cut to their last four characters. Still, read the output before you paste it anywhere.
