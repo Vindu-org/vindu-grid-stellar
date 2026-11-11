@@ -41,6 +41,7 @@ const context = (overrides: Partial<SigningContext> = {}): SigningContext => ({
 interface TxOptions {
   readonly fee?: string;
   readonly maxTime?: number;
+  readonly minTime?: number;
   readonly operations?: readonly ReturnType<typeof Operation.payment>[];
   /** Changes the builder before the transaction is built, e.g. to set a precondition. */
   readonly tweak?: (builder: StellarSdk.TransactionBuilder) => void;
@@ -58,7 +59,7 @@ function build(opts: TxOptions = {}): StellarSdk.Transaction {
   const builder = new TransactionBuilder(new Account(client.publicKey(), '100'), {
     fee: opts.fee ?? '100',
     networkPassphrase: PASSPHRASE,
-    timebounds: { minTime: 0, maxTime: opts.maxTime ?? MAX_TIME },
+    timebounds: { minTime: opts.minTime ?? 0, maxTime: opts.maxTime ?? MAX_TIME },
   });
   for (const op of opts.operations ?? [payment()]) builder.addOperation(op);
   opts.tweak?.(builder);
@@ -97,6 +98,15 @@ describe('TestKeySigner', () => {
     const tx = TransactionBuilder.fromXDR(signed, PASSPHRASE) as StellarSdk.Transaction;
     expect(tx.signatures).toHaveLength(1);
     expect(client.verify(tx.hash(), tx.signatures[0]!.signature)).toBe(true);
+  });
+
+  it("checks the transaction's time bounds against its own clock, not the host's", async () => {
+    // NOW is in the past for the host clock: a minTime one minute after NOW
+    // has passed for the host, but not for the signer.
+    expect(Date.now()).toBeGreaterThan(NOW + 60_000);
+    expect(await mismatch(signer().signStellar(account, xdr({ minTime: NOW / 1000 + 60 }), context()))).toMatchObject({
+      check: 'min_time',
+    });
   });
 
   it('signs when the operation names the expected source itself', async () => {

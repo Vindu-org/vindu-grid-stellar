@@ -42,6 +42,20 @@ describe('describeUnsignedPayout', () => {
   });
 });
 
+describe('TestKeySigner', () => {
+  it("checks the transaction's time bounds against its own clock, not the host's", async () => {
+    // NOW is in the past for the host clock: a minTime one minute after NOW
+    // has passed for the host, but not for the signer.
+    expect(Date.now()).toBeGreaterThan(NOW + 60_000);
+    const later = new TransactionBuilder(new Account(client.publicKey(), '41'), { fee: '100', networkPassphrase: PASSPHRASE })
+      .addOperation(Operation.payment({ destination: issuer.publicKey(), asset: new Asset('USDB', issuer.publicKey()), amount: '10' }))
+      .setTimebounds(Math.floor(NOW / 1000) + 60, Math.floor(NOW / 1000) + 90)
+      .build()
+      .toXDR();
+    await expect(testKey().signStellar(account, later, context)).rejects.toMatchObject({ check: 'min_time' });
+  });
+});
+
 describe('observingSigner', () => {
   it('sees the XDR, then the real signer decides and signs once', async () => {
     const seen: string[] = [];

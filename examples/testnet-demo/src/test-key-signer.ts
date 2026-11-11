@@ -77,6 +77,7 @@ export class TestKeySigner implements Signer {
     assertPayoutXdrMatches(unsignedXdr, context, {
       networkPassphrase: this.networkPassphrase,
       maxFeeStroops: this.maxFeeStroops,
+      now: this.now,
     });
 
     // Checked above: a plain transaction for this network. The guard only narrows the type.
