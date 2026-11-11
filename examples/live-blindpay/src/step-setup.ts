@@ -5,7 +5,7 @@
 import { checkReceiveReadiness, submitSignedTransaction } from '@vindu/grid-stellar';
 import { stellarAsset } from '@vindu/grid-core';
 
-import { createAssetTrustline, getInstanceType, listCustomers, mintUsdb } from './dev-endpoints';
+import { createAssetTrustline, deleteWallet, getInstanceType, listCustomers, mintUsdb } from './dev-endpoints';
 import { Keypair, Transaction, TransactionBuilder } from './sdk';
 import { FRIENDBOT_URL, NETWORK_PASSPHRASE, type World } from './world';
 
@@ -145,6 +145,24 @@ export function checkTrustlineTransaction(
   const minTime = Number(tx.timeBounds?.minTime ?? 0);
   if (minTime > nowSec) return 'a minTime later than now';
   return { tx, line };
+}
+
+/**
+ * End of the run: deletes the test wallet this run registered (a soft delete
+ * at BlindPay), so runs do not pile up wallets on the customer. Best effort:
+ * a failure is a FINDING, never a FAIL, and never throws.
+ */
+export async function cleanUpWallet(w: Pick<World, 'client' | 'report' | 'found'>): Promise<void> {
+  const step = 'cleanup';
+  const customerId = w.found.customerId;
+  const walletId = w.found.account?.partnerAccountId;
+  if (customerId === undefined || walletId === undefined) return;
+  try {
+    await deleteWallet(w.client, customerId, walletId);
+    w.report.pass(step, `Deleted the test wallet ${walletId}`);
+  } catch (e) {
+    w.report.finding(step, `Could not delete the test wallet ${walletId} (${e instanceof Error ? e.name : typeof e}): delete it in the dashboard`);
+  }
 }
 
 /** Polls `probe` until it returns a value or `timeoutMs` passes. */

@@ -18,8 +18,9 @@ It is never run in CI. `yarn test` runs only its offline unit tests, with `fetch
 3. Payins with the sentinel amounts 66600 and 77700, which the docs say end `failed` and `refunded`: a payin still `processing` when the wait ends is a FINDING (no Stellar payin completed on development), one that ended otherwise, or whose raw status readLeg disagrees with, is a FAIL. The same amounts as payouts must end `failed` and `refunded`.
 4. Payouts through `runStellarPayout`, each on its own quote and signed once by a test-key signer that runs `assertPayoutXdrMatches` first: `partner_submits`, `client_submits` (submitted by grid-stellar first), a fee-bumped envelope, and an attempt to sign after the transaction's `maxTime`, which the signer must refuse (check `max_time`) so nothing reaches BlindPay. It checks the chain, `readLeg`, and the authorize transaction's fee, time bounds and destination. The receiver is a clearly fake ACH bank account; development instances skip the bank submission.
 5. Webhooks: skipped, there is no public URL to deliver to.
+6. Deletes the test wallet it registered (a soft delete at BlindPay), whatever happened before, so runs do not pile up wallets. Best effort: a failed delete is a FINDING.
 
-Each run makes a new throwaway account and wallet and mints about 1500 test USDB. It sends about 100 BlindPay requests (most of them polling the payins) over about 8 minutes, paced under the development limit of 40 a minute.
+Each run makes a new throwaway account and wallet (and deletes the wallet at the end) and mints about 1500 test USDB. It sends about 100 BlindPay requests (most of them polling the payins) over about 8 minutes, paced under the development limit of 40 a minute.
 
 ## Run it
 

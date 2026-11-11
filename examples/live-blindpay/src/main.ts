@@ -9,7 +9,7 @@
 import { EnvError, type LiveEnv, readLiveEnv } from './env';
 import { createRedactor } from './redact';
 import { createReporter } from './report';
-import { guardInstance, setUpAccount } from './step-setup';
+import { cleanUpWallet, guardInstance, setUpAccount } from './step-setup';
 import { settlePayins, startPayins } from './step-payin';
 import { describeError, runPayouts } from './step-payout';
 import { createWorld } from './world';
@@ -30,8 +30,10 @@ async function main(): Promise<number> {
   const world = createWorld({ env, report, redact, fetch: globalThis.fetch, print });
   const started = Date.now();
 
+  let development = false;
   try {
-    if (!(await guardInstance(world))) return 1;
+    development = await guardInstance(world);
+    if (!development) return 1;
     if (!(await setUpAccount(world))) return report.exitCode() || 1;
     const payins = await startPayins(world);
     // Payouts run while the payins process.
@@ -40,6 +42,9 @@ async function main(): Promise<number> {
     report.finding('5 webhooks', 'Live webhook delivery skipped: this run has no public URL. Verification is covered offline in grid-blindpay tests');
   } catch (e) {
     report.fail('run', `Stopped with ${describeError(e)}`);
+  } finally {
+    // Only a development instance was ever written to.
+    if (development) await cleanUpWallet(world);
   }
 
   const s = report.summary();
