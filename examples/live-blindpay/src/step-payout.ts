@@ -243,8 +243,8 @@ async function probeErrorShape(w: World, bankAccountId: string): Promise<void> {
     w.report.finding(step, 'A 1.00 USDB payout quote was priced: no minimum enforced');
   } catch (e) {
     if (!(e instanceof BlindPayHttpError)) throw e;
-    w.report.check(step, e.status === 400 && e.bodySnippet === undefined, `A 1.00 USDB payout quote is refused: BlindPayHttpError HTTP ${String(e.status)}, code ${String(e.code)}, no body copied`);
-    w.report.finding(step, `A validation error has no top-level code (the client's code is ${String(e.code)}); the reason is in errors[].message (minimum request_amount 500, docs say 10 USD)`);
+    w.report.check(step, e.status === 400 && e.bodySnippet === undefined, `A 1.00 USDB payout quote is refused: BlindPayHttpError HTTP ${String(e.status)}, partnerCode ${String(e.partnerCode)}, no body copied`);
+    w.report.finding(step, `A validation error has no top-level code (the client's partnerCode is ${String(e.partnerCode)}); the reason is in errors[].message (minimum request_amount 500, docs say 10 USD)`);
   }
 }
 
@@ -260,9 +260,9 @@ async function checkLateRefusal(w: World, s: Scenario, transferId: string, e: un
     return;
   }
   const cause = e.cause;
-  const http = cause instanceof BlindPayHttpError ? `HTTP ${String(cause.status)} ${String(cause.code)}` : describeError(cause);
+  const http = cause instanceof BlindPayHttpError ? `HTTP ${String(cause.status)} ${String(cause.partnerCode)}` : describeError(cause);
   w.report.pass(s.step, `${s.label}: BlindPay refused the create (${http}); runStellarPayout stopped with PayoutIncompleteError at create, signed once`);
-  w.report.finding(s.step, `A signature after the authorize maxTime is refused at create (${http}; message submit_transaction_failed) and no payout is made: the key holder has about 30 s`);
+  w.report.finding(s.step, `A signature after the authorize maxTime is refused at create (${http}) and no payout is made: the key holder has about 30 s`);
   w.store.cas(transferId, 'awaiting_signature', 'needs_attention');
   const proof = await submitSignedTransaction({
     gateway: w.gateway, signedXdr: e.signedXdr, networkPassphrase: NETWORK_PASSPHRASE, timeoutMs: 20_000, maxWaitMs: 20_000,
@@ -320,11 +320,12 @@ async function bankAccount(w: World, customerId: string): Promise<string> {
 /** Error class and code only: never the message, which may quote partner data. */
 export function describeError(e: unknown): string {
   if (e instanceof GridError) {
-    const extra = e as unknown as { stage?: unknown; causeCode?: unknown; status?: unknown };
+    const extra = e as unknown as { stage?: unknown; causeCode?: unknown; status?: unknown; partnerCode?: unknown };
     const parts = [e.name, e.code];
     if (typeof extra.stage === 'string') parts.push(`stage ${extra.stage}`);
     if (typeof extra.causeCode === 'string') parts.push(`cause ${extra.causeCode}`);
     if (typeof extra.status === 'number') parts.push(`HTTP ${extra.status}`);
+    if (typeof extra.partnerCode === 'string') parts.push(extra.partnerCode);
     return parts.join(' ');
   }
   return e instanceof Error ? e.name : typeof e;
