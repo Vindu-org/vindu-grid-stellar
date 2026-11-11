@@ -8,8 +8,11 @@
  * can still be compared by eye; nothing else is kept.
  */
 
-/** BlindPay id: a short lowercase prefix, `_`, then at least 8 letters or digits. `on_hold` is not one. */
-const BLINDPAY_ID_RE = /\b[a-z]{2,4}_[A-Za-z0-9]{8,}\b/g;
+/**
+ * BlindPay id: a known prefix, `_`, then at least 8 letters or digits. Status
+ * words such as `on_hold` or `auth_required` are not ids.
+ */
+const BLINDPAY_ID_RE = /\b(?:in|re|bw|qu|pi|po|pf|ba|bl|to|va|tr|pa|wh)_[A-Za-z0-9]{8,}\b/g;
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 /** Stellar account (G...), muxed account (M...) or secret seed (S...). */
 const STRKEY_RE = /\b([GMS])[A-Z2-7]{55,68}\b/g;

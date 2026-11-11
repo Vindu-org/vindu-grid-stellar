@@ -19,8 +19,8 @@ describe('createRedactor', () => {
   });
 
   it('replaces BlindPay ids with their kind, but keeps status words like on_hold', () => {
-    expect(redact('re_abc12345XYZ bw_QWERTY12345 po_00000000aaaa on_hold pending_review')).toBe(
-      '<re_id> <bw_id> <po_id> on_hold pending_review',
+    expect(redact('re_abc12345XYZ bw_QWERTY12345 po_00000000aaaa on_hold pending_review auth_required')).toBe(
+      '<re_id> <bw_id> <po_id> on_hold pending_review auth_required',
     );
   });
 
