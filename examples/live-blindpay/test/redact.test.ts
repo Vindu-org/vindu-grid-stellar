@@ -24,6 +24,27 @@ describe('createRedactor', () => {
     );
   });
 
+  it('removes the instance id without its prefix, and in another letter case', () => {
+    const out = redact(`instance FAKE00000000, upper ${INSTANCE.toUpperCase()}, key ${KEY.toLowerCase()}`);
+    expect(out).toBe('instance <redacted>, upper <redacted>, key <redacted>');
+  });
+
+  it('catches ids followed by _, short ids, dashed and upper-case forms', () => {
+    expect(redact('re_abc12345XYZ_ po_Ab12_x bw_1234 pi_aB3d')).toBe('<re_id>_ <po_id>_x <bw_id> <pi_id>');
+    expect(redact('RE_ABC12345 Po_Q1w2e3 re-ABC12345 PO-1234 bw-Zz99')).toBe('<re_id> <po_id> <re_id> <po_id> <bw_id>');
+  });
+
+  it('catches unknown two- and three-letter prefixes followed by an id-shaped token', () => {
+    expect(redact('cus_Q1w2E3r4 xy_1234 abc_AbCd (zz_9a8b7c)')).toBe('<cus_id> <xy_id> <abc_id> (<zz_id>)');
+  });
+
+  it('keeps status words, result codes, error codes and prose', () => {
+    const kept =
+      'on_hold pending_review auth_required tx_bad_seq op_underfunded idempotency_key_in_flight ' +
+      'REQUEST_REJECTED VALIDATION_INVALID_REQUEST transaction_xdr_invalid re-quote re-sign in-memory';
+    expect(redact(kept)).toBe(kept);
+  });
+
   it('shortens Stellar accounts and hashes, and drops seeds, emails and XDR blobs', () => {
     const blob = 'AAAAAgAAAA'.repeat(20);
     const out = redact(`${ACCOUNT} ${HASH} ${SEED} someone@example.com ${blob}`);
