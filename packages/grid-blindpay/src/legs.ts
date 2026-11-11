@@ -70,11 +70,14 @@ const TX_HASH_RE = /^[0-9a-f]{64}$/i;
  * Where it sits depends on the leg, as a development instance answered on
  * 2026-11-11:
  * - Payin: `tracking_complete.transaction_hash`, the stablecoin delivery.
- *   Its `tracking_transaction` tracks the PIX and carries no hash.
+ *   Its `tracking_transaction` tracks the PIX and carries no hash. This
+ *   shape was seen only on the instance's seeded payins on an EVM test
+ *   network: no Stellar payin ever completed there, so it is UNCONFIRMED
+ *   for Stellar, and the fallback to `tracking_transaction` stays.
  * - Payout: `tracking_transaction.transaction_hash`, the signed transaction
  *   (the outer hash for a fee bump); `tracking_complete` repeats it.
  * Each leg reads its own field first and the other one only when the first
- * holds no hash.
+ * holds no well-formed hash.
  */
 export function legTxHash(kind: LegKind, resource: Payin | Payout): string | undefined {
   const delivery = resource.tracking_complete?.transaction_hash;

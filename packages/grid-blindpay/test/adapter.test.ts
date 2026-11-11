@@ -376,8 +376,10 @@ describe('adapter leg amounts and times', () => {
   });
 
   // Shapes from a development instance (2026-11-11), every value replaced.
-  // A payin's tracking_transaction tracks the PIX and has no hash: the
-  // delivery hash is in tracking_complete. A payout has it in both.
+  // The payin shape is from the instance's seeded EVM payins: no Stellar
+  // payin completed there, so for Stellar it is unconfirmed. Its
+  // tracking_transaction tracks the PIX and has no hash; the delivery hash
+  // is in tracking_complete. A Stellar payout has the hash in both.
   const livePayin = {
     ...payin,
     tracking_transaction: { step: 'completed', status: null, external_id: 'ext_0000000000', completed_at: '2029-12-31T23:58:00.000Z' },
@@ -395,6 +397,26 @@ describe('adapter leg amounts and times', () => {
   it('reads the delivery hash of a payin from tracking_complete', async () => {
     const leg = await reading(livePayin).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id });
     expect(leg.txHash).toBe(HASH);
+  });
+
+  it('prefers tracking_complete for a payin when both fields hold a different hash', async () => {
+    const both = { ...livePayin, tracking_transaction: { ...livePayin.tracking_transaction, transaction_hash: OTHER_HASH } };
+    const leg = await reading(both).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id });
+    expect(leg.txHash).toBe(HASH);
+  });
+
+  it('falls back to tracking_transaction for a payin whose tracking_complete hash is malformed or missing', async () => {
+    for (const bad of ['<b>not a hash</b>', HASH.slice(2), `${HASH}00`, 7, null, undefined]) {
+      const resource = {
+        ...livePayin,
+        tracking_transaction: { ...livePayin.tracking_transaction, transaction_hash: OTHER_HASH },
+        tracking_complete: { ...livePayin.tracking_complete, transaction_hash: bad },
+      };
+      const leg = await reading(resource).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id });
+      expect(leg.txHash).toBe(OTHER_HASH);
+    }
+    const neither = { ...livePayin, tracking_complete: { ...livePayin.tracking_complete, transaction_hash: 'zz' } };
+    expect((await reading(neither).readLeg({ partner: 'blindpay', kind: 'funding', id: payin.id })).txHash).toBeUndefined();
   });
 
   it('reads the signed transaction hash of a payout from tracking_transaction first', async () => {
