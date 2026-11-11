@@ -54,3 +54,9 @@ describe('networkFromArgs', () => {
     expect(() => networkFromArgs(['--mainnet'])).toThrow(/Unknown argument/);
   });
 });
+
+describe('offline guard', () => {
+  it('disables fetch in unit tests', () => {
+    expect(() => fetch('https://horizon-testnet.stellar.org')).toThrow(/offline/);
+  });
+});
