@@ -93,12 +93,13 @@ describe('feeBumpingSigner', () => {
 });
 
 describe('lateSigner', () => {
-  it('waits until past maxTime, then signs once with the inner checks', async () => {
+  it('waits until past maxTime, then the inner signer refuses it on the same clock', async () => {
     let t = NOW;
     const waits: number[] = [];
     const clock = { now: () => t, sleep: async (ms: number) => { waits.push(ms); t += ms; } };
-    const signed = await lateSigner(testKey(), PASSPHRASE, clock, 5_000).signStellar(account, unsigned(), context);
+    const inner = new TestKeySigner(client, PASSPHRASE, { now: clock.now });
+    const late = lateSigner(inner, PASSPHRASE, clock, 5_000).signStellar(account, unsigned(), context);
+    await expect(late).rejects.toMatchObject({ check: 'max_time' });
     expect(waits).toEqual([35_000]);
-    expect(inspectSignedTransaction(signed, PASSPHRASE).maxTime).toBe(Math.floor(NOW / 1000) + 30);
   });
 });

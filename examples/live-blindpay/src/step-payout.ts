@@ -9,7 +9,8 @@
  *     so finding its hash on testnet afterwards means BlindPay submitted it;
  *     `client_submits` checks BlindPay also takes one already on the ledger;
  * (b) the create takes the signed envelope (the default `signed_xdr`);
- * (c) the time bounds and fee of the authorize transaction;
+ * (c) the time bounds and fee of the authorize transaction, and that the
+ *     signer refuses to sign it once its maxTime has passed;
  * (d) the account it pays, across every quote of the run;
  * (e) a fee-bumped envelope;
  * (f) the single payout read (`readLeg`) and its statuses;
@@ -20,9 +21,9 @@ import {
   GridError,
   type LegStatusValue,
   type Money,
-  PayoutIncompleteError,
   type PayoutSubmission,
   type Signer,
+  SignerRefusedError,
   compare,
   fiat,
   formatAmount,
@@ -31,11 +32,11 @@ import {
 } from '@vindu/grid-core';
 import {
   InMemoryCursorStore,
+  PayoutXdrMismatchError,
   createReadLayer,
   createStellarSubmitter,
   inspectSignedTransaction,
   matchPaymentToLeg,
-  submitSignedTransaction,
 } from '@vindu/grid-stellar';
 import { randomUUID } from 'node:crypto';
 
@@ -71,7 +72,7 @@ interface Scenario {
   readonly amount: string;
   readonly submission: PayoutSubmission;
   readonly feeBump?: boolean;
-  /** Sign only after the transaction's maxTime: the payout must be refused, nothing created. */
+  /** Try to sign only after the transaction's maxTime: the signer must refuse, nothing signed or created. */
   readonly late?: boolean;
   readonly expect: LegStatusValue | 'refused';
   readonly step: string;
@@ -127,8 +128,21 @@ export async function runPayouts(w: World): Promise<void> {
     w.store.set(transferId, 'payout_quoted');
 
     const testKey = new TestKeySigner(keypair, NETWORK_PASSPHRASE, { now: w.now });
+    // Which check the test-key signer refused on, if it refused: the flow keeps only the cause code.
+    let refusedCheck: string | undefined;
+    const checked: Signer = {
+      custody: testKey.custody,
+      async signStellar(...args) {
+        try {
+          return await testKey.signStellar(...args);
+        } catch (e) {
+          if (e instanceof PayoutXdrMismatchError) refusedCheck = e.check;
+          throw e;
+        }
+      },
+    };
     // A late signer waits inside the observer, so the observer still sees the XDR as BlindPay handed it over.
-    const keyHolder: Signer = s.late === true ? lateSigner(testKey, NETWORK_PASSPHRASE, w) : testKey;
+    const keyHolder: Signer = s.late === true ? lateSigner(checked, NETWORK_PASSPHRASE, w) : checked;
     let signer: Signer = observingSigner(keyHolder, (unsignedXdr, context) => {
       const f = describeUnsignedPayout(unsignedXdr, NETWORK_PASSPHRASE);
       if (f.destination !== undefined) destinations.add(f.destination);
@@ -165,12 +179,12 @@ export async function runPayouts(w: World): Promise<void> {
         logger: w.logger,
       });
     } catch (e) {
-      if (s.late === true) await checkLateRefusal(w, s, transferId, e);
+      if (s.late === true) checkLateRefusal(w, s, transferId, e, refusedCheck, signedXdr);
       else w.report.fail(s.step, `${s.label}: runStellarPayout stopped with ${describeError(e)}${signedXdr === undefined ? ', nothing signed' : ''}`);
       continue;
     }
     if (s.late === true) {
-      w.report.fail(s.step, `${s.label}: BlindPay created a payout from a transaction past its maxTime`);
+      w.report.fail(s.step, `${s.label}: a transaction past its maxTime was signed and BlindPay created a payout from it`);
       continue;
     }
     if (s.submission === 'partner_submits') w.store.cas(transferId, 'awaiting_signature', 'payout_submitted');
@@ -249,25 +263,28 @@ async function probeErrorShape(w: World, bankAccountId: string): Promise<void> {
 }
 
 /**
- * The late signature: BlindPay must refuse the create, the flow must stop
- * with PayoutIncompleteError at `create` holding the signed XDR, and
- * grid-stellar must prove from Horizon that it can never land, which is the
- * one case where a replacement could be signed. None is signed here.
+ * The late signature: the test-key signer is asked only after the
+ * authorize transaction's maxTime, and `assertPayoutXdrMatches` must refuse
+ * it (check `max_time`). The flow then stops with `SignerRefusedError`:
+ * nothing is signed, nothing reaches BlindPay, and the transfer goes to
+ * `needs_attention`. What BlindPay does with a late signature was observed
+ * before the signer refused it; see FINDINGS.md (c).
  */
-async function checkLateRefusal(w: World, s: Scenario, transferId: string, e: unknown): Promise<void> {
-  if (!(e instanceof PayoutIncompleteError) || e.stage !== 'create' || e.signedXdr === undefined) {
-    w.report.fail(s.step, `${s.label}: expected PayoutIncompleteError at create, got ${describeError(e)}`);
-    return;
-  }
-  const cause = e.cause;
-  const http = cause instanceof BlindPayHttpError ? `HTTP ${String(cause.status)} ${String(cause.partnerCode)}` : describeError(cause);
-  w.report.pass(s.step, `${s.label}: BlindPay refused the create (${http}); runStellarPayout stopped with PayoutIncompleteError at create, signed once`);
-  w.report.finding(s.step, `A signature after the authorize maxTime is refused at create (${http}) and no payout is made: the key holder has about 30 s`);
+function checkLateRefusal(
+  w: World,
+  s: Scenario,
+  transferId: string,
+  e: unknown,
+  refusedCheck: string | undefined,
+  signedXdr: string | undefined,
+): void {
+  const ok = e instanceof SignerRefusedError && e.causeCode === 'payout_xdr_mismatch' && refusedCheck === 'max_time' && signedXdr === undefined;
+  w.report.check(
+    s.step,
+    ok,
+    `${s.label}: the signer refused the transaction past its maxTime (check ${refusedCheck ?? 'none'}); runStellarPayout stopped with ${describeError(e)}, nothing signed or sent to BlindPay`,
+  );
   w.store.cas(transferId, 'awaiting_signature', 'needs_attention');
-  const proof = await submitSignedTransaction({
-    gateway: w.gateway, signedXdr: e.signedXdr, networkPassphrase: NETWORK_PASSPHRASE, timeoutMs: 20_000, maxWaitMs: 20_000,
-  });
-  w.report.check(s.step, proof.status === 'expired_not_landed', `${s.label}: grid-stellar proves it can never land: ${proof.status}${proof.status === 'expired_not_landed' ? ` (sequence unused at ledger ${proof.checkedLedger.sequence})` : ''}`);
 }
 
 function reportXdrFacts(

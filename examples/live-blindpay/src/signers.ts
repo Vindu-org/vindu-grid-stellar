@@ -90,10 +90,11 @@ export function feeBumpingSigner(
 }
 
 /**
- * Waits until the unsigned transaction's `maxTime` has passed, then lets the
- * inner signer check and sign it once. The result can never land: it shows
- * what BlindPay and the flow do with a signature that came too late (a key
- * holder who took longer than the transaction's 30 s window).
+ * Waits until the unsigned transaction's `maxTime` has passed, then hands it
+ * to the inner signer: a key holder who took longer than the transaction's
+ * 30 s window. A signer that runs `assertPayoutXdrMatches` on the same
+ * clock refuses it (check `max_time`), so nothing that can never land is
+ * signed.
  */
 export function lateSigner(
   inner: Signer,
