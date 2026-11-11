@@ -3424,6 +3424,23 @@ __metadata:
   languageName: node
   linkType: hard
 
+"live-blindpay@workspace:examples/live-blindpay":
+  version: 0.0.0-use.local
+  resolution: "live-blindpay@workspace:examples/live-blindpay"
+  dependencies:
+    "@stellar/stellar-sdk": "npm:^17.4.0"
+    "@types/jest": "npm:^29"
+    "@types/node": "npm:^22"
+    "@vindu/grid-blindpay": "workspace:^"
+    "@vindu/grid-core": "workspace:^"
+    "@vindu/grid-stellar": "workspace:^"
+    jest: "npm:^29"
+    ts-jest: "npm:^29"
+    tsx: "npm:^4.20.0"
+    typescript: "npm:^5.5"
+  languageName: unknown
+  linkType: soft
+
 "live-stellar@workspace:examples/live-stellar":
   version: 0.0.0-use.local
   resolution: "live-stellar@workspace:examples/live-stellar"
