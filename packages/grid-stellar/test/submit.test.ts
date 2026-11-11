@@ -992,6 +992,37 @@ describe("submit: someone else's fee bump, as testnet Horizon answers (real HTTP
   const inner = signedPayment(Math.floor(Date.now() / 1000) + 300);
   const ours = feeBumped(inner.tx, '300');
   const theirs = feeBumped(inner.tx, '500');
+  const asHorizonAnswers = {
+    hash: inner.hash,
+    successful: true,
+    ledger: 77,
+    envelope_xdr: theirs.xdr,
+    fee_bump_transaction: { hash: theirs.hash, signatures: [] },
+    inner_transaction: { hash: inner.hash, signatures: [], max_fee: '200' },
+  };
+  /** What the fake Horizon answers for the inner hash. */
+  let record: Record<string, unknown> = asHorizonAnswers;
+
+  /** Submits our fee bump; Horizon refuses it as `tx_bad_seq`, or gives no answer with `answer: 'timeout'`. */
+  const submit = (answer: 'bad_seq' | 'timeout' = 'bad_seq') => {
+    const gateway = createHorizonGateway({ horizonUrl: url, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, allowHttp: true });
+    gateway.submitTransaction = async () =>
+      answer === 'timeout'
+        ? { kind: 'timeout' }
+        : { kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] };
+    return submitSignedTransaction({
+      gateway,
+      signedXdr: ours.xdr,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      maxWaitMs: 20,
+      pollIntervalMs: 5,
+      sleep: async () => undefined,
+    });
+  };
+
+  beforeEach(() => {
+    record = asHorizonAnswers;
+  });
 
   beforeAll(async () => {
     server = createServer((req, res) => {
@@ -1000,15 +1031,7 @@ describe("submit: someone else's fee bump, as testnet Horizon answers (real HTTP
       if (path === '/') {
         res.end(JSON.stringify({ history_latest_ledger: 78, history_latest_ledger_closed_at: new Date().toISOString() }));
       } else if (path === `/transactions/${inner.hash}`) {
-        res.end(
-          JSON.stringify({
-            hash: inner.hash,
-            successful: true,
-            ledger: 77,
-            fee_bump_transaction: { hash: theirs.hash, signatures: [] },
-            inner_transaction: { hash: inner.hash, signatures: [], max_fee: '200' },
-          }),
-        );
+        res.end(JSON.stringify(record));
       } else {
         res.statusCode = 404;
         res.end(JSON.stringify({ status: 404, title: 'Resource Missing' }));
@@ -1023,16 +1046,7 @@ describe("submit: someone else's fee bump, as testnet Horizon answers (real HTTP
   });
 
   it('reports the hash that landed, found by the inner hash', async () => {
-    const gateway = createHorizonGateway({ horizonUrl: url, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, allowHttp: true });
-    gateway.submitTransaction = async () => ({ kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] });
-    const result = await submitSignedTransaction({
-      gateway,
-      signedXdr: ours.xdr,
-      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
-      maxWaitMs: 20,
-      pollIntervalMs: 5,
-      sleep: async () => undefined,
-    });
+    const result = await submit();
     expect(result).toEqual({
       status: 'success',
       hash: theirs.hash,
@@ -1041,6 +1055,35 @@ describe("submit: someone else's fee bump, as testnet Horizon answers (real HTTP
       foundBy: 'inner_hash',
       submittedHash: ours.hash,
     });
+  });
+
+  it("a fee bump hash field that is not the envelope's hash is unknown, never success", async () => {
+    // Well formed, but not the hash of the envelope Horizon returned.
+    record = { ...asHorizonAnswers, fee_bump_transaction: { hash: 'ab'.repeat(32) } };
+    const result = await submit('timeout');
+    expect(result).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
+    expect(canSignReplacement(result)).toBe(false);
+  });
+
+  it('a record with a well-formed fee_bump_transaction.hash but no inner_transaction is unknown', async () => {
+    const { inner_transaction: _dropped, ...withoutInner } = asHorizonAnswers;
+    record = withoutInner;
+    const result = await submit('timeout');
+    expect(result).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
+    expect(canSignReplacement(result)).toBe(false);
+  });
+
+  it('a fee bump record without its envelope is unknown', async () => {
+    const { envelope_xdr: _dropped, ...withoutEnvelope } = asHorizonAnswers;
+    record = withoutEnvelope;
+    expect(await submit('timeout')).toEqual({ status: 'unknown', hash: ours.hash, innerHash: inner.hash });
+  });
+
+  it('a refused submission whose lookup record disagrees with its envelope stays refused, never success', async () => {
+    record = { ...asHorizonAnswers, fee_bump_transaction: { hash: 'ab'.repeat(32) } };
+    const result = await submit();
+    expect(result).toMatchObject({ status: 'rejected', reason: 'refused', hash: ours.hash });
+    expect(canSignReplacement(result)).toBe(false);
   });
 });
 

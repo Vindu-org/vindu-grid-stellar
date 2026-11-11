@@ -13,7 +13,7 @@
  * consistent, not at a public load-balanced URL: see `TESTNET_HORIZON_URL`.
  */
 import { InvalidConfigError, InvalidInputError, parseInstantMs } from '@vindu/grid-core';
-import { Horizon, TransactionBuilder, stellarSdk } from './sdk';
+import { FeeBumpTransaction, Horizon, TransactionBuilder, stellarSdk } from './sdk';
 
 /** One operation from Horizon's payments endpoint, in Horizon's own field names. */
 export interface HorizonPaymentRecord {
@@ -67,12 +67,14 @@ export interface HorizonResultCodes {
 export interface HorizonTransactionFound {
   readonly found: true;
   /**
-   * Hash of the envelope on the ledger: for a fee bump, the fee bump's own
-   * hash (Horizon's `fee_bump_transaction.hash`), also when it was looked up
-   * by its inner hash. Its operations and payments carry this hash.
+   * Hash of the envelope on the ledger, 64 hex characters: for a fee bump,
+   * the fee bump's own hash, also when it was looked up by its inner hash.
+   * Its operations and payments carry this hash. The default gateway
+   * computes a fee bump's hashes from the record's `envelope_xdr` and fails
+   * the lookup when Horizon's hash fields disagree with them.
    */
   readonly hash: string;
-  /** Hash of the inner transaction, when the record is a fee bump (Horizon's `inner_transaction.hash`). */
+  /** Hash of the inner transaction, when the record is a fee bump: computed from the envelope, like `hash`. */
   readonly innerHash?: string;
   /** False when the transaction is in a ledger but failed: its fee and sequence are spent, nothing moved. */
   readonly successful: boolean;
@@ -351,26 +353,21 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       if (body === null) return { found: false, ...ingested };
       const tx = asObject(body);
       // An answer without these fields is not an answer: fail the lookup
-      // rather than report something about the transaction.
-      if (typeof tx['hash'] !== 'string' || typeof tx['successful'] !== 'boolean') {
+      // rather than report something about the transaction. A hash that is
+      // not 64 hex characters is no hash at all.
+      const recordHash = tx['hash'];
+      if (typeof recordHash !== 'string' || typeof tx['successful'] !== 'boolean') {
         throw new Error('Horizon returned a transaction without a hash or a result');
       }
-      // A hash that is not 64 hex characters is no hash at all.
-      if (!HASH.test(tx['hash'])) throw new Error('Horizon returned a transaction with a malformed hash');
-      const innerHash = asObject(tx['inner_transaction'])['hash'];
-      if (innerHash !== undefined && (typeof innerHash !== 'string' || !HASH.test(innerHash))) {
-        throw new Error('Horizon returned a transaction with a malformed inner hash');
-      }
-      // Looked up by its inner hash, a fee bump comes back with the inner
-      // hash as its own `hash`; the envelope on the ledger, whose hash its
-      // operations and payments carry, is `fee_bump_transaction`.
-      const feeBumpHash = asObject(tx['fee_bump_transaction'])['hash'];
+      if (!HASH.test(recordHash)) throw new Error('Horizon returned a transaction with a malformed hash');
+      const hashes = isFeeBumpRecord(tx)
+        ? feeBumpHashes(tx, recordHash.toLowerCase(), options.networkPassphrase)
+        : { hash: recordHash.toLowerCase() };
       const resultCodes = typeof tx['result_xdr'] === 'string' ? resultCodesFromXdr(tx['result_xdr']) : undefined;
       return {
         found: true,
-        hash: typeof feeBumpHash === 'string' && HASH.test(feeBumpHash) ? feeBumpHash : tx['hash'],
+        ...hashes,
         successful: tx['successful'],
-        ...(typeof innerHash === 'string' ? { innerHash } : {}),
         ...(typeof tx['ledger'] === 'number' ? { ledger: tx['ledger'] } : {}),
         ...(typeof tx['created_at'] === 'string' ? { createdAt: tx['created_at'] } : {}),
         ...(resultCodes === undefined ? {} : { resultCodes }),
@@ -407,6 +404,60 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
       return { ...toAccount(asObject(body), address), ...(latestLedger === undefined ? {} : { latestLedger }) };
     },
   };
+}
+
+/** The record says it is a fee bump: it names a fee bump or an inner transaction. */
+function isFeeBumpRecord(tx: Record<string, unknown>): boolean {
+  return tx['fee_bump_transaction'] !== undefined || tx['inner_transaction'] !== undefined;
+}
+
+/**
+ * The hashes of a fee bump record, computed from its `envelope_xdr` under
+ * the gateway's network passphrase, never taken from the record's own hash
+ * fields. Looked up by its inner hash, a fee bump comes back with the inner
+ * hash as its own `hash`; the envelope on the ledger, whose hash its
+ * operations and payments carry, is the fee bump. The record must agree
+ * with the envelope on both hashes: it names both, the envelope decodes as a
+ * fee bump, `fee_bump_transaction.hash` is the envelope's hash,
+ * `inner_transaction.hash` is its inner transaction's hash, and the record's
+ * own `hash` is one of the two. Anything else throws, so the lookup counts
+ * as failed, never as found.
+ */
+function feeBumpHashes(
+  tx: Record<string, unknown>,
+  recordHash: string,
+  networkPassphrase: string,
+): { hash: string; innerHash: string } {
+  const named = (field: string): string | undefined => {
+    const value = asObject(tx[field])['hash'];
+    return typeof value === 'string' && HASH.test(value) ? value.toLowerCase() : undefined;
+  };
+  const feeBumpHash = named('fee_bump_transaction');
+  const innerHash = named('inner_transaction');
+  if (feeBumpHash === undefined || innerHash === undefined) {
+    throw new Error('Horizon returned a fee bump without both its hashes');
+  }
+  const envelopeXdr = tx['envelope_xdr'];
+  if (typeof envelopeXdr !== 'string') throw new Error('Horizon returned a fee bump without its envelope');
+  let envelope: ReturnType<typeof TransactionBuilder.fromXDR>;
+  try {
+    envelope = TransactionBuilder.fromXDR(envelopeXdr, networkPassphrase);
+  } catch {
+    throw new Error('Horizon returned a fee bump whose envelope cannot be read');
+  }
+  if (!(envelope instanceof FeeBumpTransaction)) throw new Error('Horizon returned a fee bump whose envelope is not one');
+  const computed = {
+    hash: Buffer.from(envelope.hash()).toString('hex'),
+    innerHash: Buffer.from(envelope.innerTransaction.hash()).toString('hex'),
+  };
+  if (
+    feeBumpHash !== computed.hash ||
+    innerHash !== computed.innerHash ||
+    (recordHash !== computed.hash && recordHash !== computed.innerHash)
+  ) {
+    throw new Error('Horizon returned a fee bump whose hashes do not match its envelope');
+  }
+  return computed;
 }
 
 /** A Horizon answer whose body is larger than `maxResponseBytes`. Never a "not found". */

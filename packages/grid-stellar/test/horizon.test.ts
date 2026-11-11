@@ -22,6 +22,35 @@ function signedXdr(): string {
 
 const HASH = 'ab'.repeat(32);
 
+const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex');
+
+/** A real fee bump around a real payment, signed with throwaway keys on the testnet passphrase. No network. */
+function feeBump(passphrase: string = Networks.TESTNET): { xdr: string; hash: string; innerHash: string; innerXdr: string } {
+  const source = Keypair.random();
+  const inner = new TransactionBuilder(new Account(source.publicKey(), '1'), { fee: '100', networkPassphrase: passphrase })
+    .addOperation(Operation.payment({ destination: Keypair.random().publicKey(), asset: stellarSdk.Asset.native(), amount: '1' }))
+    .setTimeout(60)
+    .build();
+  inner.sign(source);
+  const feeSource = Keypair.random();
+  const fb = TransactionBuilder.buildFeeBumpTransaction(feeSource, '200', inner, passphrase);
+  fb.sign(feeSource);
+  return { xdr: fb.toXDR(), hash: hex(fb.hash()), innerHash: hex(inner.hash()), innerXdr: inner.toXDR() };
+}
+
+/** Horizon's record of `fb`, as testnet Horizon answers it when looked up by `recordHash`. */
+function feeBumpRecord(fb: ReturnType<typeof feeBump>, recordHash: string, extra: Record<string, unknown> = {}) {
+  return {
+    hash: recordHash,
+    successful: true,
+    ledger: 899,
+    envelope_xdr: fb.xdr,
+    fee_bump_transaction: { hash: fb.hash, signatures: [] },
+    inner_transaction: { hash: fb.innerHash, signatures: [], max_fee: '200' },
+    ...extra,
+  };
+}
+
 /** One canned answer of the fake Horizon. */
 interface Answer {
   readonly status?: number;
@@ -180,25 +209,21 @@ describe('horizon gateway', () => {
   });
 
   it('a found transaction carries its fields, its inner hash, its result codes and the Latest-Ledger header', async () => {
-    const inner = 'cd'.repeat(32);
+    const fb = feeBump();
     const { gateway } = gatewayWith({
-      [`/transactions/${HASH}`]: {
+      [`/transactions/${fb.hash}`]: {
         headers: { 'Latest-Ledger': '900' },
-        body: {
-          hash: HASH,
+        body: feeBumpRecord(fb, fb.hash, {
           successful: false,
-          ledger: 899,
           created_at: '2026-11-09T12:00:05Z',
-          inner_transaction: { hash: inner },
           result_xdr: UNDERFUNDED_RESULT,
-          envelope_xdr: 'AAAA',
-        },
+        }),
       },
     });
-    expect(await gateway.transaction(HASH)).toEqual({
+    expect(await gateway.transaction(fb.hash)).toEqual({
       found: true,
-      hash: HASH,
-      innerHash: inner,
+      hash: fb.hash,
+      innerHash: fb.innerHash,
       successful: false,
       ledger: 899,
       createdAt: '2026-11-09T12:00:05Z',
@@ -211,31 +236,56 @@ describe('horizon gateway', () => {
     // What testnet Horizon answered: looked up by the inner hash, the record's
     // own `hash` is the inner hash, and the envelope on the ledger is named
     // in `fee_bump_transaction`. Its operations and payments carry that hash.
-    const inner = 'cd'.repeat(32);
-    const { gateway } = gatewayWith({
-      [`/transactions/${inner}`]: {
-        body: {
-          hash: inner,
-          successful: true,
-          ledger: 899,
-          fee_bump_transaction: { hash: HASH, signatures: [] },
-          inner_transaction: { hash: inner, signatures: [], max_fee: '1000' },
-        },
-      },
+    const fb = feeBump();
+    const { gateway } = gatewayWith({ [`/transactions/${fb.innerHash}`]: { body: feeBumpRecord(fb, fb.innerHash) } });
+    expect(await gateway.transaction(fb.innerHash)).toEqual({
+      found: true,
+      hash: fb.hash,
+      innerHash: fb.innerHash,
+      successful: true,
+      ledger: 899,
     });
-    expect(await gateway.transaction(inner)).toEqual({ found: true, hash: HASH, innerHash: inner, successful: true, ledger: 899 });
   });
 
-  it('keeps the record hash when fee_bump_transaction carries no well-formed hash', async () => {
-    const inner = 'cd'.repeat(32);
-    for (const feeBump of [{}, { hash: 'not-a-hash' }, { hash: 7 }, 'x']) {
-      const { gateway } = gatewayWith({
-        [`/transactions/${inner}`]: {
-          body: { hash: inner, successful: true, fee_bump_transaction: feeBump, inner_transaction: { hash: inner } },
-        },
-      });
-      expect(await gateway.transaction(inner)).toMatchObject({ found: true, hash: inner, innerHash: inner });
-    }
+  it("reports a fee bump's hashes computed from its envelope, upper-case record fields included", async () => {
+    const fb = feeBump();
+    const record = feeBumpRecord(fb, fb.innerHash.toUpperCase(), {
+      fee_bump_transaction: { hash: fb.hash.toUpperCase() },
+      inner_transaction: { hash: fb.innerHash.toUpperCase() },
+    });
+    const { gateway } = gatewayWith({ [`/transactions/${fb.innerHash}`]: { body: record } });
+    expect(await gateway.transaction(fb.innerHash)).toMatchObject({ hash: fb.hash, innerHash: fb.innerHash });
+  });
+
+  describe('fails a fee bump lookup whose hash fields disagree with its envelope, or that lacks one of them', () => {
+    const fb = feeBump();
+    const other = feeBump();
+    it.each<[string, Record<string, unknown>]>([
+      ['fee bump hash differs', { fee_bump_transaction: { hash: 'ab'.repeat(32) } }],
+      ['inner hash differs', { inner_transaction: { hash: other.innerHash } }],
+      ['record hash is neither', { hash: other.hash }],
+      ['envelope is another fee bump', { envelope_xdr: other.xdr }],
+      ['no inner_transaction', { inner_transaction: undefined }],
+      ['no fee_bump_transaction', { fee_bump_transaction: undefined }],
+      ['fee bump hash malformed', { fee_bump_transaction: { hash: 'not-a-hash' } }],
+      ['fee bump hash not a string', { fee_bump_transaction: { hash: 7 } }],
+      ['fee_bump_transaction not an object', { fee_bump_transaction: 'x' }],
+      ['inner hash malformed', { inner_transaction: { hash: 'zz' } }],
+      ['no envelope', { envelope_xdr: undefined }],
+      ['envelope unreadable', { envelope_xdr: 'AAAA' }],
+      ['envelope is not a fee bump', { envelope_xdr: fb.innerXdr }],
+    ])('%s', async (_why, extra) => {
+      const { gateway } = gatewayWith({ [`/transactions/${fb.innerHash}`]: { body: feeBumpRecord(fb, fb.innerHash, extra) } });
+      await expect(gateway.transaction(fb.innerHash)).rejects.toThrow(/fee bump/);
+    });
+  });
+
+  it("fails a fee bump lookup whose envelope was signed for another network's passphrase", async () => {
+    // The hash depends on the passphrase: decoded under the gateway's
+    // passphrase, a public-network fee bump's hashes are not the record's.
+    const fb = feeBump(Networks.PUBLIC);
+    const { gateway } = gatewayWith({ [`/transactions/${fb.innerHash}`]: { body: feeBumpRecord(fb, fb.innerHash) } });
+    await expect(gateway.transaction(fb.innerHash)).rejects.toThrow('do not match its envelope');
   });
 
   it("reads a failed fee bump's codes from its inner transaction", async () => {
@@ -276,7 +326,7 @@ describe('horizon gateway', () => {
       const { gateway } = gatewayWith({
         [`/transactions/${HASH}`]: { body: { hash: HASH, successful: true, inner_transaction: { hash: bad } } },
       });
-      await expect(gateway.transaction(HASH)).rejects.toThrow('malformed inner hash');
+      await expect(gateway.transaction(HASH)).rejects.toThrow('without both its hashes');
     }
   });
 
