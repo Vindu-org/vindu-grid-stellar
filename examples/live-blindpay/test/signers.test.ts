@@ -3,7 +3,7 @@ import { type AccountRef, type Signer, type SigningContext, money, stellarAsset 
 import { PayoutXdrMismatchError, TESTNET_NETWORK_PASSPHRASE, inspectSignedTransaction } from '@vindu/grid-stellar';
 
 import { Account, Asset, FeeBumpTransaction, Keypair, Operation, TransactionBuilder } from '../src/sdk';
-import { describeUnsignedPayout, feeBumpingSigner, observingSigner } from '../src/signers';
+import { describeUnsignedPayout, feeBumpingSigner, lateSigner, observingSigner } from '../src/signers';
 import { TestKeySigner } from '../src/test-key-signer';
 
 const PASSPHRASE = TESTNET_NETWORK_PASSPHRASE;
@@ -75,5 +75,16 @@ describe('feeBumpingSigner', () => {
 
   it('never wraps a transaction the inner signer refused', async () => {
     await expect(feeBumpingSigner(testKey(), client, PASSPHRASE, '200').signStellar(account, unsigned('11'), context)).rejects.toThrow(PayoutXdrMismatchError);
+  });
+});
+
+describe('lateSigner', () => {
+  it('waits until past maxTime, then signs once with the inner checks', async () => {
+    let t = NOW;
+    const waits: number[] = [];
+    const clock = { now: () => t, sleep: async (ms: number) => { waits.push(ms); t += ms; } };
+    const signed = await lateSigner(testKey(), PASSPHRASE, clock, 5_000).signStellar(account, unsigned(), context);
+    expect(waits).toEqual([35_000]);
+    expect(inspectSignedTransaction(signed, PASSPHRASE).maxTime).toBe(Math.floor(NOW / 1000) + 30);
   });
 });

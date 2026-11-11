@@ -88,3 +88,28 @@ export function feeBumpingSigner(
     },
   };
 }
+
+/**
+ * Waits until the unsigned transaction's `maxTime` has passed, then lets the
+ * inner signer check and sign it once. The result can never land: it shows
+ * what BlindPay and the flow do with a signature that came too late (a key
+ * holder who took longer than the transaction's 30 s window).
+ */
+export function lateSigner(
+  inner: Signer,
+  networkPassphrase: string,
+  clock: { readonly now: () => number; readonly sleep: (ms: number) => Promise<void> },
+  pastMaxTimeMs = 6_000,
+): Signer {
+  return {
+    custody: inner.custody,
+    async signStellar(account, unsignedXdr, context) {
+      const { maxTime } = describeUnsignedPayout(unsignedXdr, networkPassphrase);
+      if (maxTime !== undefined && maxTime > 0) {
+        const wait = maxTime * 1000 + pastMaxTimeMs - clock.now();
+        if (wait > 0) await clock.sleep(wait);
+      }
+      return inner.signStellar(account, unsignedXdr, context);
+    },
+  };
+}
