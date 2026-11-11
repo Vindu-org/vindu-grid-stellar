@@ -981,6 +981,69 @@ describe('submit: re-run on an instance with pruned history (real HTTP, default 
   });
 });
 
+describe("submit: someone else's fee bump, as testnet Horizon answers (real HTTP, default gateway)", () => {
+  // Seen on the public testnet: looked up by the inner hash, Horizon answers
+  // with a record whose own `hash` is the inner hash and names the envelope
+  // on the ledger in `fee_bump_transaction`. Only account reads carry a
+  // Latest-Ledger header. The payment's records carry the fee bump's hash,
+  // so that is the hash the result must report.
+  let server: Server;
+  let url: string;
+  const inner = signedPayment(Math.floor(Date.now() / 1000) + 300);
+  const ours = feeBumped(inner.tx, '300');
+  const theirs = feeBumped(inner.tx, '500');
+
+  beforeAll(async () => {
+    server = createServer((req, res) => {
+      res.setHeader('content-type', 'application/hal+json');
+      const path = req.url ?? '';
+      if (path === '/') {
+        res.end(JSON.stringify({ history_latest_ledger: 78, history_latest_ledger_closed_at: new Date().toISOString() }));
+      } else if (path === `/transactions/${inner.hash}`) {
+        res.end(
+          JSON.stringify({
+            hash: inner.hash,
+            successful: true,
+            ledger: 77,
+            fee_bump_transaction: { hash: theirs.hash, signatures: [] },
+            inner_transaction: { hash: inner.hash, signatures: [], max_fee: '200' },
+          }),
+        );
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ status: 404, title: 'Resource Missing' }));
+      }
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise((r) => server.close(r));
+  });
+
+  it('reports the hash that landed, found by the inner hash', async () => {
+    const gateway = createHorizonGateway({ horizonUrl: url, networkPassphrase: TESTNET_NETWORK_PASSPHRASE, allowHttp: true });
+    gateway.submitTransaction = async () => ({ kind: 'rejected', status: 400, transactionCode: 'tx_bad_seq', operationCodes: [] });
+    const result = await submitSignedTransaction({
+      gateway,
+      signedXdr: ours.xdr,
+      networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+      maxWaitMs: 20,
+      pollIntervalMs: 5,
+      sleep: async () => undefined,
+    });
+    expect(result).toEqual({
+      status: 'success',
+      hash: theirs.hash,
+      innerHash: inner.hash,
+      ledger: 77,
+      foundBy: 'inner_hash',
+      submittedHash: ours.hash,
+    });
+  });
+});
+
 describe('submit: Horizon reads time out', () => {
   const maxTime = T0 / 1000 - 60;
   const hang = () => new Promise<never>(() => undefined);

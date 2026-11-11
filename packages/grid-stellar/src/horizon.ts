@@ -66,7 +66,11 @@ export interface HorizonResultCodes {
 /** A transaction as found on Horizon. Failed transactions are found too. */
 export interface HorizonTransactionFound {
   readonly found: true;
-  /** Hash of the record Horizon returned. For a fee bump looked up by its inner hash this may be either hash. */
+  /**
+   * Hash of the envelope on the ledger: for a fee bump, the fee bump's own
+   * hash (Horizon's `fee_bump_transaction.hash`), also when it was looked up
+   * by its inner hash. Its operations and payments carry this hash.
+   */
   readonly hash: string;
   /** Hash of the inner transaction, when the record is a fee bump (Horizon's `inner_transaction.hash`). */
   readonly innerHash?: string;
@@ -352,10 +356,14 @@ export function createHorizonGateway(options: HorizonGatewayOptions): HorizonGat
         throw new Error('Horizon returned a transaction without a hash or a result');
       }
       const innerHash = asObject(tx['inner_transaction'])['hash'];
+      // Looked up by its inner hash, a fee bump comes back with the inner
+      // hash as its own `hash`; the envelope on the ledger, whose hash its
+      // operations and payments carry, is `fee_bump_transaction`.
+      const feeBumpHash = asObject(tx['fee_bump_transaction'])['hash'];
       const resultCodes = typeof tx['result_xdr'] === 'string' ? resultCodesFromXdr(tx['result_xdr']) : undefined;
       return {
         found: true,
-        hash: tx['hash'],
+        hash: typeof feeBumpHash === 'string' && HASH.test(feeBumpHash) ? feeBumpHash : tx['hash'],
         successful: tx['successful'],
         ...(typeof innerHash === 'string' ? { innerHash } : {}),
         ...(typeof tx['ledger'] === 'number' ? { ledger: tx['ledger'] } : {}),

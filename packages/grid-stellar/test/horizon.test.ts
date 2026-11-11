@@ -207,6 +207,37 @@ describe('horizon gateway', () => {
     });
   });
 
+  it("a fee bump looked up by its inner hash carries the fee bump's hash, as its payments do", async () => {
+    // What testnet Horizon answered: looked up by the inner hash, the record's
+    // own `hash` is the inner hash, and the envelope on the ledger is named
+    // in `fee_bump_transaction`. Its operations and payments carry that hash.
+    const inner = 'cd'.repeat(32);
+    const { gateway } = gatewayWith({
+      [`/transactions/${inner}`]: {
+        body: {
+          hash: inner,
+          successful: true,
+          ledger: 899,
+          fee_bump_transaction: { hash: HASH, signatures: [] },
+          inner_transaction: { hash: inner, signatures: [], max_fee: '1000' },
+        },
+      },
+    });
+    expect(await gateway.transaction(inner)).toEqual({ found: true, hash: HASH, innerHash: inner, successful: true, ledger: 899 });
+  });
+
+  it('keeps the record hash when fee_bump_transaction carries no well-formed hash', async () => {
+    const inner = 'cd'.repeat(32);
+    for (const feeBump of [{}, { hash: 'not-a-hash' }, { hash: 7 }, 'x']) {
+      const { gateway } = gatewayWith({
+        [`/transactions/${inner}`]: {
+          body: { hash: inner, successful: true, fee_bump_transaction: feeBump, inner_transaction: { hash: inner } },
+        },
+      });
+      expect(await gateway.transaction(inner)).toMatchObject({ found: true, hash: inner, innerHash: inner });
+    }
+  });
+
   it("reads a failed fee bump's codes from its inner transaction", async () => {
     // A real fee-bump result, laid out byte by byte: the inner result has
     // the same layout as a plain transaction result.
