@@ -26,16 +26,17 @@ export interface StellarPayoutsApi {
   authorize(input: AuthorizeStellarPayoutRequest, opts?: IdempotencyOptions): Promise<StellarAuthorization>;
   /** The Idempotency-Key is required: USDC may already be on its way, so every retry must reuse it. */
   create(input: CreateStellarPayoutRequest, opts: { readonly idempotencyKey: string }): Promise<Created<Payout>>;
-  /** UNCONFIRMED path, see {@link UNCONFIRMED_GET_PAYOUT_PATH}. */
+  /** `GET /payouts/{po_id}`, see {@link GET_PAYOUT_PATH}. */
   getPayout(payoutId: string): Promise<Payout>;
 }
 
 /**
- * UNCONFIRMED: the docs read so far do not show the path to read one payout.
- * `GET /payouts/{po_id}` is the likely one. It lives here only, so a different
- * answer from BlindPay is a one-line change.
+ * The path to read one payout, `GET /payouts/{po_id}`. The docs do not show
+ * it; a development instance answered it for Stellar payouts on 2026-11-11,
+ * with the payout's `status`, `tracking_*`, `sender_amount`, `token`,
+ * `network` and `updated_at`.
  */
-export const UNCONFIRMED_GET_PAYOUT_PATH = (payoutId: string): string => `/payouts/${payoutId}`;
+export const GET_PAYOUT_PATH = (payoutId: string): string => `/payouts/${payoutId}`;
 
 export function stellarPayoutsApi(http: BlindPayHttp): StellarPayoutsApi {
   return {
@@ -68,7 +69,7 @@ export function stellarPayoutsApi(http: BlindPayHttp): StellarPayoutsApi {
       return create<Payout>(http, '/payouts/stellar', body, opts);
     },
     async getPayout(payoutId) {
-      return get<Payout>(http, UNCONFIRMED_GET_PAYOUT_PATH(assertId(payoutId, 'po', 'payoutId')));
+      return get<Payout>(http, GET_PAYOUT_PATH(assertId(payoutId, 'po', 'payoutId')));
     },
   };
 }

@@ -34,7 +34,7 @@ describe('package index', () => {
     'DEFAULT_TIMEOUT_MS',
     'DEFAULT_MAX_RESPONSE_BYTES',
     'DEFAULT_BASE_URL',
-    'UNCONFIRMED_GET_PAYOUT_PATH',
+    'GET_PAYOUT_PATH',
     'assertId',
     'ID_PREFIXES',
     'toLegStatus',

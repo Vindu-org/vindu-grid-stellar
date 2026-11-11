@@ -1,6 +1,6 @@
 import { createBlindPayClient } from '../src/client';
 import { InvalidInputError } from '@vindu/grid-core';
-import { UNCONFIRMED_GET_PAYOUT_PATH } from '../src/stellar-payouts';
+import { GET_PAYOUT_PATH } from '../src/stellar-payouts';
 import { BANK_ACCOUNT_ID, CUSTOMER_ID, type MockReply, STELLAR_ADDRESS, WALLET_ID, config, mockFetch } from './helpers';
 
 function setup(replies: MockReply[]) {
@@ -85,7 +85,34 @@ describe('client endpoints', () => {
     await expect(client.stellarPayouts.create(body, { idempotencyKey: '' })).rejects.toThrow(/idempotencyKey/);
     await expect(client.stellarPayouts.create({ ...body, signed_transaction: '' }, { idempotencyKey: 'k' })).rejects.toThrow(/signed_transaction/);
     expect(calls).toHaveLength(0);
-    expect(UNCONFIRMED_GET_PAYOUT_PATH('po_1')).toBe('/payouts/po_1');
+    expect(GET_PAYOUT_PATH('po_1')).toBe('/payouts/po_1');
+  });
+
+  // The answers of a development instance on 2026-11-11, every value replaced.
+  it('stellar payouts: authorize, create and GET /payouts/{id} as a development instance answers them', async () => {
+    const hash = 'ab'.repeat(32);
+    const tracking = { step: 'completed', status: 'found', transaction_hash: hash, completed_at: '2026-11-11T00:00:01.000Z' };
+    const payout = {
+      id: 'po_000000000001', status: 'completed', sender_wallet_address: STELLAR_ADDRESS, customer_id: CUSTOMER_ID,
+      quote_id: 'qu_000000000001', instance_id: 'in_000000000000', partner_fee: 0, bank_account_id: BANK_ACCOUNT_ID,
+      tracking_transaction: tracking,
+      tracking_payment: { step: 'completed', provider_name: 'x', provider_transaction_id: 'x', provider_status: null, estimated_time_of_arrival: '2_business_days', completed_at: '2026-11-11T00:00:01.000Z' },
+      tracking_liquidity: { step: 'on_hold', provider_transaction_id: null, provider_status: null, estimated_time_of_arrival: null, completed_at: null },
+      tracking_complete: { step: 'completed', status: null, transaction_hash: hash, completed_at: '2026-11-11T00:00:02.000Z' },
+      created_at: '2026-11-11T00:00:02.000Z', updated_at: '2026-11-11T00:00:02.000Z',
+      network: 'stellar_testnet', token: 'USDB', sender_amount: 1000, receiver_amount: 959, currency: 'USD',
+      transaction_fee_amount: 41, billing_fee_amount: 0, partner_fee_id: null, partner_fee_amount: 0, type: 'ach',
+    };
+    const { client, calls, route } = setup([{ body: { transaction_hash: 'AAAAUNSIGNEDXDR' } }, { body: payout }, { body: payout }]);
+    const input = { quote_id: 'qu_000000000001', sender_wallet_address: STELLAR_ADDRESS };
+    expect(await client.stellarPayouts.authorize(input)).toEqual({ unsignedXdr: 'AAAAUNSIGNEDXDR' });
+    // The create answers with the final status already on a development instance.
+    const created = await client.stellarPayouts.create({ ...input, signed_transaction: 'AAAASIGNEDXDR' }, { idempotencyKey: 'k-1' });
+    expect(created.data.status).toBe('completed');
+    const read = await client.stellarPayouts.getPayout(payout.id);
+    expect(read.tracking_transaction?.transaction_hash).toBe(hash);
+    expect([route(0), route(1), route(2)]).toEqual(['POST /payouts/stellar/authorize', 'POST /payouts/stellar', `GET /payouts/${payout.id}`]);
+    expect(calls[1]?.body).toEqual({ ...input, signed_transaction: 'AAAASIGNEDXDR' });
   });
 
   it.each([
