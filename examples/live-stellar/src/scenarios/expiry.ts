@@ -1,6 +1,8 @@
 /**
  * Scenario 4: the sequence-based expiry proof against the real network.
  *
+ * - Before its maxTime, a never-sent envelope is looked up for real and
+ *   stays `unknown`: nothing proves it expired yet.
  * - An envelope with a maxTime a few seconds ahead is signed and never sent
  *   (the gateway "loses" every submission). Once a ledger closed after its
  *   maxTime, `submitSignedTransaction` proves it `expired_not_landed` from
@@ -8,10 +10,13 @@
  * - A late real submission of such an envelope is refused by the network,
  *   and still proven expired.
  * - Once another transaction used that sequence number, the never-sent
- *   envelope is no longer proven expired: the answer is `unknown`.
+ *   envelope is no longer proven expired: the answer is `unknown`, because
+ *   the source account shows the sequence used.
  * - The converse: an envelope that landed is never reported expired, before
- *   or after its maxTime passed, and not by a Horizon that lost its history.
+ *   or after its maxTime passed, and not by a Horizon that lost its history
+ *   (`unknown`: no record found, and the sequence used).
  */
+import type { Logger } from '@vindu/grid-core';
 import type { HorizonGateway, SubmitResult } from '@vindu/grid-stellar';
 
 import { check } from '../check';
@@ -25,14 +30,26 @@ const SHORT_LIFE_S = 5;
 /** maxTime of the envelope that lands: long enough to submit, short enough to wait out. */
 const LANDING_LIFE_S = 25;
 
-/** The real gateway, except that a submission never leaves: it answers as a timed-out request. */
-function losingSubmissions(gateway: HorizonGateway): HorizonGateway & { readonly attempts: number } {
+/**
+ * The real gateway, except that a submission never leaves: it answers as a
+ * timed-out request. Counts the submissions and the lookups that answered.
+ */
+function losingSubmissions(
+  gateway: HorizonGateway,
+): HorizonGateway & { readonly attempts: number; readonly lookups: number; readonly found: number } {
   let attempts = 0;
+  let lookups = 0;
+  let found = 0;
   return {
     networkPassphrase: gateway.networkPassphrase,
     latestLedger: (o) => gateway.latestLedger(o),
     paymentsForAccount: (a, q, o) => gateway.paymentsForAccount(a, q, o),
-    transaction: (h, o) => gateway.transaction(h, o),
+    async transaction(h, o) {
+      const result = await gateway.transaction(h, o);
+      lookups += 1;
+      if (result.found) found += 1;
+      return result;
+    },
     account: (a, o) => gateway.account(a, o),
     async submitTransaction() {
       attempts += 1;
@@ -41,20 +58,60 @@ function losingSubmissions(gateway: HorizonGateway): HorizonGateway & { readonly
     get attempts() {
       return attempts;
     },
+    get lookups() {
+      return lookups;
+    },
+    get found() {
+      return found;
+    },
   };
 }
 
-/** Like {@link losingSubmissions}, on an instance that no longer keeps any transaction history. */
-function withoutHistory(gateway: HorizonGateway): HorizonGateway {
-  const losing = losingSubmissions(gateway);
+/**
+ * Like {@link losingSubmissions}, on an instance that no longer keeps any
+ * transaction history: every lookup answers "not found". Counts the real
+ * lookups that did find the transaction, to show what was hidden.
+ */
+function withoutHistory(gateway: HorizonGateway): HorizonGateway & { readonly lookups: number; readonly hidden: number } {
+  let lookups = 0;
+  let hidden = 0;
   return {
-    ...losing,
     networkPassphrase: gateway.networkPassphrase,
-    submitTransaction: () => losing.submitTransaction(''),
+    latestLedger: (o) => gateway.latestLedger(o),
+    paymentsForAccount: (a, q, o) => gateway.paymentsForAccount(a, q, o),
+    account: (a, o) => gateway.account(a, o),
+    submitTransaction: async () => ({ kind: 'timeout' }),
     async transaction(hash, options) {
       const real = await gateway.transaction(hash, options);
+      lookups += 1;
+      if (real.found) hidden += 1;
       return { found: false, ...(real.latestLedger === undefined ? {} : { latestLedger: real.latestLedger }) };
     },
+    get lookups() {
+      return lookups;
+    },
+    get hidden() {
+      return hidden;
+    },
+  };
+}
+
+/**
+ * A logger that keeps the reasons the submitter gives for not proving
+ * expiry (`expiry not proven`), and forwards everything to `inner`.
+ */
+function reasonsLogger(inner: Logger): Logger & { readonly reasons: string[] } {
+  const reasons: string[] = [];
+  return {
+    debug: (m, f) => inner.debug(m, f),
+    info: (m, f) => inner.info(m, f),
+    warn: (m, f) => {
+      const reason = (f as { reason?: unknown } | undefined)?.reason;
+      if (m === 'expiry not proven' && typeof reason === 'string') reasons.push(reason);
+      inner.warn(m, f);
+    },
+    error: (m, f) => inner.error(m, f),
+    reasons,
   };
 }
 
@@ -77,13 +134,23 @@ export async function expiryScenario(world: World, report: Report): Promise<void
   const payment = (amount: string) =>
     Operation.payment({ destination: receiver.publicKey(), asset: world.sdkAsset, amount });
 
+  // 4a, early: a never-sent envelope with a minute to live, looked up for
+  // real for a few seconds. Nothing is found, no ledger has closed after its
+  // maxTime, so nothing proves it expired: unknown.
+  const earlyMaxTime = nowSeconds() + 60;
+  const notYet = testnet.sign(testnet.build(sender, [payment('1')], { maxTime: earlyMaxTime, detached: true }), sender);
+  const earlyGateway = losingSubmissions(testnet.gateway);
+  const early = await testnet.submit(notYet, { ...PROBE, gateway: earlyGateway, maxWaitMs: 6_000 });
+  check(early.status === 'unknown', `Before its maxTime a lost envelope should be unknown, got ${describe(early)}`);
+  check(earlyGateway.lookups >= 1 && earlyGateway.found === 0, `The early check should look the hash up and find nothing (${earlyGateway.lookups} lookups, ${earlyGateway.found} found)`);
+  check(nowSeconds() < earlyMaxTime, 'The early check ran past its maxTime');
+  report.step(`before its maxTime a never-sent envelope is unknown after ${earlyGateway.lookups} real lookups`);
+
   // 4a: never sent. Built from a copy of the sequence, so the next real
   // transaction of the sender uses the same number.
   const maxTime = nowSeconds() + SHORT_LIFE_S;
   const neverSent = testnet.sign(testnet.build(sender, [payment('1')], { maxTime, detached: true }), sender);
   const losing = losingSubmissions(testnet.gateway);
-  const early = await testnet.submit(neverSent, { ...PROBE, gateway: losing, maxWaitMs: 0 });
-  check(early.status === 'unknown', `Before its maxTime a lost envelope should be unknown, got ${early.status}`);
 
   const closed = await testnet.ledgerClosedAfter(maxTime);
   report.step(`ledger ${closed.sequence} closed at ${closed.closedAt.toISOString()}, after maxTime ${new Date(maxTime * 1000).toISOString()}`);
@@ -93,7 +160,7 @@ export async function expiryScenario(world: World, report: Report): Promise<void
   check(Date.parse(proven.checkedLedger.closedAt) / 1000 > maxTime, 'The checked ledger did not close after maxTime');
   check(BigInt(proven.sourceAccount.sequence) < BigInt(proven.transactionSequence), 'The proof shows a used sequence');
   check(proven.sourceAccount.latestLedger >= proven.checkedLedger.sequence, 'The account read is older than the checked ledger');
-  check(losing.attempts === 2, `The envelope should never leave; the lost-submission gateway saw ${losing.attempts} attempts`);
+  check(losing.attempts === 1, `The envelope should never leave; the lost-submission gateway saw ${losing.attempts} attempts`);
   report.step(`never-sent envelope: ${describe(proven)}`);
 
   // 4b: a late real submission of another envelope with the same short life.
@@ -114,7 +181,8 @@ export async function expiryScenario(world: World, report: Report): Promise<void
   check(checkNow.status === 'success', `Re-checking the landed envelope before its maxTime gave ${checkNow.status}`);
   report.step(`landed in ledger ${String(landed.ledger)}; re-check before maxTime: success`);
 
-  const reused = await testnet.submit(neverSent, { ...PROBE, gateway: losingSubmissions(testnet.gateway), maxWaitMs: 6_000 });
+  const reusedLog = reasonsLogger(testnet.logger);
+  const reused = await testnet.submit(neverSent, { ...PROBE, gateway: losingSubmissions(testnet.gateway), maxWaitMs: 6_000, logger: reusedLog });
   // Unknown: the sequence number is used, and the proof cannot tell by what.
   // An instance that had not yet ingested the landing may still prove it
   // expired, which is also true: its maxTime passed before that ledger.
@@ -124,14 +192,32 @@ export async function expiryScenario(world: World, report: Report): Promise<void
     reused.status === 'unknown' || staleButTrue,
     `After its sequence number was used elsewhere the never-sent envelope gave ${describe(reused)}`,
   );
-  report.step(`never-sent envelope after its sequence number was used by another transaction: ${reused.status}`);
+  if (reused.status === 'unknown') {
+    check(
+      reusedLog.reasons.length > 0 && reusedLog.reasons.every((r) => r === 'sequence_used'),
+      `The never-sent envelope should be unknown because its sequence is used, not for ${reusedLog.reasons.join(', ') || 'no stated reason'}`,
+    );
+  }
+  report.step(
+    `never-sent envelope after its sequence number was used by another transaction: ${reused.status}` +
+      (reused.status === 'unknown' ? ` (expiry not proven: ${[...new Set(reusedLog.reasons)].join(', ')})` : ''),
+  );
 
   await testnet.ledgerClosedAfter(landingMaxTime);
   const afterLost = await testnet.submit(landing, { ...PROBE, gateway: losingSubmissions(testnet.gateway) });
   check(afterLost.status === 'success', `Re-checking the landed envelope after its maxTime gave ${afterLost.status}`);
   const afterReal = await testnet.submit(landing);
   check(afterReal.status === 'success', `Resubmitting the landed envelope after its maxTime gave ${afterReal.status}`);
-  const pruned = await testnet.submit(landing, { ...PROBE, gateway: withoutHistory(testnet.gateway), maxWaitMs: 6_000 });
+  const prunedGateway = withoutHistory(testnet.gateway);
+  const prunedLog = reasonsLogger(testnet.logger);
+  const pruned = await testnet.submit(landing, { ...PROBE, gateway: prunedGateway, maxWaitMs: 6_000, logger: prunedLog });
   check(pruned.status === 'unknown', `With no history, the landed envelope after its maxTime gave ${pruned.status}`);
-  report.step('after its maxTime the landed envelope is still success (lookup and real resubmit), and unknown without history');
+  // Why: the lookups found nothing (the history is gone, though the real
+  // Horizon still has it), and the source account shows the sequence used.
+  check(prunedGateway.lookups >= 1 && prunedGateway.hidden === prunedGateway.lookups, `Every lookup should have been hidden (${prunedGateway.hidden} of ${prunedGateway.lookups})`);
+  check(
+    prunedLog.reasons.length > 0 && prunedLog.reasons.every((r) => r === 'sequence_used'),
+    `Without history the landed envelope should be unknown because its sequence is used, not for ${prunedLog.reasons.join(', ') || 'no stated reason'}`,
+  );
+  report.step('after its maxTime the landed envelope is still success (lookup and real resubmit), and unknown without history (no record, sequence used)');
 }
