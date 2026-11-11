@@ -15,11 +15,12 @@
  * (f) the single payout read (`readLeg`) and its statuses;
  * (g) the payout quote's `expires_at`.
  */
-import { DEV_SENTINEL_AMOUNTS, runStellarPayout } from '@vindu/grid-blindpay';
+import { BlindPayHttpError, DEV_SENTINEL_AMOUNTS, runStellarPayout } from '@vindu/grid-blindpay';
 import {
   GridError,
   type LegStatusValue,
   type Money,
+  PayoutIncompleteError,
   type PayoutSubmission,
   type Signer,
   compare,
@@ -34,11 +35,12 @@ import {
   createStellarSubmitter,
   inspectSignedTransaction,
   matchPaymentToLeg,
+  submitSignedTransaction,
 } from '@vindu/grid-stellar';
 import { randomUUID } from 'node:crypto';
 
 import { createBankAccount, listBankAccounts, mintUsdb } from './dev-endpoints';
-import { type UnsignedPayoutFacts, describeUnsignedPayout, feeBumpingSigner, observingSigner } from './signers';
+import { type UnsignedPayoutFacts, describeUnsignedPayout, feeBumpingSigner, lateSigner, observingSigner } from './signers';
 import { waitFor } from './step-setup';
 import { TestKeySigner } from './test-key-signer';
 import { NETWORK_PASSPHRASE, type World } from './world';
@@ -69,7 +71,9 @@ interface Scenario {
   readonly amount: string;
   readonly submission: PayoutSubmission;
   readonly feeBump?: boolean;
-  readonly expect: LegStatusValue;
+  /** Sign only after the transaction's maxTime: the payout must be refused, nothing created. */
+  readonly late?: boolean;
+  readonly expect: LegStatusValue | 'refused';
   readonly step: string;
 }
 
@@ -77,6 +81,7 @@ const SCENARIOS: readonly Scenario[] = [
   { label: 'partner_submits', amount: '10', submission: 'partner_submits', expect: 'completed', step: 'a who submits' },
   { label: 'client_submits', amount: '10', submission: 'client_submits', expect: 'completed', step: 'a who submits' },
   { label: 'fee bump', amount: '10', submission: 'partner_submits', feeBump: true, expect: 'completed', step: 'e fee bump' },
+  { label: 'late signature', amount: '10', submission: 'partner_submits', late: true, expect: 'refused', step: 'c time bounds' },
   { label: `sentinel ${DEV_SENTINEL_AMOUNTS.failed}`, amount: String(DEV_SENTINEL_AMOUNTS.failed / 100), submission: 'partner_submits', expect: 'failed', step: '3 sentinels' },
   { label: `sentinel ${DEV_SENTINEL_AMOUNTS.refunded}`, amount: String(DEV_SENTINEL_AMOUNTS.refunded / 100), submission: 'partner_submits', expect: 'refunded', step: '3 sentinels' },
 ];
@@ -100,6 +105,7 @@ export async function runPayouts(w: World): Promise<void> {
   const bankAccountId = await bankAccount(w, customerId);
   w.found.bankAccountId = bankAccountId;
   w.report.pass(STEP, `Receiver: a fake ACH bank account ${bankAccountId}`);
+  await probeErrorShape(w, bankAccountId);
 
   const destinations = new Set<string>();
   const facts: Array<{ scenario: string; facts: UnsignedPayoutFacts; maxTimeAfterNowSec: number | undefined; quoteLeftSec: number }> = [];
@@ -121,7 +127,9 @@ export async function runPayouts(w: World): Promise<void> {
     w.store.set(transferId, 'payout_quoted');
 
     const testKey = new TestKeySigner(keypair, NETWORK_PASSPHRASE, { now: w.now });
-    let signer: Signer = observingSigner(testKey, (unsignedXdr, context) => {
+    // A late signer waits inside the observer, so the observer still sees the XDR as BlindPay handed it over.
+    const keyHolder: Signer = s.late === true ? lateSigner(testKey, NETWORK_PASSPHRASE, w) : testKey;
+    let signer: Signer = observingSigner(keyHolder, (unsignedXdr, context) => {
       const f = describeUnsignedPayout(unsignedXdr, NETWORK_PASSPHRASE);
       if (f.destination !== undefined) destinations.add(f.destination);
       facts.push({
@@ -157,7 +165,12 @@ export async function runPayouts(w: World): Promise<void> {
         logger: w.logger,
       });
     } catch (e) {
-      w.report.fail(s.step, `${s.label}: runStellarPayout stopped with ${describeError(e)}${signedXdr === undefined ? ', nothing signed' : ''}`);
+      if (s.late === true) await checkLateRefusal(w, s, transferId, e);
+      else w.report.fail(s.step, `${s.label}: runStellarPayout stopped with ${describeError(e)}${signedXdr === undefined ? ', nothing signed' : ''}`);
+      continue;
+    }
+    if (s.late === true) {
+      w.report.fail(s.step, `${s.label}: BlindPay created a payout from a transaction past its maxTime`);
       continue;
     }
     if (s.submission === 'partner_submits') w.store.cas(transferId, 'awaiting_signature', 'payout_submitted');
@@ -212,6 +225,49 @@ export async function runPayouts(w: World): Promise<void> {
   }
 
   reportXdrFacts(w, facts, destinations, payoutDestination);
+}
+
+/**
+ * A request BlindPay refuses without creating anything (a payout quote below
+ * the minimum), to see what a typed error carries. The client never copies
+ * BlindPay's free text by default, only a code-shaped `code`.
+ */
+async function probeErrorShape(w: World, bankAccountId: string): Promise<void> {
+  const step = 'errors';
+  const usdb = w.found.usdb;
+  if (usdb === undefined) return;
+  try {
+    await w.client.payoutQuotes.create({
+      bank_account_id: bankAccountId, currency_type: 'sender', cover_fees: false, request_amount: 100, network: 'stellar_testnet', token: 'USDB',
+    });
+    w.report.finding(step, 'A 1.00 USDB payout quote was priced: no minimum enforced');
+  } catch (e) {
+    if (!(e instanceof BlindPayHttpError)) throw e;
+    w.report.check(step, e.status === 400 && e.bodySnippet === undefined, `A 1.00 USDB payout quote is refused: BlindPayHttpError HTTP ${String(e.status)}, code ${String(e.code)}, no body copied`);
+    w.report.finding(step, `A validation error has no top-level code (the client's code is ${String(e.code)}); the reason is in errors[].message (minimum request_amount 500, docs say 10 USD)`);
+  }
+}
+
+/**
+ * The late signature: BlindPay must refuse the create, the flow must stop
+ * with PayoutIncompleteError at `create` holding the signed XDR, and
+ * grid-stellar must prove from Horizon that it can never land, which is the
+ * one case where a replacement could be signed. None is signed here.
+ */
+async function checkLateRefusal(w: World, s: Scenario, transferId: string, e: unknown): Promise<void> {
+  if (!(e instanceof PayoutIncompleteError) || e.stage !== 'create' || e.signedXdr === undefined) {
+    w.report.fail(s.step, `${s.label}: expected PayoutIncompleteError at create, got ${describeError(e)}`);
+    return;
+  }
+  const cause = e.cause;
+  const http = cause instanceof BlindPayHttpError ? `HTTP ${String(cause.status)} ${String(cause.code)}` : describeError(cause);
+  w.report.pass(s.step, `${s.label}: BlindPay refused the create (${http}); runStellarPayout stopped with PayoutIncompleteError at create, signed once`);
+  w.report.finding(s.step, `A signature after the authorize maxTime is refused at create (${http}; message submit_transaction_failed) and no payout is made: the key holder has about 30 s`);
+  w.store.cas(transferId, 'awaiting_signature', 'needs_attention');
+  const proof = await submitSignedTransaction({
+    gateway: w.gateway, signedXdr: e.signedXdr, networkPassphrase: NETWORK_PASSPHRASE, timeoutMs: 20_000, maxWaitMs: 20_000,
+  });
+  w.report.check(s.step, proof.status === 'expired_not_landed', `${s.label}: grid-stellar proves it can never land: ${proof.status}${proof.status === 'expired_not_landed' ? ` (sequence unused at ledger ${proof.checkedLedger.sequence})` : ''}`);
 }
 
 function reportXdrFacts(

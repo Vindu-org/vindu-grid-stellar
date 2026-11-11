@@ -6,7 +6,7 @@
  * the completed one, checks with grid-stellar that the USDB arrived on
  * testnet with the amount the quote said.
  */
-import { BlindPayHttpError, DEV_SENTINEL_AMOUNTS } from '@vindu/grid-blindpay';
+import { DEV_SENTINEL_AMOUNTS } from '@vindu/grid-blindpay';
 import { type LegQuote, type LegRef, type LegStatusValue, fiat, money } from '@vindu/grid-core';
 import { InMemoryCursorStore, createReadLayer, matchPaymentToLeg, partnerAndChainAgree } from '@vindu/grid-stellar';
 import { randomUUID } from 'node:crypto';
@@ -51,31 +51,7 @@ export async function startPayins(w: World): Promise<StartedPayin[]> {
     w.report.check(p.step, funding.pixCode === '<development>', `Payin created for ${p.label}; PIX code is the development placeholder`);
     started.push({ ...p, quote, leg: funding.leg, createdAt: w.now() });
   }
-  await probeErrorShape(w);
   return started;
-}
-
-/**
- * A request BlindPay refuses without creating anything (a `receiver` payin
- * quote, which development instances cannot price), to see what a typed
- * error carries: BlindPay's generic `code`, while the specific reason stays
- * in the free-text `message`, which the client never copies by default.
- */
-async function probeErrorShape(w: World): Promise<void> {
-  const step = 'errors';
-  const walletId = w.found.account?.partnerAccountId;
-  if (walletId === undefined) return;
-  try {
-    await w.client.payinQuotes.create({
-      blockchain_wallet_id: walletId, currency_type: 'receiver', cover_fees: false, request_amount: 1000, payment_method: 'pix', token: 'USDB',
-    });
-    w.report.info(step, 'A receiver payin quote was priced; no error to look at');
-  } catch (e) {
-    if (!(e instanceof BlindPayHttpError)) throw e;
-    w.report.check(step, e.status === 400 && typeof e.code === 'string' && e.bodySnippet === undefined,
-      `A refused call is BlindPayHttpError HTTP ${String(e.status)} code ${String(e.code)}, with no body copied`);
-    w.report.finding(step, `BlindPay's error body is { success, code, description, message, errors, trace_id }: code is generic (${String(e.code)}), the specific reason is only in message`);
-  }
 }
 
 /** Waits for every payin to end, then checks each outcome. */
