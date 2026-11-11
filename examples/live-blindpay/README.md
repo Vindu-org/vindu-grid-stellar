@@ -19,7 +19,7 @@ It is never run in CI. `yarn test` runs only its offline unit tests, with `fetch
 4. Payouts through `runStellarPayout`, each on its own quote and signed once by a test-key signer that runs `assertPayoutXdrMatches` first: `partner_submits`, `client_submits` (submitted by grid-stellar first), a fee-bumped envelope, and a signature made after the transaction's `maxTime`. It checks the chain, `readLeg`, and the authorize transaction's fee, time bounds and destination. The receiver is a clearly fake ACH bank account; development instances skip the bank submission.
 5. Webhooks: skipped, there is no public URL to deliver to.
 
-Each run makes a new throwaway account and wallet and mints about 1500 test USDB. It sends about 60 BlindPay requests, paced under the development limit of 40 a minute.
+Each run makes a new throwaway account and wallet and mints about 1500 test USDB. It sends about 100 BlindPay requests (most of them polling the payins) over about 8 minutes, paced under the development limit of 40 a minute.
 
 ## Run it
 
