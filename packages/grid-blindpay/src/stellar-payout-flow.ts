@@ -38,7 +38,7 @@
  * - A clock, margin or submit budget that is not a finite number fails closed.
  *
  * Two options cover what BlindPay's docs leave open. A development instance
- * answered both on 2026-11-11 (see `examples/live-blindpay/FINDINGS.md`):
+ * answered both on 2026-11-11:
  * - `submission`: we submit to Stellar first (`client_submits`, the docs'
  *   example and the default) or BlindPay receives the signed XDR and submits
  *   it (`partner_submits`). Both worked: BlindPay submitted an envelope it

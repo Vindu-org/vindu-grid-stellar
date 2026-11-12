@@ -2,7 +2,7 @@
  * BlindPay calls `@vindu/grid-blindpay` does not wrap (yet). Each goes
  * through the client's own HTTP layer (`client.http.request`), so it still
  * gets the bearer key, an Idempotency-Key on every write, the timeout, the
- * body cap and the redaction rules. Each one is a FINDING in FINDINGS.md:
+ * body cap and the redaction rules. Each one is reported as a FINDING line:
  * a gap in the package, not something to call with raw `fetch`.
  */
 import type { BlindPayClient } from '@vindu/grid-blindpay';

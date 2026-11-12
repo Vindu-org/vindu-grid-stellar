@@ -268,7 +268,7 @@ async function probeErrorShape(w: World, bankAccountId: string): Promise<void> {
  * it (check `max_time`). The flow then stops with `SignerRefusedError`:
  * nothing is signed, nothing reaches BlindPay, and the transfer goes to
  * `needs_attention`. What BlindPay does with a late signature was observed
- * before the signer refused it; see FINDINGS.md (c).
+ * before the signer refused it.
  */
 function checkLateRefusal(
   w: World,
