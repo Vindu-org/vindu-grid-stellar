@@ -6,8 +6,6 @@ Runs `@vindu/grid-blindpay`, `@vindu/grid-stellar` and `@vindu/grid-core` agains
 - `FAIL`: something the run needs did not happen (the run exits 1);
 - `FINDING`: a fact about the real instance worth writing down, such as a difference from the docs.
 
-What it found on 2026-11-11 is in [FINDINGS.md](FINDINGS.md).
-
 It is never run in CI. `yarn test` runs only its offline unit tests, with `fetch` disabled.
 
 ## What it does
