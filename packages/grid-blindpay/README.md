@@ -141,7 +141,7 @@ Customers are approved automatically (legal name `Fail` forces a rejection), pay
 
 ## Unconfirmed
 
-The public docs leave these open. Each one lives in one place so a different answer is a small change. `examples/live-blindpay` asks a development instance; what it answered on 2026-11-11 is in [its findings](../../examples/live-blindpay/FINDINGS.md) and noted below. A development instance is not production: keep the options until BlindPay confirms in writing.
+The public docs leave these open. Each one lives in one place so a different answer is a small change. `examples/live-blindpay` asks a development instance; what it answered on 2026-11-11 is noted below. A development instance is not production: keep the options until BlindPay confirms in writing.
 
 - **`signed_transaction` content**: signed XDR or Stellar hash. Adapter option `signedTransactionField` (`signed_xdr` default, `tx_hash`). Development took the signed envelope (plain or fee-bumped) and refused a hash.
 - **Who submits to Stellar**: `runStellarPayout` option `submission` (`client_submits` default, `partner_submits`). Development did both: it submitted an envelope it was given, and took one already on the ledger.
