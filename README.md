@@ -91,7 +91,7 @@ These rules decide when money may move. The packages enforce them where they can
 | Integration kit | Shared test doubles (fake Horizon, mock partner) and the adapter conformance suite | Planned (tranche 3) |
 | [`examples/testnet-demo`](examples/testnet-demo) | End-to-end two-leg transfer on Stellar with a mock partner, offline | Example, not packaged |
 | [`examples/live-stellar`](examples/live-stellar) | The Stellar layer against the public testnet: read layer, resubmits, fee bumps, the expiry proof, the payout checks | Example, not packaged, never run in CI |
-| [`examples/live-blindpay`](examples/live-blindpay) | The BlindPay flow against your own BlindPay development instance and the testnet; [what it found](examples/live-blindpay/FINDINGS.md) | Example, not packaged, never run in CI |
+| [`examples/live-blindpay`](examples/live-blindpay) | The BlindPay flow against your own BlindPay development instance and the testnet | Example, not packaged, never run in CI |
 
 ## Getting started
 
