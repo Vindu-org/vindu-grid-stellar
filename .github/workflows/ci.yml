@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          # setup-node would set up a Yarn cache before corepack enables Yarn 4.
+          package-manager-cache: false
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn build
+      - run: yarn typecheck
+      - run: yarn lint
+      - run: yarn test
+
+  consumption:
+    name: Install the packed packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          # setup-node would set up a Yarn cache before corepack enables Yarn 4.
+          package-manager-cache: false
+      - run: corepack enable
+      - run: yarn install --immutable
+      - run: yarn build
+      # Packs each package (prepack builds it), installs the tarballs into a
+      # temp project with a grid-core resolution and install scripts off,
+      # requires them and type-checks.
+      - run: bash scripts/check-consumption.sh
+
+  gitleaks:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The gitleaks CLI image needs no license key (the GitHub Action does for organisations).
+      - name: Scan full history for secrets
+        run: >
+          docker run --rm -v "${{ github.workspace }}:/repo" -w /repo
+          ghcr.io/gitleaks/gitleaks:v8.21.2
+          detect --source /repo --config /repo/.gitleaks.toml --redact --verbose --exit-code 1

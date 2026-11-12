@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Development only: the package and example tsconfig.json files extend this,
+  // so type checks, tests and the demo read the workspace sources and need no
+  // build first. The tsconfig.build.json files extend tsconfig.base.json
+  // instead, so a build resolves other packages through their dist types.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node", "jest"],
+    "paths": {
+      "@vindu/*": ["./packages/*/src"]
+    }
+  }
+}

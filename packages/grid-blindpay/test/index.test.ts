@@ -1,0 +1,51 @@
+import * as api from '../src';
+
+describe('package index', () => {
+  it('exports exactly the public runtime surface', () => {
+    expect(Object.keys(api).sort()).toEqual(
+      [
+        'BLINDPAY_CAPABILITIES',
+        'BLINDPAY_DECIMALS',
+        'BLINDPAY_PARTNER_ID',
+        'BLINDPAY_TERMINAL_STATUSES',
+        'BlindPayHttpError',
+        'BlindPayQuoteError',
+        'DEFAULT_MAX_QUOTE_TTL_MS',
+        'DEFAULT_WEBHOOK_TOLERANCE_SEC',
+        'DEV_SENTINEL_AMOUNTS',
+        'WebhookVerificationError',
+        'createBlindPayAdapter',
+        'createBlindPayClient',
+        'floorToBlindPayAmount',
+        'fromBlindPayAmount',
+        'parseWebhookEvent',
+        'retryStellarPayoutCreate',
+        'runStellarPayout',
+        'toBlindPayAmount',
+        'verifyWebhook',
+      ].sort(),
+    );
+  });
+
+  it.each([
+    'resolveConfig',
+    'createBlindPayHttp',
+    'IDEMPOTENCY_IN_FLIGHT',
+    'DEFAULT_TIMEOUT_MS',
+    'DEFAULT_MAX_RESPONSE_BYTES',
+    'DEFAULT_BASE_URL',
+    'GET_PAYOUT_PATH',
+    'assertId',
+    'ID_PREFIXES',
+    'toLegStatus',
+    'TERMINAL_STATUSES',
+    'StellarPayoutIncompleteError',
+    'create',
+    'get',
+    'list',
+    'readErrorBody',
+    'parseRetryAfter',
+  ])('does not export the internal %s', (name) => {
+    expect((api as Record<string, unknown>)[name]).toBeUndefined();
+  });
+});

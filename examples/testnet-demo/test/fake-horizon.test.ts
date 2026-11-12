@@ -1,0 +1,68 @@
+import { money, stellarAsset } from '@vindu/grid-core';
+import { TESTNET_NETWORK_PASSPHRASE, createStellarSubmitter } from '@vindu/grid-stellar';
+
+import { FakeHorizon } from '../src/fake-horizon';
+import { Keypair, TransactionBuilder } from '../src/sdk';
+import { buildPaymentXdr } from '../src/stellar-tx';
+
+const PASSPHRASE = TESTNET_NETWORK_PASSPHRASE;
+const T0 = Date.parse('2026-11-09T12:00:00Z');
+
+function setup() {
+  let t = T0;
+  const ledger = new FakeHorizon(PASSPHRASE, () => t);
+  const client = Keypair.random();
+  ledger.addAccount({ id: client.publicKey(), sequence: '100', subentry_count: 0, balances: [] });
+  const usdc = stellarAsset('USDC', Keypair.random().publicKey());
+  const signed = (maxTime: number) => {
+    const xdr = buildPaymentXdr({
+      source: client.publicKey(),
+      sequence: '100',
+      destination: Keypair.random().publicKey(),
+      amount: money('10', usdc),
+      maxTime,
+      networkPassphrase: PASSPHRASE,
+    });
+    const tx = TransactionBuilder.fromXDR(xdr, PASSPHRASE);
+    tx.sign(client);
+    return tx.toXDR();
+  };
+  const submitter = createStellarSubmitter({
+    gateway: ledger,
+    networkPassphrase: PASSPHRASE,
+    pollIntervalMs: 5_000,
+    maxWaitMs: 60_000,
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+    },
+  });
+  return { ledger, signed, submitter, client: client.publicKey() };
+}
+
+describe('FakeHorizon', () => {
+  it('reports its own ingestion: the latest ledger on every lookup and account read', async () => {
+    const { ledger, client } = setup();
+    expect(await ledger.latestLedger()).toMatchObject({ sequence: 1000 });
+    expect(await ledger.transaction('ab'.repeat(32))).toEqual({ found: false, latestLedger: 1000 });
+    expect(await ledger.account(client)).toMatchObject({ sequence: '100', latestLedger: 1000 });
+  });
+
+  it('lets the submitter prove a lost transaction expired, with the full ingestion evidence', async () => {
+    const { ledger, signed, submitter } = setup();
+    ledger.loseNextSubmission();
+    const outcome = await submitter.submit(signed(Math.floor(T0 / 1000) + 1));
+    expect(outcome).toMatchObject({
+      status: 'expired_not_landed',
+      detail: { checkedLedger: { sequence: 1000 }, sourceAccount: { sequence: '100', latestLedger: 1000 } },
+    });
+  });
+
+  it('finds a transaction that landed behind a 504, with the latest ledger it had ingested', async () => {
+    const { ledger, signed, submitter } = setup();
+    ledger.timeOutNextSubmission();
+    const outcome = await submitter.submit(signed(Math.floor(T0 / 1000) + 300));
+    expect(outcome).toMatchObject({ status: 'success', detail: { ledger: 1001 } });
+    expect(ledger.lookups).toHaveLength(1);
+  });
+});

@@ -1,0 +1,43 @@
+{
+  "name": "@vindu/grid-blindpay",
+  "version": "0.1.0",
+  "description": "Typed BlindPay client for two-leg transfers settled on Stellar: customers, wallets, PIX pay-ins, Stellar payouts and webhooks.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vindu-org/vindu-grid-stellar.git",
+    "directory": "packages/grid-blindpay"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "yarn workspace @vindu/grid-core build && node ../../scripts/prepack-package.cjs && yarn build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@vindu/grid-core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/jest": "^29",
+    "@types/node": "^22",
+    "jest": "^29",
+    "ts-jest": "^29",
+    "typescript": "^5.5"
+  }
+}
