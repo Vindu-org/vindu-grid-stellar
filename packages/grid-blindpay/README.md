@@ -10,7 +10,7 @@ Typed [BlindPay](https://blindpay.com) client for two-leg transfers settled on S
 | Node | 22 or later. |
 | Format | CommonJS with type declarations. One entry point: import from `@vindu/grid-blindpay` only; files under `dist/` are internal. |
 | Stability | 0.x: a breaking change bumps the minor version, a patch never breaks. See the [stability policy](../../README.md#stability). |
-| Planned | BlindPay's written answers to the points under [Unconfirmed](#unconfirmed). Passing the shared adapter conformance suite once it exists (tranche 3). |
+| Planned | Making `partner_submits` the default, as BlindPay recommends (see [Confirmed by BlindPay](#confirmed-by-blindpay)). Passing the shared adapter conformance suite once it exists (tranche 3). |
 
 ## What it covers
 
@@ -99,6 +99,8 @@ const result = await runStellarPayout({
 
 It is core's `runSignedPayout`, so core's rules, and its table of which transition each error takes, apply. BlindPay always returns a transaction to sign, so `signing` is required here; `submission` defaults to `client_submits`, which needs `submitter` (with a finite `maxDurationMs`) and `onSubmitted`.
 
+BlindPay recommends `partner_submits`: pass `submission: 'partner_submits'` and leave out `submitter` and `onSubmitted`. BlindPay then checks the quote, the envelope and its expiry before it submits, so a refused create never moves the funds. With `client_submits` the payment is already on the ledger when the create is refused, and the funds come back only through BlindPay support (see [Confirmed by BlindPay](#confirmed-by-blindpay)).
+
 - The payment must reach BlindPay's payout account. Get that Stellar account from BlindPay in writing and set it as the adapter's `payoutDestination` (checked as a G account when the adapter is built). Never read it from the transaction BlindPay returns: that transaction is what the signer checks against it. `signing.destination` may name it too, but then both must be the same account; with neither, the run is refused before any call.
 
 - Before any call, core checks that the quote is from this adapter's id and that `quote.source` is a positive amount of the funded asset, no more than `funded`. The adapter has already refused a quote whose `sender_amount` is not the requested amount.
@@ -139,17 +141,24 @@ Quotes are `sender` quotes: BlindPay's `sender_amount` must equal the `request_a
 
 Customers are approved automatically (legal name `Fail` forces a rejection), payins complete in about 30 seconds with `USDB`, and `pix_code` is the literal `<development>`. The outcome follows the `request_amount`: `66600` ends `failed`, `77700` ends `refunded`, anything else `completed`. `DEV_SENTINEL_AMOUNTS` holds these values as a test aid; production ignores them.
 
-## Unconfirmed
+## Confirmed by BlindPay
 
-The public docs leave these open. Each one lives in one place so a different answer is a small change. `examples/live-blindpay` asks a development instance; what it answered on 2026-11-11 is noted below. A development instance is not production: keep the options until BlindPay confirms in writing.
+BlindPay answered these in writing in November 2026. Each one still lives in one place, so a change on their side is a small change here.
 
-- **`signed_transaction` content**: signed XDR or Stellar hash. Adapter option `signedTransactionField` (`signed_xdr` default, `tx_hash`). Development took the signed envelope (plain or fee-bumped) and refused a hash.
-- **Who submits to Stellar**: `runStellarPayout` option `submission` (`client_submits` default, `partner_submits`). Development did both: it submitted an envelope it was given, and took one already on the ledger.
-- **The Stellar account payouts pay**: not in the public docs. Get it from BlindPay in writing and set it as the adapter's `payoutDestination`. Never read it from the transaction BlindPay returns: the signer checks that transaction against it. On development every payout paid the USDB issuer.
-- **Quote lifetime**: not stated. Quotes expiring more than `maxQuoteTtlMs` (default one hour) ahead are refused; raise it if BlindPay confirms longer quotes. Development quotes, payin and payout, expired 300 s after the request; the authorize transaction about 30 s after it was built.
-- **Reading one payout**: `GET /payouts/{po_id}`, in one constant in `stellar-payouts.ts`. Development answered it.
-- **Error body format**: the code is read from `code` or `error.code`, and kept only when it is code-shaped. Free text never becomes the code. Development sends two shapes. Most errors are `{ success, code, description, message, errors, trace_id }`: `code` is a generic class such as `VALIDATION_INVALID_REQUEST`, and the specific reason (`transaction_xdr_invalid`) is only in `message`, which errors carry only with `includeErrorBodies`. Validation errors have no top-level `code`: `{ success, message, errors: [{ code, message, path }], trace_id }`, so `partnerCode` is undefined for them.
-- **Leg fields**: `token`, `updated_at` and a payout's `sender_amount` are used when present, never required. Development sends all three. A payout's hash is in `tracking_transaction` (and repeated in `tracking_complete`). A payin's delivery hash in `tracking_complete`, with no hash in `tracking_transaction`, was seen only on the instance's seeded EVM payins: no Stellar payin completed on development, so for Stellar it is unconfirmed, and a payin falls back to `tracking_transaction` when `tracking_complete` holds no well-formed hash.
+- **Who submits to Stellar**: both work in production, and BlindPay recommends `partner_submits`. With `client_submits`, a create refused after the payment landed leaves the funds with BlindPay: they refund them in full to the quote's `refund_wallet_address`, or else to the sender wallet, after a support request with the transaction hash. The default is still `client_submits`; see Planned under [Status](#status).
+- **`signed_transaction` content**: the signed XDR envelope (plain or fee-bumped), never the hash. Keep `signedTransactionField` at its default, `signed_xdr`.
+- **The Stellar account payouts pay**: on mainnet every authorize transaction pays `GCOSSQDM2SWMHRP7CDBOLL2V45NHCRLUWUCEHPPBA2ABCOOLPOLZKIHE`, the account BlindPay's Stellar payout page publishes, and BlindPay will announce any change first. Set it as `payoutDestination`. The asset is Circle's USDC (issuer `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN`); a receiving wallet needs only an active account with a USDC trustline.
+- **Signing window**: the authorize transaction's `maxTime` is about 30 seconds after it is built, and that is fixed. Quotes last 5 minutes. If a signature misses the window, BlindPay supports calling authorize again on the same quote and signing the new envelope while the quote is valid. This library does not do that on its own: a signer that refuses an expired envelope stops the run with `SignerRefusedError`.
+- **Retrying a create**: retry with the same body while the quote is valid. An envelope that already landed returns its original result, so the retry creates the payout. Once the quote has expired, it needs a BlindPay support request with the hash.
+- **Error codes**: an expired envelope that was never submitted returns `400` with code `REQUEST_REJECTED` and `submit_transaction_failed` in `message`; `QUOTES_EXPIRED` covers only an expired quote. BlindPay is adding dedicated codes. The rest of the format is as development showed: most errors are `{ success, code, description, message, errors, trace_id }`, with a generic `code` and the specific reason only in `message` (carried only with `includeErrorBodies`), and validation errors have no top-level `code`, only `errors[].code`, so `partnerCode` is undefined for them.
+- **Leg fields**: a Stellar payin's delivery hash is `tracking_complete.transaction_hash`, as the adapter reads it first (the webhook example that shows it in `tracking_transaction` is wrong). Stellar payins that never complete on development are a known issue on BlindPay's side. `token`, `updated_at` and a payout's `sender_amount` are used when present, never required.
+- **Refunds on Stellar**: never automatic. BlindPay's team sends them to `refund_wallet_address` when it is set, otherwise to the sender wallet; a `failed` payout is not refunded until they do. On development the sentinel amounts only set the status, and no tokens come back. This matches the toolkit's rule: a failed or refunded leg goes to a person, and nothing is refunded or rerouted automatically.
+- **Payout `description`**: plan for 30 characters (letters, digits and hyphens) reaching the beneficiary. It is not in the payout webhooks; read it from `GET /payouts/{id}`. Payins have nothing similar yet.
+- **Minimum payout**: 10 USD.
+
+## Still unconfirmed
+
+- **Quote lifetime limit**: quotes expiring more than `maxQuoteTtlMs` (default one hour) ahead are refused. BlindPay's quotes last 5 minutes, well inside it.
 - **Fee currency on quotes**: not stated, so `LegQuote.fees` is left empty rather than guessed.
 - **Webhook firing rules** conflict between pages: the adapter reads the `status` field, never the event name.
 
