@@ -1,0 +1,147 @@
+/**
+ * Client configuration. Everything is passed in by the application: the
+ * library never reads environment variables. BlindPay has no separate sandbox
+ * host; the instance behind the API key decides development or production.
+ */
+import { InvalidConfigError, type Logger, type OnPartnerCall, noopLogger } from '@vindu/grid-core';
+
+
+/** Default partner id in leg refs, quotes, errors and `onCall` reports. Override with `partnerId`. */
+export const BLINDPAY_PARTNER_ID = 'blindpay';
+export const DEFAULT_BASE_URL = 'https://api.blindpay.com';
+export const DEFAULT_TIMEOUT_MS = 30_000;
+/** Largest response body read by default: 1 MiB. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
+
+export interface BlindPayConfig {
+  /** Secret API key, scoped to one instance. Never logged, reported or put in errors. */
+  readonly apiKey: string;
+  /** Instance id, `in_...`. */
+  readonly instanceId: string;
+  /**
+   * Partner id in errors and `onCall` reports. Default {@link BLINDPAY_PARTNER_ID}.
+   * The adapter sets it to its own `partnerId` when it builds the client.
+   */
+  readonly partnerId?: string;
+  /** Defaults to {@link DEFAULT_BASE_URL}. */
+  readonly baseUrl?: string;
+  /** Defaults to the global `fetch`. Inject a mock in tests. */
+  readonly fetch?: FetchLike;
+  readonly logger?: Logger;
+  /** Called once per HTTP call with metadata only (method, path, status, timing, ids). */
+  readonly onCall?: OnPartnerCall;
+  /** Per-request timeout. Defaults to {@link DEFAULT_TIMEOUT_MS}. */
+  readonly timeoutMs?: number;
+  /**
+   * Largest response body read, in bytes. Defaults to
+   * {@link DEFAULT_MAX_RESPONSE_BYTES} (1 MiB). A larger body, or a declared
+   * `Content-Length` above it, stops the read and fails the call with code
+   * `response_too_large`. On a 2xx that error is not retryable as is: the
+   * call may have taken effect, so look the resource up, or replay a create
+   * with the same idempotency key and body.
+   */
+  readonly maxResponseBytes?: number;
+  /** Clock in epoch milliseconds. Defaults to `Date.now`. */
+  readonly now?: () => number;
+  /**
+   * Debug only. When true, a failed call keeps a capped excerpt of BlindPay's
+   * error response in `bodySnippet`. BlindPay may echo request data there, so
+   * the excerpt can hold client data (names, tax ids, bank details): never
+   * turn this on where errors reach logs or error trackers. Default false:
+   * errors carry the status, BlindPay's error code and the idempotency key only.
+   */
+  readonly includeErrorBodies?: boolean;
+}
+
+/** Validated config with defaults applied. The API key stays out of it on purpose. */
+export interface ResolvedConfig {
+  readonly partnerId: string;
+  readonly instanceId: string;
+  readonly baseUrl: string;
+  readonly fetch: FetchLike;
+  readonly logger: Logger;
+  readonly onCall: OnPartnerCall | undefined;
+  readonly timeoutMs: number;
+  readonly maxResponseBytes: number;
+  readonly now: () => number;
+  readonly includeErrorBodies: boolean;
+}
+
+const INSTANCE_ID_RE = /^in_[A-Za-z0-9]+$/;
+const PARTNER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
+/** Throws {@link InvalidConfigError} unless `partnerId` is 1 to 64 letters, digits, `_`, `.` or `-`. */
+export function assertPartnerId(partnerId: unknown): string {
+  if (typeof partnerId !== 'string' || !PARTNER_ID_RE.test(partnerId)) {
+    throw new InvalidConfigError('partnerId must be 1 to 64 letters, digits, _, . or -');
+  }
+  return partnerId;
+}
+// Header-safe token: rejects whitespace and control characters without echoing the value.
+const API_KEY_RE = /^[\x21-\x7e]+$/;
+
+/** Validates the config. Returns the resolved settings and the API key separately. */
+export function resolveConfig(config: BlindPayConfig): { resolved: ResolvedConfig; apiKey: string } {
+  if (typeof config.apiKey !== 'string' || !API_KEY_RE.test(config.apiKey)) {
+    throw new InvalidConfigError('apiKey must be a non-empty string without spaces');
+  }
+  if (typeof config.instanceId !== 'string' || !INSTANCE_ID_RE.test(config.instanceId)) {
+    throw new InvalidConfigError('instanceId must look like in_...');
+  }
+  const partnerId = assertPartnerId(config.partnerId ?? BLINDPAY_PARTNER_ID);
+  const baseUrl = parseBaseUrl(config.baseUrl ?? DEFAULT_BASE_URL);
+  const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new InvalidConfigError('timeoutMs must be a positive integer');
+  }
+  const maxResponseBytes = config.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+    throw new InvalidConfigError('maxResponseBytes must be a positive integer');
+  }
+  const fetchImpl = config.fetch ?? globalThis.fetch;
+  if (typeof fetchImpl !== 'function') {
+    throw new InvalidConfigError('No fetch implementation: pass config.fetch');
+  }
+  return {
+    apiKey: config.apiKey,
+    resolved: {
+      partnerId,
+      instanceId: config.instanceId,
+      baseUrl,
+      fetch: fetchImpl,
+      logger: config.logger ?? noopLogger,
+      onCall: config.onCall,
+      timeoutMs,
+      maxResponseBytes,
+      now: config.now ?? Date.now,
+      includeErrorBodies: config.includeErrorBodies === true,
+    },
+  };
+}
+
+function parseBaseUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new InvalidConfigError('baseUrl is not a valid URL');
+  }
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback(url.hostname))) {
+    // Plain http would send the API key in clear text; only a local mock may use it.
+    throw new InvalidConfigError('baseUrl must use https; http is allowed only for localhost, 127.0.0.0/8 or ::1');
+  }
+  if (url.search !== '' || url.hash !== '' || url.username !== '' || url.password !== '') {
+    throw new InvalidConfigError('baseUrl must not carry a query, fragment or credentials');
+  }
+  return url.toString().replace(/\/+$/, '');
+}
+
+/** `localhost`, `127.0.0.0/8` or `::1`: the only hosts plain http may reach. */
+function isLoopback(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host === '[::1]') return true;
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  return m !== null && m.slice(1).every((part) => Number(part) <= 255);
+}

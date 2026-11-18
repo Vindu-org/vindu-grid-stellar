@@ -1,0 +1,15 @@
+# gitleaks configuration: the default rules, plus an allowlist of the exact
+# fake values the tests and docs use to prove that secrets are filtered out.
+# Only these literal strings are allowed; anything else still fails the scan.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake key-shaped fixtures used by tests and docs"
+regexTarget = "match"
+regexes = [
+  '''sk_live_SECRET123''',
+  '''sk_live_abc123def456''',
+  '''bp_test_SECRET_KEY_0123456789abcdef''',
+]
